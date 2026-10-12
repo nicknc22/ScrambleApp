@@ -126,7 +126,7 @@ export async function readLocalPhoto(path: string): Promise<Uint8Array<ArrayBuff
   const file = localPhotoFile(path);
   if (!file) return null;
   try {
-    return new Uint8Array(await fs.readFile(file));
+    return new Uint8Array(await fs.readFile(/*turbopackIgnore: true*/ file));
   } catch {
     return null;
   }

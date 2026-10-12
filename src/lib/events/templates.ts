@@ -145,7 +145,7 @@ interface GroomC { g: string; h: number; team: string }
 const GROOM: V<GroomC> = [
   (c) => `${c.g} has invoked the Groom's Mulligan on hole ${c.h}. That shot never happened. Kneel.`,
   (c) => `By royal decree, ${c.g} gets a do-over on hole ${c.h}. The previous shot has been executed for treason.`,
-  (c) => `The crown has spoken: Groom's Mulligan on hole ${c.h}. ${c.team} rides with royalty.`,
+  (c) => `The crown has spoken: ${c.g} takes the Groom's Mulligan on hole ${c.h}. ${c.team} rides with royalty.`,
   (c) => `${c.g} pulled the one-time-only Groom's Mulligan on hole ${c.h}. History will remember this. Nobody else gets one.`,
   (c) => `ALL RISE. ${c.g} burns the Groom's Mulligan on hole ${c.h}. The golf gods have been overruled.`,
 ];
@@ -249,7 +249,7 @@ const DRIVE_HARD: V<DriveC> = [
 const DRIVE_IMPOSSIBLE: V<DriveC> = [
   (c) => `${c.team} is mathematically cooked on the ${c.nine}: ${c.names} ${c.need} drives and only ${c.rem} ${c.holes} remain. Commissioner's problem now.`,
   (c) => `It's over for ${c.team}'s drive minimum on the ${c.nine}. ${c.names} won't all get a drive in. Somebody wasn't counting.`,
-  (c) => `${c.team} can't make the drive minimum on the ${c.nine} anymore: ${c.short} short with ${c.rem} ${c.holes} left. Bold strategy.`,
+  (c) => `${c.team} can't make the drive minimum on the ${c.nine} anymore: ${c.short} short with ${c.rem} ${c.holes} left, and ${c.names} still ${c.need} one. Bold strategy.`,
   (c) => `Drive minimum: impossible. ${c.team} left ${c.names} on the bench too long on the ${c.nine}.`,
 ];
 

@@ -342,13 +342,23 @@ function eventsForStep(ctx: Ctx, step: OpStep): void {
   if (A.team_round_state !== B.team_round_state) completions(ctx, step, actor);
 }
 
+/**
+ * The commissioner used override powers: an explicit override, a commissioner-only op, or an op
+ * only the commissioner may do in this situation (changing pot opt-outs once the round started,
+ * deleting somebody else's feed item) even if the client didn't flag it.
+ */
 function isCommissionerOverride(step: OpStep): boolean {
   const { op, before } = step;
-  if (!step.is_commissioner) return false;
-  if (!op.as_commissioner && !COMMISSIONER_ONLY_OPS.has(op.type)) return false;
-  if (NO_OVERRIDE_OPS.has(op.type)) return false;
+  if (!step.is_commissioner || NO_OVERRIDE_OPS.has(op.type)) return false;
   // Setup-phase edits are just setup.
-  return before.trip.status === "live" || before.trip.status === "final";
+  if (before.trip.status !== "live" && before.trip.status !== "final") return false;
+  if (op.as_commissioner || COMMISSIONER_ONLY_OPS.has(op.type)) return true;
+  if (op.type === "pot.optout") return true; // players can only opt out during setup
+  if (op.type === "feed.delete") {
+    const ev = before.feed_events.find((e) => e.id === op.event_id);
+    return !!ev && !(ev.type === "post" && ev.player_id !== null && ev.player_id === op.by);
+  }
+  return false;
 }
 
 function tripTransition(ctx: Ctx, step: OpStep, actor: UUID | null): void {
@@ -979,7 +989,7 @@ function overrideSummary(op: Op, B: TripState, A: TripState): OverrideSummary | 
       if (!ev) return null;
       return ev.type === "post"
         ? res(`deleted a post by ${P(ev.player_id)}`, ev.team_id, ev.player_id)
-        : res("deleted a feed item", ev.team_id, null);
+        : res(`deleted ${ev.team_id ? `${T(ev.team_id)}'s` : "a"} ${ev.type.replace(/_/g, " ")} post`, ev.team_id, null);
     }
     case "pot.optout": {
       const pot = op.pot_key === "team_match" ? "team match pot" : `hole ${op.pot_key.slice("contest:".length)} contest pot`;

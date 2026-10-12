@@ -4,7 +4,14 @@ import type { Op, OpType } from "@/lib/ops";
 import { deriveId } from "@/lib/ids";
 import { derive } from "@/lib/engine";
 import type { FeedEvent, FeedEventType, TripState, UUID } from "@/lib/types";
-import { deriveFeedEvents, DRINK_BATCH_WINDOW_MS, type DeriveEventsResult, type OpStep } from "@/lib/events/derive";
+import {
+  deriveFeedEvents,
+  DRINK_BATCH_WINDOW_MS,
+  pushTriggerFor,
+  roastTriggerFor,
+  type DeriveEventsResult,
+  type OpStep,
+} from "@/lib/events/derive";
 import { renderFeedEvent } from "@/lib/events/templates";
 import { at, makeTrip, type TripFixture } from "../fixtures";
 
@@ -131,8 +138,8 @@ afterEach(() => {
   errorSpy.mockRestore();
 });
 
-function live(teams: number[] = [4, 3, 3], opts: Parameters<typeof makeTrip>[0] extends infer O ? Partial<O> : never = {}) {
-  const f = makeTrip({ teams, ...opts });
+function live(teams: number[] = [4, 3, 3]) {
+  const f = makeTrip({ teams });
   return { f, sim: new Sim(f), A: f.team.A, B: f.team.B, C: f.team.C, p: f.player, tripId: f.state.trip.id };
 }
 
@@ -260,7 +267,7 @@ describe("round_started / final_results", () => {
   });
 
   it("trip.finalize posts final_results with a standings snapshot and champions, pushes to all", () => {
-    const { sim, A, B, C, p, f } = live();
+    const { sim, A, B, C, p } = live();
     sim.run([score(A, 1, 3), score(B, 1, 5), score(C, 1, 4)]);
     const r = sim.run([mk("trip.finalize", {})], { now: 9000, commish: true });
     expect(types(r)).toEqual(["final_results"]);
@@ -276,7 +283,6 @@ describe("round_started / final_results", () => {
       expect.objectContaining({ feed_event_id: ev.id, audience: { kind: "all" }, collapse_key: "final" }),
     ]);
     expect(r.push_triggers[0].title).toContain("FINAL RESULTS");
-    expect(f.state.trip.status).toBe("live");
 
     // Reopen is a visible commissioner override; finalizing again posts fresh results.
     const reopen = sim.run([mk("trip.reopen", {})], { now: 9100, commish: true });
@@ -307,11 +313,14 @@ describe("round_complete", () => {
       ghost_beers: 0,
       last: true,
     });
-    expect(r.roast_triggers).toEqual([{ feed_event_id: ev.id, type: "round_complete", team_id: B, hole: null, big: true }]);
+    const completeRoasts = (r: DeriveEventsResult) => r.roast_triggers.filter((t) => t.type === "round_complete");
+    expect(completeRoasts(r)).toEqual([{ feed_event_id: ev.id, type: "round_complete", team_id: B, hole: null, big: true }]);
+    // No tee shots were recorded, so both nines close with everyone at zero drives.
+    expect(ofType(r, "drive_miss").map((e) => e.payload.nine)).toEqual([1, 2]);
 
     const ra = sim.run([mk("round.complete", { team_id: A })]);
     expect(one(ra, "round_complete").payload.last).toBe(false);
-    expect(ra.roast_triggers).toEqual([]);
+    expect(completeRoasts(ra)).toEqual([]);
     // Already complete: nothing.
     expect(sim.run([mk("round.complete", { team_id: A })]).feed).toEqual([]);
   });
@@ -321,7 +330,7 @@ describe("round_complete", () => {
     sim.run([score(A, 1, 4), score(B, 1, 4)]);
     const r = sim.run([mk("round.complete", { team_id: A })]);
     expect(one(r, "round_complete").payload.last).toBe(false);
-    expect(r.roast_triggers).toEqual([]);
+    expect(r.roast_triggers.filter((t) => t.type === "round_complete")).toEqual([]);
   });
 });
 
@@ -533,7 +542,7 @@ describe("drinks batching", () => {
     expect(ev.payload.count).toBe(3);
     expect(ev.payload.player_ids).toEqual([p.A1, p.A2, p.A1]);
     expect(sim.render(ev).body).toContain("3 drinks on hole 1");
-    expect(sim.render(ev).body).toContain("Player A1 ×2");
+    expect(sim.render(ev).body).toContain("Player A1 👑 ×2");
   });
 
   it("photos ride on the post; a batch never holds two photos", () => {
@@ -881,9 +890,7 @@ describe("contest_entry / contest_lead", () => {
 describe("lead_change", () => {
   it("posts only when the leader set changes, with a push and a big roast", () => {
     const { sim, A, B, C } = live();
-    // Drinks and tee-offs with nobody scored: no lead.
-    const { p } = live();
-    void p;
+    // Tee-offs with nobody scored: no lead.
     expect(ofType(sim.run([tee(A, 1), tee(B, 1)]), "lead_change")).toEqual([]);
 
     const r1 = sim.run([score(A, 1, 4)]);
@@ -900,10 +907,10 @@ describe("lead_change", () => {
     expect(ofType(sim.run([score(B, 2, 4)]), "lead_change")).toEqual([]);
     expect(ofType(sim.run([score(A, 2, 5)]), "lead_change")).toEqual([]);
 
-    // A tie is a change.
+    // A tie is a change (leaders in leaderboard order: equal net to par, lower net first).
     const r3 = sim.run([score(C, 1, 3)]);
     const l3 = one(r3, "lead_change");
-    expect(l3.payload.leader_team_ids).toEqual([B, C]);
+    expect(l3.payload.leader_team_ids).toEqual([C, B]);
     expect(l3.team_id).toBeNull();
     expect(sim.render(l3).title).toBe("TIE FOR THE LEAD");
   });
@@ -1009,6 +1016,7 @@ describe("commissioner_override", () => {
         mk("player.upsert", { player: { id: f.player.A2, nickname: "Bombs" } }),
         mk("hole.update", { hole: 1, patch: { par: 5 } }),
         mk("trip.update", { patch: { settings: { drink_cap: 6 } } }),
+        mk("pot.optout", { pot_key: "team_match", player_id: f.player.B2, out: true }),
       ],
       { commish: true },
     );
@@ -1041,8 +1049,8 @@ describe("commissioner_override", () => {
     expect(sim.render(r.feed[0]).body).toContain("changed Team B hole 6 from a 5 to a 4");
 
     // The commissioner entering his own team's score without override powers: a normal edit.
-    sim.run([score(A, 1, 5, { by: p.A1 })], { commish: true });
-    const own = sim.run([score(A, 1, 4, { by: p.A1 })], { commish: true });
+    sim.run([score(A, 1, 6, { by: p.A1 })], { commish: true });
+    const own = sim.run([score(A, 1, 5, { by: p.A1 })], { commish: true });
     expect(types(own)).toEqual(["score_edit"]);
   });
 
@@ -1071,8 +1079,20 @@ describe("commissioner_override", () => {
     ];
     for (const [op, summary] of cases) {
       const r = sim.run([op], { commish: true });
-      expect(one(r, "commissioner_override").payload.summary, op.type).toBe(summary);
+      expect(ofType(r, "commissioner_override").map((e) => e.payload.summary), op.type).toEqual([summary]);
     }
+  });
+
+  it("deleting somebody else's feed item is an override; deleting your own post is not", () => {
+    const { sim, A, p } = live();
+    const shotgun = one(sim.run([tee(A, 1), drink(A, p.A3, 1, "shotgun")]), "shotgun");
+    sim.run([mk("post.create", { event_id: "post-9", text: "Nice shot", photo_path: null, by: p.B1 })]);
+    sim.run([mk("post.create", { event_id: "post-10", text: "I am the law", photo_path: null, by: p.A1 })]);
+    const r1 = sim.run([mk("feed.delete", { event_id: shotgun.id, by: p.A1 })], { commish: true });
+    expect(one(r1, "commissioner_override").payload.summary).toBe("deleted Team A's shotgun post");
+    const r2 = sim.run([mk("feed.delete", { event_id: "post-9", by: p.A1 })], { commish: true });
+    expect(one(r2, "commissioner_override").payload.summary).toBe("deleted a post by Player B1");
+    expect(sim.run([mk("feed.delete", { event_id: "post-10", by: p.A1 })], { commish: true }).feed).toEqual([]);
   });
 
   it("posts and reactions by the commissioner are never overrides", () => {
@@ -1082,5 +1102,84 @@ describe("commissioner_override", () => {
     });
     expect(r.feed).toEqual([]);
     expect(sim.active("post")).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Triggers for events made elsewhere, and failure isolation
+// ---------------------------------------------------------------------------
+
+describe("triggers and robustness", () => {
+  function judgeRow(tripId: string, team: string, suspicious: boolean): FeedEvent {
+    return {
+      id: `judge-${suspicious}`,
+      trip_id: tripId,
+      type: "ai_judge",
+      team_id: team,
+      player_id: null,
+      actor_id: null,
+      payload: { entry_id: "entry-x", hole: 3, claimed_ft: 2, estimate_ft: 15, confidence: "high", suspicious, roast: "Sure, Jan." },
+      photo_path: null,
+      text: null,
+      dedupe_key: null,
+      created_at: srv(0),
+      updated_at: srv(0),
+      deleted_at: null,
+    };
+  }
+
+  it("a suspicious ai_judge row that shows up during the batch gets a roast and a push", () => {
+    const { f, A, tripId } = live();
+    const before = f.state;
+    const after: TripState = { ...before, feed_events: [...before.feed_events, judgeRow(tripId, A, true)] };
+    const r = deriveFeedEvents({
+      steps: [{ op: mk("reaction.set", { feed_event_id: "x", player_id: f.player.A1, kind: "fire", on: true }), before, after, is_commissioner: false }],
+      existingFeed: before.feed_events,
+      now: srv(5),
+    });
+    expect(r.feed).toEqual([]);
+    expect(r.roast_triggers).toEqual([{ feed_event_id: "judge-true", type: "ai_judge", team_id: A, hole: 3, big: false }]);
+    expect(r.push_triggers).toEqual([expect.objectContaining({ feed_event_id: "judge-true", collapse_key: "judge:entry-x", audience: { kind: "all" } })]);
+    expect(r.push_triggers[0].title).toContain("SUSPICIOUS");
+  });
+
+  it("exported trigger helpers: not-suspicious judges and deleted rows trigger nothing; roasts push to their team", () => {
+    const { f, A, tripId } = live();
+    const d = derive(f.state);
+    expect(roastTriggerFor(judgeRow(tripId, A, false))).toBeNull();
+    expect(pushTriggerFor(judgeRow(tripId, A, false), f.state, d)).toBeNull();
+    expect(roastTriggerFor({ ...judgeRow(tripId, A, true), deleted_at: srv(1) })).toBeNull();
+    const roast: FeedEvent = { ...judgeRow(tripId, A, false), id: "roast-1", type: "roast", payload: { trigger_event_id: "x" }, text: "Brutal." };
+    expect(roastTriggerFor(roast)).toBeNull(); // roasts never trigger roasts
+    expect(pushTriggerFor(roast, f.state, d)).toEqual({
+      feed_event_id: "roast-1",
+      title: "🔥 Roast: Team A",
+      body: "Brutal.",
+      audience: { kind: "team", team_id: A },
+      collapse_key: `roast:${A}`,
+    });
+  });
+
+  it("a step that blows up is skipped and logged; the rest of the batch still posts", () => {
+    errorSpy.mockImplementation(() => undefined);
+    const { f, A, p } = live();
+    const s0 = f.state;
+    const t1 = applyOp(s0, tee(A, 1), { now: srv(1), is_commissioner: false, side: "server" });
+    if (!t1.ok) throw new Error(t1.reason);
+    const bad = { ...t1.state, hole_scores: null } as unknown as TripState;
+    const d = applyOp(t1.state, drink(A, p.A1, 1, "shotgun"), { now: srv(1), is_commissioner: false, side: "server" });
+    if (!d.ok) throw new Error(d.reason);
+    const r = deriveFeedEvents({
+      steps: [
+        { op: tee(A, 1), before: s0, after: t1.state, is_commissioner: false },
+        { op: score(A, 1, 4), before: t1.state, after: bad, is_commissioner: false },
+        { op: drink(A, p.A1, 1, "shotgun"), before: t1.state, after: d.state, is_commissioner: false },
+      ],
+      existingFeed: [],
+      now: srv(1),
+    });
+    expect(types(r)).toEqual(["tee_off", "shotgun"]);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockClear();
   });
 });

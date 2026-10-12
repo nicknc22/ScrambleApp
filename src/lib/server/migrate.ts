@@ -43,13 +43,16 @@ export function loadMigrations(dir: string = migrationsDir()): Migration[] {
   for (const m of embeddedMigrations()) byVersion.set(m.version, m);
   let files: string[] = [];
   try {
-    files = fs.readdirSync(dir).filter((f) => /^\d+_[\w-]+\.sql$/.test(f));
+    // The folder is optional at runtime (embedded fallback), so the magic comments tell
+    // Turbopack not to trace these dynamic reads (which would bundle the whole project).
+    files = fs.readdirSync(/*turbopackIgnore: true*/ dir).filter((f) => /^\d+_[\w-]+\.sql$/.test(f));
   } catch {
     files = []; // no folder in this bundle: embedded copies only
   }
   for (const f of files) {
     try {
-      byVersion.set(f.slice(0, -4), { version: f.slice(0, -4), sql: fs.readFileSync(path.join(dir, f), "utf8") });
+      const file = path.join(/*turbopackIgnore: true*/ dir, f);
+      byVersion.set(f.slice(0, -4), { version: f.slice(0, -4), sql: fs.readFileSync(/*turbopackIgnore: true*/ file, "utf8") });
     } catch {
       /* unreadable file: fall back to the embedded copy if there is one */
     }

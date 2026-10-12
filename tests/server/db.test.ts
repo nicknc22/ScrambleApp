@@ -167,7 +167,7 @@ describe("normalization", () => {
   it("normalizeValue/normalizeRow handle the driver types", () => {
     expect(normalizeValue(new Date("2026-01-01T00:00:00Z"))).toBe("2026-01-01T00:00:00.000Z");
     expect(normalizeValue(new Date("nope"))).toBeNull();
-    expect(normalizeValue(5n)).toBe(5);
+    expect(normalizeValue(BigInt(5))).toBe(5);
     expect(normalizeValue([new Date(0)])).toEqual(["1970-01-01T00:00:00.000Z"]);
     expect(normalizeRow({ a: 1, b: null, c: { d: 1 } })).toEqual({ a: 1, b: null, c: { d: 1 } });
   });
