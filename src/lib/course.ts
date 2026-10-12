@@ -41,5 +41,5 @@ export function contestForPar(par: number): HoleContest {
   return "none";
 }
 
-/** Rough center of the course, for the satellite map's initial view. */
-export const JACK_FROST_CENTER = { lat: 41.0954, lng: -75.6716 };
+/** Jack Frost National Golf Club (OpenStreetMap node 7200997832), for the satellite map's initial view. */
+export const JACK_FROST_CENTER = { lat: 41.0948, lng: -75.648 };

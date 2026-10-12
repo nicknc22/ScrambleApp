@@ -1,26 +1,363 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/*
+ * Scramble design tokens. Light theme only, very high contrast: this runs on phones in
+ * direct sunlight. Tokens become Tailwind utilities (bg-fairway, text-ink, border-line...).
+ * Rule of thumb: important text is ink or muted (both AA+ on white); colored fills carry
+ * white text except hazard and beer, which carry ink.
+ */
+@theme {
+  --color-ink: #0b0f0c;
+  --color-paper: #ffffff;
+  --color-muted: #3f4a43;
+  --color-line: #c3ccc6;
+  --color-line-strong: #8a968f;
+  --color-sand: #f2f4f1;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --color-fairway: #0a7d3e;
+  --color-fairway-dark: #075c2d;
+  --color-fairway-soft: #e2f3e8;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  --color-hazard: #ffd60a;
+  --color-hazard-dark: #e0b800;
+  --color-hazard-soft: #fff5bf;
+
+  --color-flag: #e5262d;
+  --color-flag-dark: #b5161c;
+  --color-flag-soft: #fde3e3;
+
+  --color-ghost: #7c3aed;
+  --color-ghost-dark: #5b21b6;
+  --color-ghost-soft: #efe6fe;
+
+  --color-beer: #f59e0b;
+  --color-beer-dark: #b45309;
+  --color-beer-soft: #fef0d2;
+
+  --color-sky: #0369a1;
+  --color-sky-dark: #075985;
+  --color-sky-soft: #def0fa;
+
+  --color-gold: #f5c518;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", system-ui, Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro", system-ui, Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --animate-pop: pop 260ms cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+  --animate-fade-in: fade-in 180ms ease-out both;
+  --animate-sheet-up: sheet-up 260ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  --animate-toast-in: toast-in 240ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+  --animate-shake: shake 420ms ease-in-out both;
+  --animate-pulse-ring: pulse-ring 1.6s ease-out infinite;
+  --animate-wiggle: wiggle 1.2s ease-in-out infinite;
+  --animate-bounce-in: bounce-in 700ms cubic-bezier(0.2, 0.9, 0.3, 1.5) both;
+  --animate-float: float 2.4s ease-in-out infinite;
+
+  @keyframes pop {
+    0% { transform: scale(0.6); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes sheet-up {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+  @keyframes toast-in {
+    from { transform: translateY(24px) scale(0.96); opacity: 0; }
+    to { transform: translateY(0) scale(1); opacity: 1; }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-10px); }
+    40% { transform: translateX(10px); }
+    60% { transform: translateX(-6px); }
+    80% { transform: translateX(6px); }
+  }
+  @keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 rgb(10 125 62 / 0.55); }
+    70% { box-shadow: 0 0 0 14px rgb(10 125 62 / 0); }
+    100% { box-shadow: 0 0 0 0 rgb(10 125 62 / 0); }
+  }
+  @keyframes wiggle {
+    0%, 100% { transform: rotate(-4deg); }
+    50% { transform: rotate(4deg); }
+  }
+  @keyframes bounce-in {
+    0% { transform: scale(0.2) rotate(-18deg); opacity: 0; }
+    55% { transform: scale(1.18) rotate(6deg); opacity: 1; }
+    75% { transform: scale(0.94) rotate(-2deg); }
+    100% { transform: scale(1) rotate(0); }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ---------- Base ---------- */
+@layer base {
+  :root {
+    color-scheme: light;
+    /* Height of the bottom tab bar (without the safe-area inset). Toasts float above it. */
+    --tabbar-h: 68px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+    background: var(--color-paper);
+  }
+
+  body {
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 17px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    font-weight: 900;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+  }
+
+  button, [role="button"], a, label, summary {
+    touch-action: manipulation;
+  }
+
+  button:not(:disabled), [role="button"], summary {
+    cursor: pointer;
+  }
+
+  /* iOS zooms into inputs under 16px. Never let that happen. */
+  input, select, textarea {
+    font-size: max(16px, 1em);
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--color-sky);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--color-hazard);
+    color: var(--color-ink);
+  }
+}
+
+/* ---------- Utilities ---------- */
+
+/* Loud moments: heavy, italic, uppercase, condensed where the system font allows it. */
+@utility loud {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-style: italic;
+  text-transform: uppercase;
+  letter-spacing: -0.01em;
+  font-stretch: condensed;
+  line-height: 0.95;
+}
+
+/* Tabular numbers for scores, money and counters. */
+@utility num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+@utility tap {
+  min-height: 48px;
+  min-width: 48px;
+}
+
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@utility px-gutter {
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+/* Space under the main column so the fixed tab bar never covers content. */
+@utility pb-tabbar {
+  padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 24px);
+}
+
+/* Big button base. Colors come from the Button component (or add bg-/text- yourself). */
+@utility btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 48px;
+  padding: 0 1.125rem;
+  border-radius: 14px;
+  border: 2px solid transparent;
+  font-weight: 800;
+  line-height: 1.1;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: transform 90ms ease-out, background-color 120ms, box-shadow 120ms;
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+@utility btn-lg {
+  min-height: 56px;
+  font-size: 1.125rem;
+  border-radius: 16px;
+}
+@utility btn-xl {
+  min-height: 64px;
+  font-size: 1.3rem;
+  border-radius: 18px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
+}
+
+/* Solid drop shadow for the "sticker" look on primary actions. */
+@utility shadow-hard {
+  box-shadow: 0 4px 0 0 var(--color-ink);
+}
+@utility shadow-hard-sm {
+  box-shadow: 0 3px 0 0 var(--color-ink);
+}
+
+/* Hide scrollbars on horizontally scrolling strips (still scrollable). */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* ---------- Components that need real CSS (keyframes with variables) ---------- */
+
+/* Toast undo countdown: a bar that drains over --toast-dur. Informational, so it keeps
+   running under reduced motion (see below). */
+.toast-countdown {
+  transform-origin: left center;
+  animation: toast-drain var(--toast-dur, 10s) linear forwards;
+}
+@keyframes toast-drain {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
+/* Fanfare confetti: each piece falls from above with its own drift/spin. */
+.confetti-piece {
+  position: absolute;
+  top: -6vh;
+  width: 10px;
+  height: 16px;
+  border-radius: 2px;
+  opacity: 0;
+  animation: confetti-fall var(--fall-dur, 2.6s) cubic-bezier(0.25, 0.6, 0.4, 1) var(--fall-delay, 0s) forwards;
+}
+@keyframes confetti-fall {
+  0% { transform: translate3d(0, 0, 0) rotate(0deg); opacity: 1; }
+  100% { transform: translate3d(var(--drift, 0px), 112vh, 0) rotate(var(--spin, 720deg)); opacity: 1; }
+}
+
+/* Fanfare emoji burst: pieces fly out from the center. */
+.burst-piece {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  font-size: var(--size, 40px);
+  line-height: 1;
+  opacity: 0;
+  animation: burst-out 1.5s cubic-bezier(0.1, 0.8, 0.3, 1) var(--delay, 0s) forwards;
+}
+@keyframes burst-out {
+  0% { transform: translate(-50%, -50%) scale(0.3) rotate(0deg); opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% + var(--dy, 0px))) scale(1.2) rotate(var(--rot, 90deg)); opacity: 0; }
+}
+
+/* Groom's Mulligan rays: a rotating conic gradient behind everything. */
+.fanfare-rays {
+  position: absolute;
+  inset: -50%;
+  background: repeating-conic-gradient(from 0deg, rgb(245 197 24 / 0.28) 0deg 10deg, transparent 10deg 20deg);
+  animation: rays-spin 9s linear infinite;
+}
+@keyframes rays-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Screen shake for the groom. */
+.fanfare-quake {
+  animation: quake 0.5s ease-in-out 0.15s 3 both;
+}
+@keyframes quake {
+  0%, 100% { transform: translate(0, 0) rotate(0); }
+  20% { transform: translate(-8px, 4px) rotate(-1.5deg); }
+  40% { transform: translate(8px, -4px) rotate(1.5deg); }
+  60% { transform: translate(-6px, -2px) rotate(-1deg); }
+  80% { transform: translate(6px, 2px) rotate(1deg); }
+}
+
+/* Glowing, flashing gold text for the groom. */
+.groom-text {
+  color: var(--color-gold);
+  text-shadow: 0 0 2px #000, 0 4px 0 #000, 0 0 24px rgb(245 197 24 / 0.9), 0 0 60px rgb(245 197 24 / 0.6);
+  -webkit-text-stroke: 2px #000;
+  paint-order: stroke fill;
+  animation: groom-flash 0.6s steps(2, jump-none) 4;
+}
+@keyframes groom-flash {
+  0% { color: var(--color-gold); }
+  100% { color: #ffffff; }
+}
+
+/* Marquee border lights around the groom fanfare. */
+.groom-lights {
+  position: absolute;
+  inset: 10px;
+  border-radius: 28px;
+  border: 6px dashed var(--color-gold);
+  animation: lights 0.35s steps(2, jump-none) infinite;
+}
+@keyframes lights {
+  0% { border-color: var(--color-gold); }
+  100% { border-color: #ffffff; }
+}
+
+/* ---------- Reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* Keep the undo countdown honest: it is information, not decoration. */
+  .toast-countdown {
+    animation-duration: var(--toast-dur, 10s) !important;
+  }
+  .confetti-piece, .burst-piece, .fanfare-rays, .groom-lights {
+    display: none !important;
+  }
 }
