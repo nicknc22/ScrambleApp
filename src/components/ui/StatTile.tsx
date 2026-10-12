@@ -29,10 +29,10 @@ export function StatTile({
   className?: string;
 }) {
   return (
-    <div className={cx("flex min-w-0 flex-col rounded-2xl border-2 px-3 py-2.5", TONE[tone], className)}>
-      <span className="truncate text-xs font-extrabold uppercase tracking-wider opacity-90">{label}</span>
-      <span className="num truncate text-3xl font-black leading-tight">{value}</span>
-      {sub && <span className="truncate text-sm font-bold opacity-90">{sub}</span>}
+    <div className={cx("flex min-w-0 flex-col rounded-2xl border-2 px-2.5 py-2", TONE[tone], className)}>
+      <span className="text-[11px] leading-tight font-extrabold tracking-wide uppercase [overflow-wrap:anywhere]">{label}</span>
+      <span className="num truncate text-[clamp(1.4rem,7vw,1.875rem)] leading-tight font-black">{value}</span>
+      {sub && <span className="text-sm leading-tight font-bold [overflow-wrap:anywhere]">{sub}</span>}
     </div>
   );
 }

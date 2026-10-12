@@ -250,6 +250,43 @@ describe("derive — resilience", () => {
   });
 });
 
+describe("derive — wiring of the secondary views", () => {
+  it("passes contests the roster map, money the standings + contests, awards everything else", async () => {
+    vi.resetModules();
+    const contests = [{ hole: 3 }];
+    const money = { final: false, pots: [], ledger: [], payments: [], total_in_play_cents: 123 };
+    const awards = [{ key: "champions" }];
+    const computeContests = vi.fn(() => contests);
+    const computeMoney = vi.fn(() => money);
+    const computeAwards = vi.fn(() => awards);
+    vi.doMock("@/lib/engine/contests", () => ({ computeContests }));
+    vi.doMock("@/lib/engine/pots", () => ({ computeMoney }));
+    vi.doMock("@/lib/engine/awards", () => ({ computeAwards }));
+    const engine = await import("@/lib/engine");
+    const f = makeTrip({ teams: [4, 3] }).teeOff("A", 1).score("A", 1, 4);
+    const d = engine.derive(f.state, { strict: true });
+
+    expect(computeContests).toHaveBeenCalledWith(f.state, d.teamOfPlayer);
+    expect(computeMoney).toHaveBeenCalledWith(f.state, d.standings, contests, d.teamOfPlayer);
+    expect(computeAwards).toHaveBeenCalledTimes(1);
+    const [awardState, partial] = computeAwards.mock.calls[0] as unknown as [TripState, Record<string, unknown>];
+    expect(awardState).toBe(f.state);
+    expect(partial).not.toHaveProperty("awards");
+    expect(partial).not.toHaveProperty("computed_at");
+    expect(partial.standings).toBe(d.standings);
+    expect(partial.money).toBe(money);
+    expect(partial.drinkers).toBe(d.drinkers);
+    expect(d.contests).toBe(contests);
+    expect(d.money).toBe(money);
+    expect(d.awards).toBe(awards);
+
+    vi.doUnmock("@/lib/engine/contests");
+    vi.doUnmock("@/lib/engine/pots");
+    vi.doUnmock("@/lib/engine/awards");
+    vi.resetModules();
+  });
+});
+
 // Runs last: the full pipeline with contests, money and awards from their own modules.
 describe("derive — strict end to end (needs every engine module)", () => {
   it("derives a finished round without any module throwing", (ctx) => {

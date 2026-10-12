@@ -25,12 +25,15 @@ export function Avatar({
   player,
   teamSortOrder,
   size = "md",
+  showCrown = true,
   className,
 }: {
   player: NamedPlayer | null | undefined;
   /** Team sort_order for the color; null/undefined = no team (gray). */
   teamSortOrder?: number | null;
   size?: keyof typeof SIZE;
+  /** Crown badge for the groom (turn off when a PlayerName next to it already shows 👑). */
+  showCrown?: boolean;
   className?: string;
 }) {
   const c = teamColor(teamSortOrder);
@@ -42,7 +45,7 @@ export function Avatar({
       >
         {initials(displayName(player))}
       </span>
-      {player?.is_groom && (
+      {showCrown && player?.is_groom && (
         <span className="absolute -top-2.5 -right-1.5 rotate-12 text-base leading-none drop-shadow">👑</span>
       )}
     </span>

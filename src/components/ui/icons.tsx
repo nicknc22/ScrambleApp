@@ -68,13 +68,13 @@ export function IconTarget(p: IconProps) {
   );
 }
 
-/** Banknote: the Money tab. */
+/** Coin with a dollar sign: the Money tab. */
 export function IconMoney(p: IconProps) {
   return (
     <Svg {...p}>
-      <rect x="2" y="6" width="20" height="12" rx="2.5" />
-      <circle cx="12" cy="12" r="2.8" />
-      <path d="M6 9.5v5M18 9.5v5" />
+      <circle cx="12" cy="12" r="9.5" />
+      <path d="M15 9.2c-.5-1-1.6-1.7-3-1.7-1.8 0-3 .9-3 2.2 0 3.1 6.2 1.6 6.2 4.7 0 1.4-1.3 2.4-3.2 2.4-1.5 0-2.7-.7-3.2-1.8" strokeWidth={2.3} />
+      <path d="M12 5v2.5M12 16.5V19" strokeWidth={2.3} />
     </Svg>
   );
 }

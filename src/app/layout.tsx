@@ -12,6 +12,8 @@ export const metadata: Metadata = {
     statusBarStyle: "default",
   },
   formatDetection: { telephone: false, email: false, address: false },
+  // Next emits only "mobile-web-app-capable"; older iOS still keys standalone mode off this one.
+  other: { "apple-mobile-web-app-capable": "yes" },
 };
 
 export const viewport: Viewport = {
