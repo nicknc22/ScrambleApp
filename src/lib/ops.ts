@@ -52,6 +52,8 @@ export interface ScoreSetOp extends OpBase {
   team_id: UUID;
   hole: number;
   strokes: number;
+  /** Fill only if the hole has no strokes yet; never overwrites (used for an untouched par default). No-op if already scored. */
+  if_empty?: boolean;
 }
 
 /** Whose tee shot was used (LWW by `at`). null clears it. */

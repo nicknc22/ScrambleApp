@@ -280,6 +280,8 @@ export type FeedEventType =
   | "commissioner_override"
   | "round_complete" // a team finished
   | "final_results" // commissioner finalized
+  | "results_changed" // a late sync after finalize changed standings/payouts (loud notice)
+  | "removed" // someone other than the logger removed a drink / contest entry / mulligan (transparency)
   | "roast"; // AI roast (payload.trigger_event_id)
 
 export interface FeedEvent {
