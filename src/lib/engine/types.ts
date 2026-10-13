@@ -52,6 +52,11 @@ export interface DrinkValue {
   drink_id: UUID;
   team_id: UUID;
   player_id: UUID;
+  /**
+   * EFFECTIVE hole the drink is credited to (see effectiveDrinkHole in windows.ts): the hole whose
+   * window was open at logged_at per the team's hole_opened_at times, never earlier than the
+   * stamped hole; the stamped hole as-is when the commissioner moved it (moved_from_hole set).
+   */
   hole: number;
   type: DrinkType;
   /** credit(d) - credit(d-1) where credit(d) = floor(base * d / n). */
@@ -93,12 +98,16 @@ export interface StandingRow {
   /** "F" when complete with 18 scored, "–" when 0, else String(thru). */
   thru_label: string;
   gross: number;
-  /** Active drinks (all holes, including the open hole). */
+  /** Active drinks credited to SCORED holes (spec: round net = sum of hole nets). */
   drinks: number;
-  /** Sum of all drink credit (all holes, including the open hole). */
+  /** Drink credit on SCORED holes. */
   credit: number;
-  /** gross - credit */
+  /** gross - credit = sum of hole nets over scored holes. */
   net: number;
+  /** Drinks on holes without a score yet (normally the open hole) — shown as "banked", not in net. */
+  pending_drinks: number;
+  /** Credit on holes without a score yet. Joins net once the hole is scored. */
+  pending_credit: number;
   /** Sum of par over holes with strokes entered. */
   par_played: number;
   /** net - par_played. Sort key (equals sorting by net once everyone is thru 18). */
@@ -294,7 +303,7 @@ export interface Derived {
   teamHoles: Record<UUID, TeamHoleLine[]>;
   /** Sorted: started teams by net_to_par then name; not-started teams last. */
   standings: StandingRow[];
-  /** Team ids at pos 1 among teams with thru > 0. Empty before anyone scores. */
+  /** Team ids at pos 1 among teams with thru > 0. Empty before anyone scores. (Feed lead_change posts only when a SOLE leader changes.) */
   leaderTeamIds: UUID[];
   /** team_id -> hole whose drink window is open, null if none (not started / complete). */
   openWindow: Record<UUID, number | null>;

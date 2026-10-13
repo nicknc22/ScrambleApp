@@ -152,6 +152,9 @@ export function computeStandings(
       net_to_par: net - parPlayed,
       gross_to_par: gross - parPlayed,
       ghost_beers: tot.ghosts,
+      // Placeholder until the scored-holes-only standings land (see CLAUDE.md decisions).
+      pending_drinks: 0,
+      pending_credit: 0,
       status,
       open_hole: rs?.open_hole ?? null,
     };

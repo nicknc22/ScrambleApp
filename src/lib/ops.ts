@@ -115,6 +115,8 @@ export interface ContestSubmitOp extends OpBase {
   gps_accuracy_m: number | null;
   low_accuracy: boolean;
   photo_path: string | null;
+  /** ld: the position came from the GPS simulator (dev tool). Flagged for commissioner review unless commissioner/demo. */
+  simulated?: boolean;
 }
 
 export interface ContestDeleteOp extends OpBase {

@@ -92,6 +92,19 @@ Per op:
 - `trip.finalize`: live → final, `finalized_at`. `trip.reopen`: final → live.
 - `round.set_state` (commissioner): set `open_hole`/`status` directly.
 
+## Decisions from the review round (Oct 13)
+
+- **Round net = sum of hole nets over SCORED holes** (spec "Round net = sum of hole nets"). Standings `drinks`/`credit`/`net`/`net_to_par` count scored holes only; drinks on not-yet-scored holes are `pending_drinks`/`pending_credit` ("banked") and join the net when the hole is scored. Feed `lead_change` posts only when the SOLE leader changes (ties don't post).
+- **Effective drink hole:** the engine credits a drink to the hole whose window was open at `logged_at` per the team's `hole_opened_at` times (never earlier than the stamped hole; commissioner-moved drinks keep their stored hole). Fixes stale/dead-zone phones stamping the previous hole. The server rejects (`no_window`) a drink whose `op.at` is more than 2 min after the team's `completed_at` (unless commissioner).
+- **Late sync after finalize:** play ops whose `op.at` ≤ `finalized_at` + 2 min are still applied to a final trip (they happened during the round). Fresh play ops after that get `not_live`.
+- **Stale LWW edits are rejected** (`conflict`, "Hole 6 already got a newer edit: 4") when the stored value differs, so the losing phone gets a toast instead of silent success. Same value → no-op. The server answers a resend of a previously rejected op with the recorded rejection (not "duplicate").
+- **Photos never block ops:** ops referencing a photo sync immediately (the path is deterministic); the blob uploads independently. Upload failures don't mark the phone offline. A ctp photo arriving after its entry triggers the AI judge from the upload route.
+- **Cross-team deletes are forbidden** for non-commissioners: `drink.delete`/`mulligan.undo` need `op.by` on the row's team; `contest.delete` needs `op.by` = the entry's player or a teammate.
+- `photo_path` must match `trips/<trip_id>/<drinks|ld|ctp|posts>/<uuid>.jpg` (shared `src/lib/photos.ts`).
+- Long-drive range is derived (engine re-checks `ok` entries against the CURRENT tee point and range); the reducer only stores `flagged` for weak GPS or simulated GPS.
+- Mulligans can't be used after the team's round is complete (unless commissioner).
+- Tied team-match places split per MEMBER across the tied teams (each player antes the same) — documented choice; spec wording "tied teams split" is ambiguous. Flagged to the user.
+
 ## Derived rules worth restating
 
 - Ghost beer: `credit(d) = floor(base_team_size * d / n)` over the team's active drinks ordered by `(logged_at, id)`; value = credit(d) − credit(d−1); value > 1 is a ghost beer. Deleting/moving recomputes everything.
