@@ -4,6 +4,7 @@
 // with ai: false (never an error for that). Light per-trip rate limit on AI calls; 404 for an
 // unknown trip code. Never cached.
 import { generateTeamNames, aiAvailable } from "@/lib/server/ai";
+import { demoAiEnabled } from "@/lib/server/env";
 import { json, loadTripOr404, readJsonObject, withErrors } from "@/lib/server/http";
 
 export const runtime = "nodejs";
@@ -46,7 +47,7 @@ export const POST = withErrors(async (request: Request, ctx: { params: Promise<{
     existing = [];
   }
 
-  const useAi = aiAvailable() && takeSlot(t.trip.id);
+  const useAi = aiAvailable() && (!t.trip.is_demo || demoAiEnabled()) && takeSlot(t.trip.id);
   const result = await generateTeamNames({ tripId: t.trip.id, seed, existing }, useAi ? {} : { client: null });
   return json(result);
 });

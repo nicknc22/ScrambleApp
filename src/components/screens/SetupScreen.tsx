@@ -18,8 +18,6 @@ import { useHeaderHeight } from "@/components/setup/shared";
 
 const sectionKey = (code: string) => `scramble:setup-section:${code}`;
 
-/** While a sheet is open, park toasts near the top so they never cover the sheet's fields or buttons. */
-const SHEET_TOAST_RULE = `:root:has([role="dialog"][aria-modal="true"]){--toast-bottom:calc(100dvh - 150px - env(safe-area-inset-bottom, 0px)) !important}`;
 
 export function SetupScreen() {
   const view = useClientState((s) => s.view);
@@ -63,7 +61,6 @@ export function SetupScreen() {
 
   return (
     <Screen className="pb-4">
-      <style>{SHEET_TOAST_RULE}</style>
       <div className="sticky z-20 -mx-4 -mt-4 border-b-2 border-line bg-paper/95 px-4 pt-3 pb-3 backdrop-blur" style={{ top: headerH }}>
         <SegmentedControl options={options} value={section} onChange={go} ariaLabel="Setup sections" />
       </div>

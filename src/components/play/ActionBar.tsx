@@ -7,17 +7,14 @@ import { IconCheck, IconChevronLeft, IconChevronRight, cx } from "@/components/u
 /** Height of the bar content (without safe area); toasts float above it. */
 export const ACTION_BAR_H = 80;
 /** With a sheet open, the toast stack's bottom edge sits this far from the top of the screen. */
-const TOAST_TOP_ZONE = 300;
 
 export function ActionBar({ children }: { children: ReactNode }) {
   return (
     <>
       {/* Toasts sit above the tab bar by default; lift them above this bar too (!important beats the
-          shell's inline var). While a modal sheet is open (confirm, mulligan, contest), park them at the
-          top of the screen so they never cover the sheet's text or buttons. */}
+          shell's inline var). While a modal sheet is open, globals.css parks them near the top. */}
       <style>
-        {`:root{--toast-bottom:calc(var(--tabbar-h) + ${ACTION_BAR_H + 10}px) !important}` +
-          `:root:has([role="dialog"][aria-modal="true"]){--toast-bottom:calc(100dvh - ${TOAST_TOP_ZONE}px - env(safe-area-inset-bottom, 0px)) !important}`}
+        {`:root{--toast-bottom:calc(var(--tabbar-h) + ${ACTION_BAR_H + 10}px) !important}`}
       </style>
       <div
         className="fixed inset-x-0 z-[35] border-t-2 border-ink bg-paper/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur"

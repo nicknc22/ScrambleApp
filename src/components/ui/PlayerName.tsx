@@ -33,8 +33,8 @@ export function PlayerName({
           👑
         </span>
       )}
-      {showReal && <span className="ml-1 font-semibold text-muted">({player!.name})</span>}
-      {you && <span className="ml-1 font-semibold text-muted">(you)</span>}
+      {showReal && <> <span className="font-semibold text-muted">({player!.name})</span></>}
+      {you && <> <span className="font-semibold text-muted">(you)</span></>}
     </span>
   );
 }

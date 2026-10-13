@@ -52,10 +52,10 @@ export function vapidPrivateKey(): string | undefined {
 
 /** web-push needs a mailto: or https: subject. */
 export function vapidSubject(): string {
-  return read("VAPID_SUBJECT") ?? "mailto:commissioner@scramble.invalid";
+  return read("VAPID_SUBJECT") ?? "mailto:scramble@example.com";
 }
 
-/** Default commissioner PIN hash (scrypt$...). Required to create trips in production. */
+/** Default commissioner PIN hash (scrypt:...). Required to create trips in production. */
 export function commissionerPinHash(): string | undefined {
   return read("COMMISSIONER_PIN_HASH");
 }
@@ -89,4 +89,14 @@ export function aiEnabled(): boolean {
 
 export function pushEnabled(): boolean {
   return !!vapidPublicKey() && !!vapidPrivateKey();
+}
+
+/** AI features on public demo trips ("Try the demo" is open to anyone): off unless DEMO_AI=1. */
+export function demoAiEnabled(): boolean {
+  return read("DEMO_AI") === "1";
+}
+
+/** Whether AI may run for this trip (key configured; demo trips only with DEMO_AI=1). */
+export function aiAllowedForTrip(trip: { is_demo: boolean }): boolean {
+  return aiEnabled() && (!trip.is_demo || demoAiEnabled());
 }

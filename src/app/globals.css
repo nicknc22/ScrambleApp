@@ -361,3 +361,9 @@
     display: none !important;
   }
 }
+
+/* While any modal sheet/dialog is open, toasts move to the top of the screen so an undo toast
+   never covers the sheet's text or buttons (beats the screens' --toast-bottom overrides). */
+:root:has([role="dialog"][aria-modal="true"]) {
+  --toast-bottom: calc(100dvh - 300px - env(safe-area-inset-bottom, 0px)) !important;
+}

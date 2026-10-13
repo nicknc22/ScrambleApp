@@ -25,6 +25,7 @@ import type { RoastPayload } from "@/lib/events/payloads";
 import { deriveId } from "@/lib/ids";
 import { aiAvailable, aiText, containsBannedTopic, countAiCalls, fastModel, getAiClient, type AiClient } from "./ai";
 import { getDb, type Db } from "./db";
+import { demoAiEnabled } from "./env";
 import type { PostCommitContext } from "./hooks";
 import { deliverPushTrigger } from "./push";
 import { broadcastTripChanged } from "./realtime";
@@ -341,6 +342,7 @@ export async function roastHook(ctx: PostCommitContext, deps: RoastDeps = {}): P
   const triggers = ctx.events?.roast_triggers ?? [];
   if (triggers.length === 0) return [];
   if (!aiAvailable(deps.client)) return [];
+  if (ctx.trip.is_demo && !demoAiEnabled() && deps.client === undefined) return []; // public demo: no AI spend
   if (ctx.trip.settings && ctx.trip.settings.roasts_enabled === false) return [];
   const ordered = triggers
     .map((t, i) => ({ t, i }))

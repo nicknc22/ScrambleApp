@@ -398,4 +398,16 @@ describe("roastHook", () => {
     expect(roasts[0].payload.trigger_type).toBe("lead_change");
     expect(MAX_ROASTS_PER_BATCH).toBeGreaterThanOrEqual(2);
   });
+
+  it("spends nothing on public demo trips unless DEMO_AI=1", async () => {
+    const s = await setup();
+    const out = await play(s, score(s, "A", 1, 6));
+    const demoTrip = { ...out.snapshot.state.trip, is_demo: true };
+    const ctx = { trip: demoTrip, events: out.events, ops: out.applied, results: out.results, state: out.snapshot.state };
+    expect(await roastHook(ctx, deps)).toEqual([]);
+    expect(aiCalls).toHaveLength(0);
+    vi.stubEnv("DEMO_AI", "1");
+    const results = await roastHook(ctx, deps);
+    expect(results.map((r) => r.status)).toContain("posted");
+  });
 });

@@ -219,6 +219,8 @@ export interface FinalResultsPayload {
 export interface RoastPayload {
   trigger_event_id: UUID;
   trigger_type?: FeedEventType;
+  /** Hole the roast is about (used for the per-team roast gap). */
+  hole?: number | null;
 }
 
 export interface FeedPayloadMap {

@@ -21,6 +21,7 @@ import type { AiJudgePayload } from "@/lib/events/payloads";
 import { deriveId } from "@/lib/ids";
 import { aiAvailable, aiJson, containsBannedTopic, getAiClient, judgeModel, type AiClient } from "./ai";
 import { getDb, type Db } from "./db";
+import { demoAiEnabled } from "./env";
 import type { PostCommitContext } from "./hooks";
 import { deliverPushTrigger } from "./push";
 import { broadcastTripChanged } from "./realtime";
@@ -252,6 +253,7 @@ export function ctpEntriesToJudge(ops: readonly Op[]): UUID[] {
 export async function judgeHook(ctx: PostCommitContext, deps: JudgeDeps = {}): Promise<JudgeOutcome[]> {
   const ids = ctpEntriesToJudge(ctx.ops ?? []);
   if (ids.length === 0 || !aiAvailable(deps.client)) return [];
+  if (ctx.trip.is_demo && !demoAiEnabled() && deps.client === undefined) return []; // public demo: no AI spend
   // Skip entries the batch itself already replaced or deleted (re-measure in the same batch).
   const live = ctx.state ? ids.filter((id) => ctx.state!.contest_entries.some((e) => e.id === id && e.deleted_at === null)) : ids;
   return Promise.all(live.map((id) => judgeEntry(ctx.trip.id, id, deps)));

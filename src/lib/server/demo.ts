@@ -1071,7 +1071,14 @@ export async function createDemoTrip(db: Db, opts: DemoOptions): Promise<DemoRes
     holes: demoCourseLayout(),
     photos: opts.photos !== false,
   };
-  const sim = await simulate(db, trip, ctx);
+  let sim: Awaited<ReturnType<typeof simulate>>;
+  try {
+    sim = await simulate(db, trip, ctx);
+  } catch (e) {
+    // Don't leave a half-simulated demo behind (the caller can simply try again).
+    await deleteTrip(db, trip.id).catch(() => {});
+    throw e;
+  }
   return { trip: sim.trip, code, url: `/t/${code}`, mode, stats: { ...sim.stats, ms: Date.now() - started } };
 }
 

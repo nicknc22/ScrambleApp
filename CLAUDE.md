@@ -42,6 +42,8 @@ phones <── GET /api/t/<code>/state (full snapshot) <── on broadcast / po
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push. Unset → push off. |
 | `COMMISSIONER_PIN_HASH` | Required to create a real trip; default PIN for new trips (each trip stores its own hash, changeable in Settings). Format `scrypt:<salt>:<hash>` from `npm run hash-pin -- <pin>` (no `$`, so `.env` files don't mangle it). |
 | `APP_SECRET` | Optional cookie-signing secret (falls back to a hash of the service key / PIN hash). |
+| `AI_JUDGE_MODEL`, `AI_FAST_MODEL` | Optional model overrides (defaults `claude-sonnet-5-5`, `claude-haiku-5-5`). |
+| `DEMO_AI` | `1` lets public demo trips use the AI (off by default so "Try the demo" can't spend API credit). |
 
 ## Conventions
 
