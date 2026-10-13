@@ -1,0 +1,317 @@
+import { describe, expect, it } from "vitest";
+import { derive } from "@/lib/engine";
+import type { DriveNineStatus } from "@/lib/engine/types";
+import { makeTrip } from "../fixtures";
+import {
+  advanceConfirm,
+  canEditPlay,
+  clampHole,
+  clampStrokes,
+  drinkFeedback,
+  drinksForRound,
+  drinksOnHole,
+  driveView,
+  isEditingOtherHole,
+  joinNames,
+  mulliganOptions,
+  needsOverride,
+  netPreview,
+  nextAction,
+  nineOf,
+  nineTotals,
+  noWindowMessage,
+  resolvePlayTeam,
+  roundSummary,
+  savedScoreLine,
+  scoreDraft,
+  scoreName,
+  scoreTone,
+  stripCells,
+  teeCtaHole,
+  unscoredHoles,
+  viewingHole,
+} from "@/components/play/model";
+
+const rs = (open_hole: number | null, status: "not_started" | "playing" | "complete", started: number[] = []) => ({
+  open_hole,
+  status,
+  started_holes: started,
+});
+
+describe("team context", () => {
+  const teamIds = ["A", "B", "C"];
+
+  it("players on a team always score for their own team", () => {
+    expect(resolvePlayTeam({ myTeamId: "B", isCommissioner: false, chosenTeamId: "A", teamIds })).toEqual({ teamId: "B", canSwitch: false });
+  });
+
+  it("players without a team pick one (remembered choice wins when still valid)", () => {
+    expect(resolvePlayTeam({ myTeamId: null, isCommissioner: false, chosenTeamId: null, teamIds })).toEqual({ teamId: null, canSwitch: true });
+    expect(resolvePlayTeam({ myTeamId: null, isCommissioner: false, chosenTeamId: "C", teamIds })).toEqual({ teamId: "C", canSwitch: true });
+    expect(resolvePlayTeam({ myTeamId: null, isCommissioner: false, chosenTeamId: "gone", teamIds }).teamId).toBeNull();
+  });
+
+  it("the commissioner defaults to his own team and may pick any team", () => {
+    expect(resolvePlayTeam({ myTeamId: "A", isCommissioner: true, chosenTeamId: null, teamIds })).toEqual({ teamId: "A", canSwitch: true });
+    expect(resolvePlayTeam({ myTeamId: "A", isCommissioner: true, chosenTeamId: "C", teamIds })).toEqual({ teamId: "C", canSwitch: true });
+    expect(resolvePlayTeam({ myTeamId: null, isCommissioner: true, chosenTeamId: null, teamIds }).teamId).toBeNull();
+    expect(resolvePlayTeam({ myTeamId: "A", isCommissioner: true, chosenTeamId: null, teamIds: ["A"] }).canSwitch).toBe(false);
+  });
+
+  it("commissioner overrides: another team's holes, or anything once final", () => {
+    expect(needsOverride({ isCommissioner: true, myTeamId: "A", teamId: "A", tripStatus: "live" })).toBe(false);
+    expect(needsOverride({ isCommissioner: true, myTeamId: "A", teamId: "B", tripStatus: "live" })).toBe(true);
+    expect(needsOverride({ isCommissioner: true, myTeamId: "A", teamId: "A", tripStatus: "final" })).toBe(true);
+    expect(needsOverride({ isCommissioner: true, myTeamId: null, teamId: "A", tripStatus: "live" })).toBe(true);
+    expect(needsOverride({ isCommissioner: false, myTeamId: null, teamId: "B", tripStatus: "live" })).toBe(false);
+  });
+
+  it("play is editable while live, and by the commissioner once final", () => {
+    expect(canEditPlay("live", false)).toBe(true);
+    expect(canEditPlay("final", false)).toBe(false);
+    expect(canEditPlay("final", true)).toBe(true);
+    expect(canEditPlay("setup", true)).toBe(false);
+  });
+});
+
+describe("viewing hole and advancing", () => {
+  it("follows the current hole unless a hole was pinned from the scorecard", () => {
+    expect(viewingHole(9, null)).toBe(9);
+    expect(viewingHole(9, 6)).toBe(6);
+    expect(isEditingOtherHole(9, 6)).toBe(true);
+    expect(isEditingOtherHole(9, 9)).toBe(false);
+    expect(isEditingOtherHole(9, null)).toBe(false);
+    expect(clampHole(0)).toBe(1);
+    expect(clampHole(25)).toBe(18);
+    expect(clampHole(Number.NaN)).toBe(1);
+  });
+
+  it("On the tee CTA: hole 1 before the round, open_hole + 1 when viewed, never twice", () => {
+    expect(teeCtaHole(null, 1)).toBe(1);
+    expect(teeCtaHole(rs(null, "not_started"), 1)).toBe(1);
+    expect(teeCtaHole(rs(5, "playing", [1, 2, 3, 4, 5]), 5)).toBeNull();
+    expect(teeCtaHole(rs(5, "playing", [1, 2, 3, 4, 5]), 6)).toBe(6);
+    expect(teeCtaHole(rs(5, "playing", [1, 2, 3, 4, 5]), 7)).toBeNull();
+    expect(teeCtaHole(rs(18, "playing"), 18)).toBeNull();
+    expect(teeCtaHole(rs(18, "complete"), 18)).toBeNull();
+    // A commissioner rewound the window: the hole was already started once.
+    expect(teeCtaHole(rs(3, "playing", [1, 2, 3, 4]), 4)).toBeNull();
+  });
+
+  it("next action: tee off N+1, Round complete on 18, nothing before tee off / after finishing", () => {
+    expect(nextAction(null)).toEqual({ kind: "none" });
+    expect(nextAction(rs(null, "not_started"))).toEqual({ kind: "none" });
+    expect(nextAction(rs(1, "playing"))).toEqual({ kind: "tee", hole: 2 });
+    expect(nextAction(rs(17, "playing"))).toEqual({ kind: "tee", hole: 18 });
+    expect(nextAction(rs(18, "playing"))).toEqual({ kind: "complete" });
+    expect(nextAction(rs(18, "complete"))).toEqual({ kind: "none" });
+  });
+});
+
+describe("score entry", () => {
+  it("stepper defaults to saved ?? par, Save only when the draft differs", () => {
+    expect(scoreDraft(null, undefined, 4)).toEqual({ value: 4, saved: null, dirty: true, touched: false });
+    expect(scoreDraft(5, undefined, 4)).toEqual({ value: 5, saved: 5, dirty: false, touched: false });
+    expect(scoreDraft(5, 3, 4)).toEqual({ value: 3, saved: 5, dirty: true, touched: true });
+    expect(scoreDraft(5, 5, 4)).toEqual({ value: 5, saved: 5, dirty: false, touched: true });
+    expect(clampStrokes(0)).toBe(1);
+    expect(clampStrokes(99)).toBe(20);
+  });
+
+  it("live net preview includes this hole's drink credit (net can go negative)", () => {
+    expect(netPreview(4, 2, 4)).toMatchObject({ net: 2, netToPar: "-2", text: "4 − 2 🍺 = 2 net" });
+    expect(netPreview(4, 5, 4)).toMatchObject({ net: -1, netToPar: "-5" });
+    expect(netPreview(5, 0, 4)).toMatchObject({ net: 5, netToPar: "+1", text: "5 − 0 🍺 = 5 net" });
+  });
+
+  it("names scores", () => {
+    expect(scoreName(1, 3)).toBe("Ace");
+    expect(scoreName(2, 4)).toBe("Eagle");
+    expect(scoreName(3, 4)).toBe("Birdie");
+    expect(scoreName(4, 4)).toBe("Par");
+    expect(scoreName(5, 4)).toBe("Bogey");
+    expect(scoreName(6, 4)).toBe("Double bogey");
+    expect(scoreName(8, 4)).toBe("Snowman");
+    expect(scoreTone(null, 4)).toBe("none");
+    expect(scoreTone(3, 4)).toBe("birdie");
+    expect(scoreTone(7, 4)).toBe("double");
+    expect(savedScoreLine(3, 4, 7).title).toBe("Birdie on 7");
+  });
+});
+
+describe("drive minimum", () => {
+  const names: Record<string, string> = { a: "Al", b: "Bo", c: "Cy" };
+  const nameOf = (id: string) => names[id];
+  const nine = (patch: Partial<DriveNineStatus>): DriveNineStatus => ({
+    nine: 1,
+    holes: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    counts: { a: 1, b: 0, c: 0 },
+    needing: ["b", "c"],
+    remaining: 5,
+    level: "ok",
+    closed: false,
+    missed: [],
+    ...patch,
+  });
+
+  it("matches the spec copy for soft warnings", () => {
+    const v = driveView(nine({ needing: ["b"], remaining: 3, level: "soft" }), nameOf);
+    expect(v).toMatchObject({ tone: "soft", banner: false, nine: 1 });
+    expect(v.text).toBe("Needs a drive: Bo · 3 holes left on this nine");
+  });
+
+  it("hard and impossible are red banners", () => {
+    const hard = driveView(nine({ remaining: 2, level: "hard" }), nameOf);
+    expect(hard).toMatchObject({ tone: "hard", banner: true });
+    expect(hard.text).toContain("Bo and Cy");
+    expect(hard.text).toContain("2 holes left");
+    const one = driveView(nine({ needing: ["c"], remaining: 1, level: "hard" }), nameOf);
+    expect(one.text).toBe("Use Cy's drive NOW: 1 hole left on this nine.");
+    expect(driveView(nine({ remaining: 1, level: "impossible" }), nameOf)).toMatchObject({ tone: "impossible", banner: true });
+  });
+
+  it("ok / done / missed", () => {
+    expect(driveView(nine({}), nameOf).tone).toBe("ok");
+    expect(driveView(nine({ needing: [], counts: { a: 3, b: 1, c: 1 } }), nameOf).tone).toBe("done");
+    const missed = driveView(nine({ nine: 2, closed: true, remaining: 0, missed: ["c"], needing: ["c"] }), nameOf);
+    expect(missed).toMatchObject({ tone: "missed", banner: false, nineLabel: "back nine" });
+    expect(missed.text).toContain("Cy");
+    expect(driveView(nine({ closed: true, needing: [], missed: [] }), nameOf).tone).toBe("done");
+  });
+
+  it("works against the real engine for a threesome", () => {
+    const f = makeTrip({ teams: [4, 3] });
+    f.teeOff("B", 1);
+    for (let h = 1; h <= 7; h++) {
+      f.teeOff("B", h);
+      f.score("B", h, 4, "B1");
+    }
+    const d = derive(f.state);
+    const v = driveView(d.driveMin[f.team.B].nines[0], (id) => d.playerById[id]?.name ?? "?");
+    // Current hole 7 has a tee shot, so holes 8 and 9 remain for two players: hard.
+    expect(v.tone).toBe("hard");
+    expect(nineOf(9)).toBe(1);
+    expect(nineOf(10)).toBe(2);
+    expect(joinNames(["a", "b", "c"])).toBe("a, b and c");
+  });
+});
+
+describe("drinks", () => {
+  it("counts drinks per player on a hole and for the round, with ghost credit", () => {
+    const f = makeTrip({ teams: [4, 3] });
+    f.teeOff("B", 1);
+    f.drink("B", "B1", 1);
+    f.drink("B", "B2", 1);
+    f.drink("B", "B1", 1); // 3rd drink for a threesome: ghost beer worth 2
+    f.drink("B", "B3", 2);
+    f.drink("A", "A1", 1);
+    const d = derive(f.state);
+    const onHole = drinksOnHole(d.drinkValues, f.team.B, 1);
+    expect(onHole[f.player.B1]).toEqual({ count: 2, credit: 3, ghosts: 1 });
+    expect(onHole[f.player.B2]).toEqual({ count: 1, credit: 1, ghosts: 0 });
+    expect(onHole[f.player.B3]).toBeUndefined();
+    expect(drinksForRound(d.drinkValues, f.team.B)).toEqual({ [f.player.B1]: 2, [f.player.B2]: 1, [f.player.B3]: 1 });
+  });
+
+  it("feedback: ghost beers, banked mulligans", () => {
+    expect(drinkFeedback("drink", 1, "Al", 3)).toMatchObject({ ghost: false, mulligan: false, title: "Drink logged" });
+    expect(drinkFeedback("drink", 2, "Al", 3)).toMatchObject({ ghost: true, title: "Ghost beer!", emoji: "👻" });
+    expect(drinkFeedback("drink", 2, "Al", 3).message).toContain("−2 strokes");
+    expect(drinkFeedback("shotgun", 1, "Al", 3)).toMatchObject({ mulligan: true, title: "Shotgun! Mulligan banked" });
+    expect(drinkFeedback("shot", undefined, "Al", 3)).toMatchObject({ mulligan: true, ghost: false });
+  });
+
+  it("no-window roasts", () => {
+    expect(noWindowMessage("complete", "x")).toMatch(/Round's over/);
+    expect(noWindowMessage("not_started", "x").length).toBeGreaterThan(10);
+    expect(noWindowMessage(null, "y").length).toBeGreaterThan(10);
+  });
+});
+
+describe("mulligans", () => {
+  it("lists what can be used", () => {
+    expect(mulliganOptions(undefined)).toEqual({ earned: 0, groom: false, any: false, usedTotal: 0 });
+    const f = makeTrip({ teams: [4, 3] });
+    f.teeOff("A", 1);
+    f.drink("A", "A2", 1, "shotgun");
+    let d = derive(f.state);
+    expect(mulliganOptions(d.mulligans[f.team.A])).toEqual({ earned: 1, groom: true, any: true, usedTotal: 0 });
+    expect(mulliganOptions(d.mulligans[f.team.B]).any).toBe(false);
+    f.mulligan("A", 1, "groom");
+    d = derive(f.state);
+    expect(mulliganOptions(d.mulligans[f.team.A])).toEqual({ earned: 1, groom: false, any: true, usedTotal: 1 });
+  });
+});
+
+describe("scorecard strip and summary", () => {
+  it("builds 18 cells with current/viewing/unsaved flags", () => {
+    const f = makeTrip({ teams: [4] });
+    f.teeOff("A", 1);
+    f.score("A", 1, 3);
+    f.drink("A", "A1", 1);
+    f.teeOff("A", 2);
+    const d = derive(f.state);
+    const cells = stripCells(d.teamHoles[f.team.A], 2, 1, [5]);
+    expect(cells).toHaveLength(18);
+    expect(cells[0]).toMatchObject({ hole: 1, strokes: 3, net: 2, drinks: 1, tone: "birdie", viewing: true, current: false });
+    expect(cells[1]).toMatchObject({ hole: 2, strokes: null, current: true });
+    expect(cells[2].contest).toBe("ctp");
+    expect(cells[4].unsaved).toBe(true);
+    expect(cells[0].label).toBe("Hole 1, par 4, 3 strokes, net 2, 1 drink");
+  });
+
+  it("totals out/in and lists unscored holes", () => {
+    const f = makeTrip({ teams: [4] });
+    f.teeOff("A", 1);
+    f.score("A", 1, 4);
+    f.score("A", 10, 5);
+    f.drink("A", "A1", 10);
+    const d = derive(f.state);
+    const [out, inn, total] = nineTotals(d.teamHoles[f.team.A]);
+    expect(out).toMatchObject({ label: "Out", par: 36, strokes: 4, net: 4, played: 1 });
+    expect(inn).toMatchObject({ label: "In", par: 36, strokes: 5, net: 4, played: 1 });
+    expect(total).toMatchObject({ par: 72, strokes: 9, net: 8, played: 2 });
+    expect(unscoredHoles(d.teamHoles[f.team.A], 3)).toEqual([2, 3]);
+  });
+
+  it("round summary from the standings row", () => {
+    const f = makeTrip({ teams: [4, 3] });
+    f.teeOff("A", 1);
+    for (let h = 1; h <= 18; h++) f.score("A", h, f.state.holes.find((x) => x.number === h)!.par);
+    f.drink("A", "A1", 18);
+    f.complete("A");
+    const d = derive(f.state);
+    const row = d.standings.find((r) => r.team_id === f.team.A);
+    const s = roundSummary(row, d.teamHoles[f.team.A]);
+    expect(s).toMatchObject({ gross: 72, credit: 1, net: 71, netToPar: "-1", pos: "1", thru: "F", missing: [] });
+    expect(roundSummary(undefined, d.teamHoles[f.team.B]).missing).toHaveLength(18);
+  });
+});
+
+describe("advance confirm", () => {
+  it("saves a touched draft first", () => {
+    const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(null, 3, 4), credit: 1 });
+    expect(c.saveFirst).toBe(3);
+    expect(c.title).toBe("Save 3 on hole 5 and tee off hole 6?");
+    expect(c.confirmLabel).toBe("Save 3 & tee off 6");
+    expect(c.body).toContain("net 2");
+  });
+
+  it("warns when the hole has no score", () => {
+    const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(null, undefined, 4), credit: 0 });
+    expect(c).toMatchObject({ saveFirst: null, tone: "hazard", title: "No score on hole 5!", confirmLabel: "Tee off 6 anyway" });
+  });
+
+  it("plain confirm when saved", () => {
+    const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(4, undefined, 4), credit: 2 });
+    expect(c).toMatchObject({ saveFirst: null, tone: "primary", title: "On the tee: hole 6?", confirmLabel: "Tee off 6" });
+    expect(c.body).toContain("net 2");
+  });
+
+  it("round complete lists other missing holes", () => {
+    const c = advanceConfirm({ fromHole: 18, to: "complete", draft: scoreDraft(5, undefined, 5), credit: 0, otherMissing: [7, 12, 18] });
+    expect(c).toMatchObject({ title: "Round complete?", confirmLabel: "Round complete", tone: "danger" });
+    expect(c.body).toContain("holes 7 and 12");
+    expect(c.body).toContain("window closes");
+  });
+});

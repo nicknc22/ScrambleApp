@@ -116,6 +116,9 @@ export function TripShell({ code }: { code: string }) {
   }
 
   const noPlayers = activePlayers(view).length === 0;
+  // A commissioner building the roster from scratch keeps working when the first player appears
+  // (instead of being bounced to the join screen mid-setup).
+  if (s.isCommissioner && noPlayers && !skipJoin) setSkipJoin(true);
   // A stale meId (player deleted) also lands here.
   const showJoin = !me && !(s.isCommissioner && (skipJoin || noPlayers));
   if (showJoin) {

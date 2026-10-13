@@ -7,6 +7,7 @@
 //   404      unknown trip code; 413 body too large (the worker splits the batch); 500 transient
 // Every op applies exactly once by id (resends answer "duplicate"). After the response, the
 // post-commit work (Realtime broadcast + registered hooks) runs via after(). Never cached.
+import "@/lib/server/integrations";
 import { after } from "next/server";
 import type { SyncResponse } from "@/lib/ops";
 import { isCommissioner } from "@/lib/server/auth";

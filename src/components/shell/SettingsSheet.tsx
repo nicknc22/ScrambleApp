@@ -19,6 +19,7 @@ import {
 } from "@/components/ui";
 import { InstallGuide } from "@/components/join/InstallGuide";
 import { CommissionerUnlock } from "./CommissionerUnlock";
+import { DemoTools } from "./DemoTools";
 import { GpsSimulator } from "./GpsSimulator";
 import { teamOfPlayer } from "./roster";
 
@@ -128,6 +129,8 @@ function SettingsBody({ onSwitchPlayer }: { onSwitchPlayer: () => void }) {
           {me ? "Not you? Switch player" : "Pick your name"}
         </Button>
       </Section>
+
+      <DemoTools />
 
       <Section title="Notifications">
         {!pushOnServer && s.snapshot ? (

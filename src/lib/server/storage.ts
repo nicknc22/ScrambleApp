@@ -162,3 +162,37 @@ export async function putPhoto(tripId: string, path: string, bytes: Uint8Array, 
   await fs.writeFile(tmp, bytes);
   await fs.rename(tmp, file);
 }
+
+// ---------------------------------------------------------------------------
+// Download (server-side readers, e.g. the AI judge)
+// ---------------------------------------------------------------------------
+
+/**
+ * A stored photo's bytes: from the public Supabase bucket when Storage is configured, else from
+ * the local uploads dir. null when the path is invalid, missing, larger than `maxBytes`
+ * (default MAX_PHOTO_BYTES), slow (`timeoutMs`, default 5 s) or anything else fails. Never throws.
+ */
+export async function getPhotoBytes(
+  path: string,
+  opts: { maxBytes?: number; timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<Uint8Array | null> {
+  const maxBytes = opts.maxBytes ?? MAX_PHOTO_BYTES;
+  try {
+    if (!parsePhotoPath(path)) return null;
+    if (!usesSupabaseStorage()) {
+      const bytes = await readLocalPhoto(path);
+      return bytes && bytes.byteLength > 0 && bytes.byteLength <= maxBytes ? bytes : null;
+    }
+    const res = await (opts.fetchImpl ?? fetch)(photoBaseUrl() + path, {
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 5000),
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const declared = Number(res.headers.get("content-length") ?? "");
+    if (Number.isFinite(declared) && declared > maxBytes) return null;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    return bytes.byteLength > 0 && bytes.byteLength <= maxBytes ? bytes : null;
+  } catch {
+    return null;
+  }
+}

@@ -142,6 +142,9 @@ function hook(name: string, fn: (ctx: PostCommitContext) => unknown, timeoutMs?:
 beforeAll(async () => {
   db = await createTestDb();
   setDbForTests(db);
+  // The sync route imports the AI/push integrations (their own tests live in ai/judge/roasts/push);
+  // these tests assert on the exact hook registry, so start from an empty one.
+  for (const name of postCommitHookNames()) unregisterPostCommitHook(name);
 });
 
 afterAll(async () => {
