@@ -178,7 +178,7 @@ test.describe("course editor + commissioner tools", () => {
     await page.reload();
     await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "setup", { timeout: 45_000 });
     const tools = page.getByTestId("commish-tools");
-    await reveal(page, tools, /commissioner|tools|fix/i);
+    await reveal(page, tools, /commissioner|tools|fix|live|round/i);
 
     // Course stays editable mid-round, with a note.
     const live = page.getByTestId("course-live-note");
