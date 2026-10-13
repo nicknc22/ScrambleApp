@@ -152,13 +152,38 @@ describe("computeStandings", () => {
     expect(order(f)).toEqual(["A", "B", "C"]);
   });
 
-  it("counts drink credit on the open, unscored hole in net and net to par", () => {
+  it("banks drink credit on the open, unscored hole (pending) until that hole is scored", () => {
     const f = makeTrip({ teams: [4] });
     play(f, "A", [4]);
     f.teeOff("A", 2);
     f.drink("A", "A1", 2);
     f.drink("A", "A2", 2);
-    expect(row(f, "A")).toMatchObject({ thru: 1, gross: 4, drinks: 2, credit: 2, net: 2, par_played: 4, net_to_par: -2, gross_to_par: 0 });
+    // Spec: round net = sum of hole nets, so only scored holes count; hole 2's credit is banked.
+    expect(row(f, "A")).toMatchObject({
+      thru: 1, gross: 4, drinks: 0, credit: 0, net: 4, pending_drinks: 2, pending_credit: 2, par_played: 4, net_to_par: 0, gross_to_par: 0,
+    });
+    f.score("A", 2, 5);
+    expect(row(f, "A")).toMatchObject({
+      thru: 2, gross: 9, drinks: 2, credit: 2, net: 7, pending_drinks: 0, pending_credit: 0, par_played: 8, net_to_par: -1,
+    });
+  });
+
+  it("net = gross - credit = sum of scored hole nets; every line keeps its own credit", () => {
+    const f = makeTrip({ teams: [3] });
+    f.teeOff("A", 1);
+    f.drink("A", "A1", 1);
+    f.drink("A", "A2", 1);
+    f.score("A", 1, 4);
+    f.teeOff("A", 2);
+    f.drink("A", "A3", 2); // ghost beer (worth 2) on the open hole 2
+    const { standings, teamHoles } = compute(f.state);
+    const lines = teamHoles[f.team.A];
+    expect(lines.map((l) => l.credit).slice(0, 3)).toEqual([2, 2, 0]);
+    const r = standings[0];
+    const scored = lines.filter((l) => l.strokes !== null);
+    expect(r.net).toBe(scored.reduce((s, l) => s + l.net!, 0));
+    expect(r.net).toBe(r.gross - r.credit);
+    expect(r).toMatchObject({ net: 2, credit: 2, drinks: 2, pending_drinks: 1, pending_credit: 2, ghost_beers: 1 });
   });
 
   it("a team that has drunk but not scored is still not started", () => {
@@ -168,7 +193,9 @@ describe("computeStandings", () => {
     for (const p of ["B1", "B2", "B3"]) f.drink("B", p, 1);
     const s = compute(f.state).standings;
     expect(order(f)).toEqual(["A", "B"]);
-    expect(s[1]).toMatchObject({ pos: 2, pos_label: DASH, thru: 0, thru_label: DASH, credit: 4, ghost_beers: 1, net: -4, status: "playing", open_hole: 1 });
+    expect(s[1]).toMatchObject({
+      pos: 2, pos_label: DASH, thru: 0, thru_label: DASH, credit: 0, pending_credit: 4, pending_drinks: 3, ghost_beers: 1, net: 0, status: "playing", open_hole: 1,
+    });
   });
 
   it("everyone not started: all share pos 1 with dashes, in team order", () => {

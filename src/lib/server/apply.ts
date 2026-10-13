@@ -2,7 +2,9 @@
 //
 //   db.tx:
 //     lockTrip            per-trip advisory lock: writers of one trip run one at a time
-//     getAppliedOps       exactly-once: an op id seen before (applied OR rejected) → "duplicate"
+//     getAppliedOps       exactly-once: an op id seen before is never re-evaluated: applied →
+//                         "duplicate", rejected → the recorded rejection again (a phone whose
+//                         response got lost still hears that its op was refused)
 //     loadTripState       the state the whole batch builds on
 //     for each op, in order:
 //       normalize         light shape check (uuid id, known type, ISO `at`), canonical `at`,
@@ -28,7 +30,7 @@
 //
 // Everything inside a transaction uses the handle `t` it was given (never the root db: on PGlite
 // that would deadlock, see db.ts).
-import { applyOp, type ApplyCtx, type Write } from "@/lib/reducer";
+import { applyOp, CLOCK_GRACE_MS, type ApplyCtx, type Write } from "@/lib/reducer";
 import { deriveFeedEvents, type DeriveEventsResult, type OpStep } from "@/lib/events/derive";
 import type { Op, OpResult, OpType, RejectCode } from "@/lib/ops";
 import { ROW_TABLES, type FeedEvent, type RowTable, type Snapshot, type Trip, type TripState, type UUID } from "@/lib/types";
@@ -53,7 +55,7 @@ import { buildSnapshot, snapshotMeta } from "./trips";
 /** Max ops per sync request (the phone sends ≤ 100 per batch). */
 export const MAX_OPS_PER_SYNC = 200;
 /** An op's client time is clamped to at most server now + this (clock skew allowance). */
-export const MAX_CLOCK_SKEW_MS = 2 * 60_000;
+export const MAX_CLOCK_SKEW_MS = CLOCK_GRACE_MS;
 
 export interface ApplyOpsArgs {
   db: Db;
@@ -178,6 +180,12 @@ function rejectionRecord(tripId: UUID, id: string, opType: string, code: RejectC
   return { id, trip_id: tripId, op_type: opType, status: "rejected", code, reason };
 }
 
+/** The answer for an op id processed before: "duplicate", or the rejection it got back then. */
+function seenResult(id: string, prev: Pick<AppliedOpRow, "status" | "code" | "reason">): OpResult {
+  if (prev.status !== "rejected") return { id, status: "duplicate" };
+  return { id, status: "rejected", code: (prev.code ?? "invalid") as RejectCode, reason: prev.reason ?? "" };
+}
+
 /** Run the ops in order against `initial`, exactly once by id. Pure. */
 function runOps(
   tripId: UUID,
@@ -188,11 +196,11 @@ function runOps(
 ): BatchRun {
   const run: BatchRun = { results: [], steps: [], writes: [], applied: [], records: [], state: initial };
   const nowMs = Date.parse(ctx.now);
-  const seen = new Set<string>(); // lowercase ids handled earlier in this batch
+  const seen = new Map<string, number>(); // lowercase id handled earlier in this batch -> its result's index
 
   const reject = (id: string, opType: string, code: RejectCode, reason: string) => {
     run.results.push({ id, status: "rejected", code, reason });
-    // Recorded so a resend is a "duplicate" instead of being re-evaluated against a newer state.
+    // Recorded so a resend gets this same answer instead of being re-evaluated against a newer state.
     if (isUuid(id)) run.records.push(rejectionRecord(tripId, id, opType, code, reason));
   };
 
@@ -207,11 +215,18 @@ function runOps(
     // Exactly-once: decided by id alone, before anything else about the op.
     if (isUuid(rawId)) {
       const key = rawId.toLowerCase();
-      if (prior.has(rawId) || seen.has(key)) {
-        run.results.push({ id: rawId, status: "duplicate" });
+      const before = prior.get(rawId);
+      if (before) {
+        run.results.push(seenResult(rawId, before));
         continue;
       }
-      seen.add(key);
+      const earlier = seen.get(key);
+      if (earlier !== undefined) {
+        const first = run.results[earlier];
+        run.results.push(first.status === "rejected" ? { ...first, id: rawId } : { id: rawId, status: "duplicate" });
+        continue;
+      }
+      seen.set(key, run.results.length); // every path below pushes exactly one result
     }
 
     const n = normalizeOp(raw, nowMs);
@@ -450,7 +465,8 @@ function rejectSegment(args: ApplyOpsArgs, raw: unknown, cause: unknown): Promis
   console.warn(`[sync] rejected ${type} ${id}: ${errorText(cause)}`);
   return args.db.tx(async (t) => {
     const { prior } = await begin(t, args, [raw]);
-    if (prior.has(id)) return { results: [{ id, status: "duplicate" }], events: NO_EVENTS, applied: [], snapshot: null };
+    const before = prior.get(id);
+    if (before) return { results: [seenResult(id, before)], events: NO_EVENTS, applied: [], snapshot: null };
     await recordAppliedOps(t, [rejectionRecord(args.trip.id, id, type, code, reason)]);
     return { results: [{ id, status: "rejected", code, reason }], events: NO_EVENTS, applied: [], snapshot: null };
   });

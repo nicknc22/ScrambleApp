@@ -3,18 +3,23 @@
 // The thumb zone: scoring a hole is stepper -> Save -> Next without reaching up.
 import type { ReactNode } from "react";
 import { IconCheck, IconChevronLeft, IconChevronRight, cx } from "@/components/ui";
+import { DRINK_UNDO_ATTR } from "./DrinkUndoToast";
 
 /** Height of the bar content (without safe area); toasts float above it. */
 export const ACTION_BAR_H = 80;
-/** With a sheet open, the toast stack's bottom edge sits this far from the top of the screen. */
+/** The drink-undo toast's bottom edge sits this far above the tab bar (inside the bar's height). */
+const DRINK_TOAST_INSET = 6;
 
 export function ActionBar({ children }: { children: ReactNode }) {
   return (
     <>
       {/* Toasts sit above the tab bar by default; lift them above this bar too (!important beats the
-          shell's inline var). While a modal sheet is open, globals.css parks them near the top. */}
+          shell's inline var). While the compact drink-undo toast is up, the stack sits ON the bar
+          instead, so the undo never covers a teammate's drink buttons. While a modal sheet is
+          open, globals.css parks them near the top (its selector is more specific). */}
       <style>
-        {`:root{--toast-bottom:calc(var(--tabbar-h) + ${ACTION_BAR_H + 10}px) !important}`}
+        {`:root{--toast-bottom:calc(var(--tabbar-h) + ${ACTION_BAR_H + 10}px) !important}` +
+          `:root:has([${DRINK_UNDO_ATTR}]){--toast-bottom:calc(var(--tabbar-h) + ${DRINK_TOAST_INSET}px) !important}`}
       </style>
       <div
         className="fixed inset-x-0 z-[35] border-t-2 border-ink bg-paper/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur"

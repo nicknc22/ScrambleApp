@@ -11,13 +11,18 @@ const NINES: readonly { nine: 1 | 2; first: number; last: number }[] = [
 /**
  * Status of one nine for one team.
  * teeShots: hole -> player whose tee shot was used (any player, member or not; null/undefined = none recorded).
+ * roundOver: the team completed its round, or the trip is final (every nine the team started is over).
+ *
+ * A nine closes only when it is really over: the team moved past it or the round is over. Recording
+ * the last hole's tee shot does not close it, so a mis-tapped chip on hole 9 shows as "impossible"
+ * (fixable on the spot) instead of posting a miss.
  */
 function nineStatus(
   nine: (typeof NINES)[number],
   memberIds: UUID[],
   teeShots: (UUID | null | undefined)[],
   currentHole: number,
-  complete: boolean,
+  roundOver: boolean,
 ): DriveNineStatus {
   const holes: number[] = [];
   for (let h = nine.first; h <= nine.last; h++) holes.push(h);
@@ -25,7 +30,6 @@ function nineStatus(
   const members = new Set(memberIds);
   const counts: Record<UUID, number> = {};
   for (const id of memberIds) counts[id] = 0;
-  let recorded = 0;
   let remaining = 0;
   for (const h of holes) {
     const shooter = teeShots[h];
@@ -33,15 +37,13 @@ function nineStatus(
       if (h >= currentHole) remaining += 1;
       continue;
     }
-    recorded += 1;
     // Tee shots by non-members (e.g. a player since moved off the team) don't count for anyone.
     if (members.has(shooter)) counts[shooter] += 1;
   }
   const needing = memberIds.filter((id) => counts[id] === 0);
 
-  const pastNine = complete || currentHole > nine.last;
-  const closed = pastNine || recorded === holes.length;
-  if (pastNine) remaining = 0;
+  const closed = roundOver || currentHole > nine.last;
+  if (closed) remaining = 0;
 
   let level: DriveLevel;
   if (needing.length === 0 || closed) level = "ok";
@@ -83,15 +85,16 @@ export function computeDriveMin(
   for (const [teamId, members] of Object.entries(membersOfTeam)) {
     const rs = roundState.get(teamId);
     const currentHole = currentHoleFor(rs) ?? 1;
-    const complete = rs?.status === "complete";
+    // A final trip ends every started round (a team that never teed off has nothing to miss).
+    const roundOver = rs?.status === "complete" || (state.trip.status === "final" && rs?.status === "playing");
     const memberIds = members.map((m) => m.id);
     const shots = teeShots.get(teamId)!;
     out[teamId] = {
       team_id: teamId,
       current_nine: currentHole <= 9 ? 1 : 2,
       nines: [
-        nineStatus(NINES[0], memberIds, shots, currentHole, complete),
-        nineStatus(NINES[1], memberIds, shots, currentHole, complete),
+        nineStatus(NINES[0], memberIds, shots, currentHole, roundOver),
+        nineStatus(NINES[1], memberIds, shots, currentHole, roundOver),
       ],
     };
   }

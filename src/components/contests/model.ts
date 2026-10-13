@@ -133,12 +133,35 @@ export function plotEntries(
   return [...rows.filter((r) => r.leader), ...rows.filter((r) => !r.leader)];
 }
 
+/** "Dave", "Dave & Mike", "Dave, Mike & Al". */
+function namesOf(ids: readonly UUID[], d: Pick<Derived, "playerById">): string {
+  const names = ids.map((id) => displayName(d.playerById[id]));
+  return names.length > 2 ? `${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}` : names.join(" & ");
+}
+
 /** "Dave & Mike at 4' 6"" / null. */
 export function leaderLine(summary: ContestHoleSummary, d: Pick<Derived, "playerById">): string | null {
   if (summary.leader_ids.length === 0 || summary.best === null) return null;
-  const names = summary.leader_ids.map((id) => displayName(d.playerById[id]));
-  const who = names.length > 2 ? `${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}` : names.join(" & ");
-  return `${who} at ${formatContestDistance(summary.type, summary.best)}`;
+  return `${namesOf(summary.leader_ids, d)} at ${formatContestDistance(summary.type, summary.best)}`;
+}
+
+/**
+ * Who actually takes the hole's pot, when that isn't the contest leader (the leader sat this pot
+ * out): "Pot → Dave (Mike opted out)". null when the pot goes to the leader(s) or nobody leads.
+ * The pot's winners come from derived.money, so this always agrees with the Money tab.
+ */
+export function potWinnerLine(summary: ContestHoleSummary, pots: readonly PotView[], d: Pick<Derived, "playerById">): string | null {
+  const pot = pots.find((p) => p.key === `contest:${summary.hole}`);
+  if (!pot || summary.leader_ids.length === 0) return null;
+  const winners = pot.status === "won" ? pot.winners : [];
+  const same = winners.length === summary.leader_ids.length && winners.every((id) => summary.leader_ids.includes(id));
+  if (same) return null;
+  const out = summary.leader_ids.filter((id) => !pot.participants.includes(id));
+  const why = out.length > 0 ? ` (${namesOf(out, d)} opted out)` : "";
+  if (winners.length > 0) return `Pot → ${namesOf(winners, d)}${why}`;
+  if (pot.status === "rolled") return `Pot rolls on${why}`;
+  if (pot.status === "refunded") return `Pot refunded${why}`;
+  return `Pot → nobody yet${why}`;
 }
 
 /** The player's active entry on a hole (as the engine sees it), if any. */

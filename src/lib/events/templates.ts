@@ -90,6 +90,30 @@ function loggedBy(state: TripState, playerId: UUID | null, loggedById: unknown):
   return ` (logged by ${playerName(state, by)})`;
 }
 
+/**
+ * " Logged by X for Y and Z." for the drinks of a batch somebody logged for a teammate (spec: "the
+ * feed shows who logged it"). drinkers/loggers are index-aligned; self-logged drinks say nothing.
+ */
+function loggedForOthers(state: TripState, drinkers: UUID[], loggers: (UUID | null)[]): string {
+  const forWhom = new Map<UUID, UUID[]>();
+  drinkers.forEach((drinker, i) => {
+    const by = loggers[i];
+    if (!by || by === drinker) return;
+    const list = forWhom.get(by) ?? [];
+    if (!list.includes(drinker)) list.push(drinker);
+    forWhom.set(by, list);
+  });
+  return [...forWhom]
+    .map(([by, whom]) => ` Logged by ${playerName(state, by)} for ${list(whom.map((id) => playerName(state, id)))}.`)
+    .join("");
+}
+
+/** Where a drink's credit lands NOW (effective hole, or where the commissioner moved it); else the payload's hole. */
+function drinkHole(d: Derived, drinkId: unknown, fallback: number): number {
+  const id = str(drinkId);
+  return (id && d.drinkValues[id]?.hole) || fallback;
+}
+
 type V<C> = readonly ((c: C) => string)[];
 
 // ---------------------------------------------------------------------------
@@ -122,14 +146,15 @@ const SHOT: V<SingleC> = [
   (c) => `${c.p} took a shot on hole ${c.h}${c.lb}. Terrible decision, excellent golf strategy. Mulligan banked.`,
 ];
 
-interface GhostC { p: string; h: number; team: string; value: number }
+/** lb: " (logged by X)" when a teammate logged it, else "". */
+interface GhostC { p: string; h: number; team: string; value: number; lb: string }
 const GHOST: V<GhostC> = [
-  (c) => `${c.p}'s drink on hole ${c.h} counted ${c.value}. ${c.team} is drinking for a teammate who doesn't exist.`,
-  (c) => `The math says ${c.p}'s drink on hole ${c.h} is worth ${c.value} strokes. The math is drunk and so is ${c.p}.`,
-  (c) => `${c.team} just got paid by a phantom teammate. ${c.p} on hole ${c.h}: worth ${c.value}.`,
-  (c) => `Boo. ${c.p}'s drink on hole ${c.h} came back from the dead worth ${c.value}. Spooky scary scorecard.`,
-  (c) => `${c.team}, short-handed and over-served: ${c.p} on hole ${c.h} counts ${c.value}.`,
-  (c) => `${c.p} drank one, the scorecard counted ${c.value}. ${c.team}'s invisible teammate is carrying again.`,
+  (c) => `${c.p}'s drink on hole ${c.h}${c.lb} counted ${c.value}. ${c.team} is drinking for a teammate who doesn't exist.`,
+  (c) => `The math says ${c.p}'s drink on hole ${c.h}${c.lb} is worth ${c.value} strokes. The math is drunk and so is ${c.p}.`,
+  (c) => `${c.team} just got paid by a phantom teammate. ${c.p} on hole ${c.h}${c.lb}: worth ${c.value}.`,
+  (c) => `Boo. ${c.p}'s drink on hole ${c.h}${c.lb} came back from the dead worth ${c.value}. Spooky scary scorecard.`,
+  (c) => `${c.team}, short-handed and over-served: ${c.p} on hole ${c.h}${c.lb} counts ${c.value}.`,
+  (c) => `${c.p} drank one on hole ${c.h}${c.lb}, the scorecard counted ${c.value}. ${c.team}'s invisible teammate is carrying again.`,
 ];
 
 interface MulliganC { team: string; h: number; by: string; left: string }
@@ -430,17 +455,24 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
       const rows = drinkIds.map((id) => state.drinks.find((x) => x.id === id));
       // Count what's still active when we can see the rows; otherwise trust the payload.
       const known = rows.some((r) => r !== undefined);
-      const active = rows.filter((r) => r !== undefined && r.deleted_at === null);
+      const active = rows.filter((r): r is NonNullable<typeof r> => r !== undefined && r.deleted_at === null);
       const count = known ? active.length : num(p.count, drinkIds.length);
-      const playerIds = known ? active.map((r) => r!.player_id) : ids(p.player_ids);
+      const playerIds = known ? active.map((r) => r.player_id) : ids(p.player_ids);
+      const loggerIds: (UUID | null)[] = known
+        ? active.map((r) => r.logged_by)
+        : (Array.isArray(p.logged_by_ids) ? p.logged_by_ids : []).map((x) => str(x));
       const tally = new Map<UUID, number>();
       for (const id of playerIds) tally.set(id, (tally.get(id) ?? 0) + 1);
       const names = list([...tally].map(([id, n]) => `${playerName(state, id)}${n > 1 ? ` ×${n}` : ""}`));
-      const phrase = `${count} ${plural(count, "drink", "drinks")} on hole ${hole}`;
+      // The holes these drinks are credited to now (a stale phone's stamp or a commissioner move is resolved).
+      const holes = [...new Set(active.map((r) => drinkHole(d, r.id, r.hole)))].sort((a, b) => a - b);
+      const where = holes.length > 1 ? `holes ${list(holes.map(String))}` : `hole ${holes[0] ?? hole}`;
+      const phrase = `${count} ${plural(count, "drink", "drinks")} on ${where}`;
       const body =
         count === 0
           ? `${phrase}. Somebody hit undo. Cowards.`
-          : pick(seed, "drinks", DRINKS)({ team, phrase, names: playerIds.length ? names : team });
+          : pick(seed, "drinks", DRINKS)({ team, phrase, names: playerIds.length ? names : team }) +
+            loggedForOthers(state, playerIds, loggerIds);
       return { emoji: "🍺", title: `Drinks · ${team}`, body, tone: "hype" };
     }
 
@@ -449,7 +481,7 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
       const playerId = str(p.player_id) ?? ev.player_id;
       const c: SingleC = {
         p: playerName(state, playerId),
-        h: hole,
+        h: drinkHole(d, p.drink_id, hole),
         team,
         lb: loggedBy(state, playerId, p.logged_by),
       };
@@ -460,7 +492,13 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
 
     case "ghost_beer": {
       const playerId = str(p.player_id) ?? ev.player_id;
-      const c: GhostC = { p: playerName(state, playerId), h: hole, team, value: num(p.value, 2) };
+      const c: GhostC = {
+        p: playerName(state, playerId),
+        h: drinkHole(d, p.drink_id, hole),
+        team,
+        value: num(p.value, 2),
+        lb: loggedBy(state, playerId, p.logged_by),
+      };
       return { emoji: "👻", title: "GHOST BEER", body: pick(seed, "ghost", GHOST)(c), tone: "fanfare" };
     }
 
@@ -502,7 +540,7 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
     }
 
     case "contest_entry":
-      return renderEntry(ev, p, state, hole);
+      return renderEntry(ev, p, state, d, hole);
 
     case "contest_lead": {
       const leaderIds = ids(p.leader_ids);
@@ -655,20 +693,25 @@ function renderNotable(ev: FeedEvent, p: Record<string, unknown>, team: string, 
   }
 }
 
-function renderEntry(ev: FeedEvent, p: Record<string, unknown>, state: TripState, hole: number): Body {
+function renderEntry(ev: FeedEvent, p: Record<string, unknown>, state: TripState, d: Derived, hole: number): Body {
   const kind = p.contest_type === "ld" ? "ld" : "ctp";
   const unit = p.unit ?? (kind === "ld" ? "yd" : "ft");
   const entryId = str(p.entry_id);
   const entry = entryId ? state.contest_entries.find((e) => e.id === entryId) : undefined;
+  // The engine's CURRENT view of the entry while it is still the player's entry: validity (the long
+  // drive range is derived from the current tee point and settings), the official distance and any
+  // commissioner ruling show up here. A replaced entry keeps what the payload said at the time.
+  const view = entryId ? d.contests.find((s) => s.hole === (entry?.hole ?? hole))?.entries.find((v) => v.entry.id === entryId) : undefined;
   const rank = optNum(p.rank);
   const validCount = num(p.valid_count, 0);
-  const valid = p.valid !== false && p.status !== "flagged";
+  const valid = view ? view.valid : p.valid !== false && p.status !== "flagged";
+  const stripReview = (r: string | null | undefined) => r?.replace(/^Needs commissioner review:?\s*/, "") || null;
   const c: EntryC = {
     p: playerName(state, ev.player_id),
     h: hole,
-    dist: fmtDistance(num(p.distance), unit),
+    dist: fmtDistance(view ? view.distance : num(p.distance), unit),
     rank: rank === null ? "" : rank === 1 ? (validCount <= 1 ? "First on the board." : "That's the new best.") : `Currently ${ordinal(rank)}.`,
-    reason: str(p.flag_reason) ?? str(p.invalid_reason)?.replace(/^Needs commissioner review:?\s*/, "") ?? "needs a look",
+    reason: (view ? stripReview(view.invalid_reason) : (str(p.flag_reason) ?? stripReview(str(p.invalid_reason)))) ?? "needs a look",
   };
   let body = valid
     ? pick(ev.id, `entry:${kind}`, kind === "ld" ? LD_ENTRY : CTP_ENTRY)(c)

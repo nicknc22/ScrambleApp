@@ -1,9 +1,10 @@
 "use client";
 import type { Team } from "@/lib/types";
 import { Badge, IconMenu, TeamPill, cx } from "@/components/ui";
+import { SyncIssuesChip } from "./SyncIssues";
 import { TripOfflineBadge } from "./TripOfflineBadge";
 
-/** Sticky compact header: app + trip name, my team, commissioner badge, menu. Offline strip under it. */
+/** Sticky compact header: app + trip name, my team, commissioner badge, "⚠️ N" didn't-save chip, menu. Offline strip under it. */
 export function TripHeader({
   appName,
   tripName,
@@ -57,6 +58,7 @@ export function TripHeader({
             Pick your name
           </button>
         )}
+        <SyncIssuesChip />
         <button
           type="button"
           onClick={onMenu}

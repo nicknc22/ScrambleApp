@@ -39,6 +39,12 @@ function mk<T extends OpType>(type: T, fields: Fields<T>): OpOf<T> {
 }
 
 let drinkSeq = 0;
+/** Trip of the current test (set by live()); photo paths must belong to it. */
+let currentTripId = "";
+let photoSeq = 0;
+/** A valid photo path for the current trip: trips/<trip_id>/<kind>/<uuid>.jpg */
+const photo = (kind: "drinks" | "ld" | "ctp" | "posts") =>
+  `trips/${currentTripId}/${kind}/00000000-0000-4000-8000-${String(++photoSeq).padStart(12, "0")}.jpg`;
 const tee = (team: string, hole: number, x: Partial<Fields<"tee.open">> = {}) => mk("tee.open", { team_id: team, hole, ...x });
 const score = (team: string, hole: number, strokes: number, x: Partial<Fields<"score.set">> = {}) =>
   mk("score.set", { team_id: team, hole, strokes, ...x });
@@ -57,7 +63,7 @@ const ctp = (player: string, hole: number, ft: number, x: Partial<Fields<"contes
     lng: null,
     gps_accuracy_m: null,
     low_accuracy: false,
-    photo_path: `trips/t/contest/${drinkSeq}.jpg`,
+    photo_path: photo("ctp"),
     by: player,
     ...x,
   });
@@ -70,6 +76,16 @@ function deepFreeze<T>(o: T): T {
     for (const v of Object.values(o)) deepFreeze(v);
   }
   return o;
+}
+
+/** Small seeded PRNG (mulberry32) for the property-style tests. */
+function rng(seed: number): () => number {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 class Sim {
@@ -140,6 +156,7 @@ afterEach(() => {
 
 function live(teams: number[] = [4, 3, 3]) {
   const f = makeTrip({ teams });
+  currentTripId = f.state.trip.id;
   return { f, sim: new Sim(f), A: f.team.A, B: f.team.B, C: f.team.C, p: f.player, tripId: f.state.trip.id };
 }
 
@@ -270,8 +287,11 @@ describe("round_started / final_results", () => {
     const { sim, A, B, C, p } = live();
     sim.run([score(A, 1, 3), score(B, 1, 5), score(C, 1, 4)]);
     const r = sim.run([mk("trip.finalize", {})], { now: 9000, commish: true });
-    expect(types(r)).toEqual(["final_results"]);
-    const ev = r.feed[0];
+    // Every team was still out on the course: finalizing ends their rounds, so both nines close and
+    // their drive-minimum misses are flagged too (each team only played hole 1, with no tee shots).
+    expect(types(r).filter((t) => t !== "drive_miss")).toEqual(["final_results"]);
+    expect(ofType(r, "drive_miss")).toHaveLength(6);
+    const ev = one(r, "final_results");
     expect(ev.dedupe_key).toBe(`final:${srv(9000)}`);
     expect(ev.team_id).toBe(A);
     expect(ev.payload.champion_team_ids).toEqual([A]);
@@ -286,10 +306,12 @@ describe("round_started / final_results", () => {
 
     // Reopen is a visible commissioner override; finalizing again posts fresh results.
     const reopen = sim.run([mk("trip.reopen", {})], { now: 9100, commish: true });
-    expect(types(reopen)).toEqual(["commissioner_override"]);
-    expect(reopen.feed[0].payload).toEqual({ op_type: "trip.reopen", summary: "reopened the round" });
+    expect(one(reopen, "commissioner_override").payload).toEqual({ op_type: "trip.reopen", summary: "reopened the round" });
+    // Live again: the nines are open again, so the misses are retracted until the round really ends.
+    expect(sim.active("drive_miss")).toEqual([]);
     const again = sim.run([mk("trip.finalize", {})], { now: 9200, commish: true });
     expect(one(again, "final_results").dedupe_key).toBe(`final:${srv(9200)}`);
+    expect(sim.active("drive_miss")).toHaveLength(6);
   });
 });
 
@@ -363,7 +385,8 @@ describe("score_edit", () => {
     sim.run([score(A, 1, 5)]);
     expect(ofType(sim.run([score(A, 1, 5)]), "score_edit")).toEqual([]);
     expect(ofType(sim.run([score(A, 2, 5)]), "score_edit")).toEqual([]);
-    expect(sim.run([score(A, 1, 3, { at: at(-500) })]).feed).toEqual([]);
+    // A stale offline edit with the same value is a no-op (a different value is rejected by the reducer).
+    expect(sim.run([score(A, 1, 5, { at: at(-500) })]).feed).toEqual([]);
   });
 
   it("two edits in one batch post two edits", () => {
@@ -548,15 +571,17 @@ describe("drinks batching", () => {
   it("photos ride on the post; a batch never holds two photos", () => {
     const { sim, A, p } = live();
     sim.run([tee(A, 1)], { now: 0 });
-    const r1 = sim.run([drink(A, p.A1, 1, "drink", { photo_path: "trips/t/drinks/1.jpg" })], { now: 10 });
-    expect(one(r1, "drinks").photo_path).toBe("trips/t/drinks/1.jpg");
+    const photo1 = photo("drinks");
+    const photo2 = photo("drinks");
+    const r1 = sim.run([drink(A, p.A1, 1, "drink", { photo_path: photo1 })], { now: 10 });
+    expect(one(r1, "drinks").photo_path).toBe(photo1);
     const r2 = sim.run([drink(A, p.A2, 1)], { now: 20 });
-    expect(r2.feed[0].photo_path).toBe("trips/t/drinks/1.jpg");
+    expect(r2.feed[0].photo_path).toBe(photo1);
     expect(r2.feed[0].payload.count).toBe(2);
-    const r3 = sim.run([drink(A, p.A3, 1, "drink", { photo_path: "trips/t/drinks/2.jpg" })], { now: 30 });
+    const r3 = sim.run([drink(A, p.A3, 1, "drink", { photo_path: photo2 })], { now: 30 });
     const ev3 = one(r3, "drinks");
     expect(ev3.payload.count).toBe(1);
-    expect(ev3.photo_path).toBe("trips/t/drinks/2.jpg");
+    expect(ev3.photo_path).toBe(photo2);
     expect(sim.active("drinks")).toHaveLength(2);
   });
 
@@ -593,19 +618,97 @@ describe("drinks batching", () => {
   });
 });
 
+describe("who logged it, and which hole", () => {
+  it("drinks and ghost beers logged for a teammate say who logged them (self-logged ones don't)", () => {
+    const { sim, B, p } = live();
+    sim.run([tee(B, 1)], { now: 0 });
+    sim.run([drink(B, p.B2, 1, "drink", { by: p.B1 })], { now: 5 });
+    sim.run([drink(B, p.B3, 1, "drink", { by: p.B1 })], { now: 10 });
+    const ghost = one(sim.run([drink(B, p.B2, 1, "drink", { by: p.B1 })], { now: 15 }), "ghost_beer");
+    const batch = sim.active("drinks")[0];
+    expect(batch.payload.count).toBe(2);
+    expect(sim.render(batch).body).toContain("Logged by Player B1 for Player B2 and Player B3.");
+    expect(sim.render(ghost).body).toContain("(logged by Player B1)");
+
+    // Self-logged: no byline. A mixed batch names only the drinks logged for somebody else.
+    const own = one(sim.run([drink(B, p.B1, 1, "drink", { by: p.B1 })], { now: 100 }), "drinks");
+    expect(sim.render(own).body).not.toContain("ogged by");
+    sim.run([drink(B, p.B3, 1, "drink", { by: p.B2 })], { now: 105 });
+    const mixed = sim.render(sim.active("drinks").find((e) => e.id === own.id)!).body;
+    expect(mixed).toContain("Logged by Player B2 for Player B3.");
+    expect(mixed).not.toContain("for Player B1");
+  });
+
+  it("dead zone, two phones: drinks stamped with a stale hole land on the hole that was open, in either sync order", () => {
+    for (const order of ["drinker first", "scorer first"] as const) {
+      const { sim, A, p } = live();
+      sim.run([tee(A, 1, { at: at(0), by: p.A1 })], { now: 0 });
+      // Dave's phone (the scorer) offline: scores 1, tees off 2 at +12 and 3 at +25.
+      const dave = [score(A, 1, 4, { at: at(10), by: p.A1 }), tee(A, 2, { at: at(12), by: p.A1 }), score(A, 2, 4, { at: at(24), by: p.A1 }), tee(A, 3, { at: at(25), by: p.A1 })];
+      // Mike's phone never saw hole 2 or 3 open: everything it logs is stamped hole 1.
+      const mike = [
+        drink(A, p.A2, 1, "drink", { at: at(15), by: p.A2 }),
+        drink(A, p.A3, 1, "shot", { at: at(16), by: p.A2 }),
+        drink(A, p.A2, 1, "drink", { at: at(28), by: p.A2 }),
+      ];
+      const batches = order === "drinker first" ? [mike, dave] : [dave, mike];
+      sim.run(batches[0], { now: 1000 });
+      sim.run(batches[1], { now: 1010 });
+
+      const d = derive(sim.state);
+      const lines = d.teamHoles[A];
+      expect([1, 2, 3].map((h) => [lines[h - 1].drinks, lines[h - 1].credit]), order).toEqual([
+        [0, 0],
+        [2, 2],
+        [1, 1],
+      ]);
+      expect(sim.state.drinks.every((x) => x.hole === 1), "stored stamps are untouched").toBe(true);
+      // The feed names the hole the drinks count on, whichever phone synced first.
+      const text = sim.active().filter((e) => e.type === "drinks" || e.type === "shot").map((e) => sim.render(e).body).join(" | ");
+      expect(text, order).not.toMatch(/hole 1\b/);
+      expect(text, order).toMatch(/shot on hole 2|hole 2: Player A3/);
+      if (order === "drinker first") {
+        // Both plain drinks were batched while hole 1 looked open; the post now says where they count.
+        expect(text).toContain("2 drinks on holes 2 and 3");
+      } else {
+        expect(text).toContain("1 drink on hole 2");
+        expect(text).toContain("1 drink on hole 3");
+      }
+    }
+  });
+
+  it("drink batches join by the hole the drink counts on, not the stale stamp", () => {
+    const { sim, A, p } = live();
+    sim.run([tee(A, 1, { at: at(0) }), tee(A, 2, { at: at(10) })], { now: 0 });
+    const r1 = sim.run([drink(A, p.A1, 2, "drink", { at: at(11) })], { now: 10 });
+    const r2 = sim.run([drink(A, p.A2, 1, "drink", { at: at(12) })], { now: 20 }); // stale phone
+    expect(one(r1, "drinks").payload.hole).toBe(2);
+    expect(one(r2, "drinks").payload).toMatchObject({ hole: 2, count: 2 });
+  });
+
+  it("commissioner summaries name the hole a drink counts on", () => {
+    const { sim, A, p } = live();
+    const stale = drink(A, p.A2, 4, "drink", { at: at(30) });
+    sim.run([tee(A, 4, { at: at(0) }), tee(A, 5, { at: at(20) }), stale]);
+    const del = sim.run([mk("drink.delete", { drink_id: stale.drink_id, by: p.A1, as_commissioner: true })], { commish: true });
+    expect(one(del, "commissioner_override").payload.summary).toBe("deleted Player A2's drink on hole 5");
+  });
+});
+
 describe("shotgun / shot", () => {
   it("gets its own post (never batched) that banks a mulligan and shows who logged it", () => {
     const { sim, A, p } = live();
     sim.run([tee(A, 1)], { now: 0 });
     sim.run([drink(A, p.A1, 1)], { now: 5 });
-    const op = drink(A, p.A2, 1, "shotgun", { by: p.A3, photo_path: "trips/t/drinks/sg.jpg" });
+    const sg = photo("drinks");
+    const op = drink(A, p.A2, 1, "shotgun", { by: p.A3, photo_path: sg });
     const r = sim.run([op], { now: 10 });
     expect(types(r)).toEqual(["shotgun"]);
     const ev = r.feed[0];
     expect(ev.id).toBe(deriveId(op.id, "shotgun", op.drink_id));
     expect(ev.player_id).toBe(p.A2);
     expect(ev.actor_id).toBe(p.A3);
-    expect(ev.photo_path).toBe("trips/t/drinks/sg.jpg");
+    expect(ev.photo_path).toBe(sg);
     expect(ev.payload).toEqual({
       drink_id: op.drink_id,
       drink_type: "shotgun",
@@ -642,7 +745,8 @@ describe("ghost_beer", () => {
     sim.run([tee(B, 1)], { now: 0 });
     sim.run([drink(B, p.B1, 1)], { now: 10 });
     sim.run([drink(B, p.B2, 1)], { now: 20 });
-    const d3 = drink(B, p.B3, 1, "drink", { photo_path: "trips/t/drinks/ghost.jpg" });
+    const ghostPhoto = photo("drinks");
+    const d3 = drink(B, p.B3, 1, "drink", { photo_path: ghostPhoto });
     const r = sim.run([d3], { now: 30 });
     expect(types(r)).toEqual(["ghost_beer"]);
     const ev = r.feed[0];
@@ -650,7 +754,7 @@ describe("ghost_beer", () => {
     expect(ev.id).toBe(deriveId(tripId, `ghost:${d3.drink_id}`));
     expect(ev.player_id).toBe(p.B3);
     expect(ev.team_id).toBe(B);
-    expect(ev.photo_path).toBe("trips/t/drinks/ghost.jpg");
+    expect(ev.photo_path).toBe(ghostPhoto);
     expect(ev.payload).toEqual({
       drink_id: d3.drink_id,
       drink_type: "drink",
@@ -684,10 +788,11 @@ describe("ghost_beer", () => {
   it("a shotgun that lands on a ghost slot posts both; the photo stays on the shotgun post", () => {
     const { sim, B, p } = live();
     sim.run([tee(B, 1), drink(B, p.B1, 1), drink(B, p.B2, 1)]);
-    const r = sim.run([drink(B, p.B3, 1, "shotgun", { photo_path: "trips/t/drinks/x.jpg" })]);
+    const x = photo("drinks");
+    const r = sim.run([drink(B, p.B3, 1, "shotgun", { photo_path: x })]);
     expect(types(r)).toEqual(["shotgun", "ghost_beer"]);
     expect(one(r, "shotgun").payload.value).toBe(2);
-    expect(one(r, "shotgun").photo_path).toBe("trips/t/drinks/x.jpg");
+    expect(one(r, "shotgun").photo_path).toBe(x);
     expect(one(r, "ghost_beer").photo_path).toBeNull();
     expect(one(r, "ghost_beer").payload.drink_type).toBe("shotgun");
   });
@@ -733,19 +838,85 @@ describe("ghost_beer", () => {
     expect(sim.active("ghost_beer")).toHaveLength(1);
   });
 
-  it("deleting an earlier drink retires the ghost post only when the team actually lost a ghost", () => {
+  it("deleting an earlier drink moves the ghost post to the drink that is now the ghost", () => {
     const { sim, B, p } = live();
-    const d1 = drink(B, p.B1, 1);
-    sim.run([tee(B, 1), d1, drink(B, p.B2, 1), drink(B, p.B3, 1), drink(B, p.B1, 1)]);
-    expect(sim.active("ghost_beer")).toHaveLength(1);
-    // 4 drinks -> delete #1 -> 3 drinks: still exactly one ghost (it moved to the old #4). Keep the post.
-    const r = sim.run([mk("drink.delete", { drink_id: d1.drink_id, by: p.B1 })]);
-    expect(ofType(r, "ghost_beer")).toEqual([]);
-    expect(sim.active("ghost_beer")).toHaveLength(1);
+    const [d1, d2, d3, d4] = [drink(B, p.B1, 1), drink(B, p.B2, 1), drink(B, p.B3, 1), drink(B, p.B1, 1)];
+    sim.run([tee(B, 1, { at: at(-1000) }), d1, d2, d3, d4]);
+    expect(sim.active("ghost_beer").map((e) => e.payload.drink_id)).toEqual([d3.drink_id]);
+    // 4 drinks -> delete #1 -> 3 drinks: the ghost is now the old #4 (B1's), not B3's. The feed follows.
+    const r = sim.run([mk("drink.delete", { drink_id: d1.drink_id, by: p.B1 })], { now: 5000 });
+    expect(ofType(r, "ghost_beer").map((e) => [e.payload.drink_id, e.deleted_at, e.payload.retracted])).toEqual([
+      [d3.drink_id, srv(5000), true],
+      [d4.drink_id, null, undefined],
+    ]);
+    expect(sim.active("ghost_beer").map((e) => e.player_id)).toEqual([p.B1]);
     // 3 -> 2 drinks: the ghost is gone, so is its post.
-    const d2id = sim.state.drinks.find((d) => d.deleted_at === null && d.player_id === p.B2)!.id;
-    sim.run([mk("drink.delete", { drink_id: d2id, by: p.B2 })]);
+    sim.run([mk("drink.delete", { drink_id: d2.drink_id, by: p.B2 })]);
     expect(sim.active("ghost_beer")).toEqual([]);
+  });
+
+  it("a drink that becomes a ghost again (undo, then a late offline drink) gets its post back", () => {
+    const { sim, B, p } = live();
+    sim.run([tee(B, 1, { at: at(0) })]);
+    const [d1, d2, d3] = [drink(B, p.B1, 1, "drink", { at: at(10) }), drink(B, p.B2, 1, "drink", { at: at(20) }), drink(B, p.B3, 1, "drink", { at: at(30) })];
+    sim.run([d1]);
+    sim.run([d2]);
+    const post = one(sim.run([d3]), "ghost_beer");
+    sim.run([mk("drink.delete", { drink_id: d1.drink_id, by: p.B1 })]);
+    expect(sim.active("ghost_beer")).toEqual([]);
+    // B2's phone was offline: a drink it logged at minute 5 syncs now, so d3 is the 3rd drink again.
+    const r = sim.run([drink(B, p.B2, 1, "drink", { at: at(5) })]);
+    expect(ofType(r, "ghost_beer")).toEqual([expect.objectContaining({ id: post.id, deleted_at: null })]);
+    expect(sim.active("ghost_beer").map((e) => e.payload.drink_id)).toEqual([d3.drink_id]);
+    expect(sim.active("ghost_beer")[0].payload.retracted).toBeUndefined();
+  });
+
+  it("a team that shrinks retracts posts on drinks that are no longer ghosts, and a roster change never posts new ones", () => {
+    const { sim, B, C, p } = live([4, 2, 3]);
+    sim.run([tee(B, 1), drink(B, p.B1, 1), drink(B, p.B2, 1)]); // twosome: both ghosts
+    expect(sim.active("ghost_beer")).toHaveLength(2);
+    sim.run([mk("team.assign", { player_id: p.C1, team_id: B })], { commish: true }); // B is a threesome now
+    expect(sim.active("ghost_beer")).toEqual([]);
+    sim.run([drink(B, p.B1, 1)]); // 3rd drink of a threesome: a ghost, posted
+    expect(sim.active("ghost_beer").map((e) => e.team_id)).toEqual([B]);
+    // C (now a twosome) has ghosts from earlier drinks, but no drink of C changed: nothing posts.
+    expect(sim.active("ghost_beer").filter((e) => e.team_id === C)).toEqual([]);
+  });
+
+  it("property: after random logs, undos and moves (offline times shuffled), ghost posts match the scorecard's ghosts", () => {
+    for (let seed = 1; seed <= 120; seed++) {
+      const r = rng(seed);
+      const size = 2 + Math.floor(r() * 3);
+      const { sim, A, p } = live([size, 4]);
+      const members = Object.keys(p).filter((k) => k.startsWith("A")).map((k) => p[k]);
+      sim.run([tee(A, 1, { at: at(0) })], { now: 0 });
+      const ids: string[] = [];
+      let now = 1;
+      for (let step = 0; step < 25; step++) {
+        const x = r();
+        if (x < 0.6 || ids.length === 0) {
+          const who = members[Math.floor(r() * members.length)];
+          const op = drink(A, who, 1 + Math.floor(r() * 5), r() < 0.15 ? "shotgun" : "drink", { at: at(Math.floor(r() * 300) + 1), by: who });
+          ids.push(op.drink_id);
+          sim.run([op], { now: (now += 30) });
+        } else {
+          const id = ids[Math.floor(r() * ids.length)];
+          const row = sim.state.drinks.find((d) => d.id === id)!;
+          if (x < 0.85) {
+            if (row.deleted_at === null) sim.run([mk("drink.delete", { drink_id: id, by: row.player_id })], { now: (now += 30) });
+          } else if (row.deleted_at === null) {
+            sim.run([mk("drink.move", { drink_id: id, hole: 1 + Math.floor(r() * 5), by: p.B1 })], { now: (now += 30), commish: true });
+          }
+        }
+      }
+      const d = derive(sim.state);
+      const ghosts = Object.values(d.drinkValues).filter((v) => v.team_id === A && v.ghost).map((v) => v.drink_id).sort();
+      const posts = sim.active("ghost_beer").filter((e) => e.team_id === A).map((e) => String(e.payload.drink_id)).sort();
+      expect(posts, `seed ${seed} (team of ${size})`).toEqual(ghosts);
+      // Deleted drinks never linger in a batch post either.
+      const batched = sim.active("drinks").flatMap((e) => e.payload.drink_ids as string[]);
+      expect(batched.filter((id) => sim.state.drinks.find((x) => x.id === id)!.deleted_at !== null), `seed ${seed}`).toEqual([]);
+    }
   });
 });
 
@@ -765,7 +936,7 @@ describe("mulligans", () => {
     expect(ev.payload).toEqual({ mulligan_id: "mull-1", hole: 1, source: "earned", used_by: p.A2, available: 0 });
     expect(r.roast_triggers).toEqual([]);
     expect(r.push_triggers).toEqual([]);
-    const undo = sim.run([mk("mulligan.undo", { mulligan_id: "mull-1" })], { now: 8000 });
+    const undo = sim.run([mk("mulligan.undo", { mulligan_id: "mull-1", by: p.A2 })], { now: 8000 });
     expect(undo.feed).toEqual([expect.objectContaining({ id: ev.id, deleted_at: srv(8000) })]);
   });
 
@@ -787,7 +958,7 @@ describe("mulligans", () => {
     const { sim, A, p } = live();
     const r = sim.run([
       mk("mulligan.use", { mulligan_id: "g-2", team_id: A, hole: 1, source: "groom", by: p.A1 }),
-      mk("mulligan.undo", { mulligan_id: "g-2" }),
+      mk("mulligan.undo", { mulligan_id: "g-2", by: p.A1 }),
     ]);
     expect(one(r, "groom_mulligan").deleted_at).not.toBeNull();
     expect(r.roast_triggers).toEqual([]);
@@ -823,7 +994,8 @@ describe("contest_entry / contest_lead", () => {
     expect(entry1.player_id).toBe(p.A1);
     expect(entry1.team_id).toBe(A);
     const lead1 = one(r1, "contest_lead");
-    expect(lead1.dedupe_key).toBe(`ctplead:3:${p.A1}`);
+    expect(lead1.dedupe_key).toBeNull();
+    expect(lead1.id).toBe(deriveId(e1.id, "contest_lead", "3"));
     expect(lead1.payload).toEqual({ hole: 3, contest_type: "ctp", leader_ids: [p.A1], previous_leader_ids: [], distance: 12, unit: "ft" });
     expect(lead1.actor_id).toBe(p.A1);
     expect(r1.push_triggers).toEqual([expect.objectContaining({ feed_event_id: lead1.id, audience: { kind: "all" }, collapse_key: "ctplead:3" })]);
@@ -846,12 +1018,36 @@ describe("contest_entry / contest_lead", () => {
     const r5 = sim.run([ctp(p.B1, 3, 40)]);
     expect(one(r5, "contest_entry").payload).toMatchObject({ replaced: true, rank: 4 });
     expect(one(r5, "contest_lead").payload.leader_ids).toEqual([p.A2]);
-    // ...and back to a leader set that was already announced: deduped.
+    // A leader set that was announced before posts again when it comes back (compared with the
+    // latest post, not deduped forever). Tied leaders in submission order: A2's entry is older now.
     const r6 = sim.run([ctp(p.B1, 3, 8.5)]);
-    expect(ofType(r6, "contest_lead")).toEqual([]);
+    expect(one(r6, "contest_lead").payload).toMatchObject({ leader_ids: [p.A2, p.B1], previous_leader_ids: [p.A2] });
+    // Nothing changed about the lead: nothing posts.
+    expect(ofType(sim.run([ctp(p.C1, 3, 25)]), "contest_lead")).toEqual([]);
   });
 
-  it("flagged long drives post as awaiting review and can't lead until approved", () => {
+  it("a leader who is passed and re-measures to retake the lead posts again", () => {
+    const { sim, A, B, p } = live();
+    sim.run([tee(A, 3), tee(B, 3)]);
+    expect(one(sim.run([ctp(p.A1, 3, 12)]), "contest_lead").payload.leader_ids).toEqual([p.A1]);
+    expect(one(sim.run([ctp(p.B1, 3, 8)]), "contest_lead").payload.leader_ids).toEqual([p.B1]);
+    const r = sim.run([ctp(p.A1, 3, 5)]);
+    const lead = one(r, "contest_lead");
+    expect(lead.payload).toMatchObject({ leader_ids: [p.A1], previous_leader_ids: [p.B1], distance: 5 });
+    expect(r.push_triggers.map((t) => t.feed_event_id)).toContain(lead.id);
+    expect(sim.active("contest_lead").map((e) => e.payload.leader_ids)).toEqual([[p.A1], [p.B1], [p.A1]]);
+  });
+
+  it("the lead going back to an earlier leader because the new leader's entry was withdrawn posts", () => {
+    const { sim, p } = live();
+    sim.run([ctp(p.A1, 3, 12)]);
+    const b1 = ctp(p.B1, 3, 8);
+    sim.run([b1]);
+    const r = sim.run([mk("contest.delete", { entry_id: b1.entry_id, by: p.B1 })]);
+    expect(one(r, "contest_lead").payload).toMatchObject({ leader_ids: [p.A1], previous_leader_ids: [p.B1], distance: 12 });
+  });
+
+  it("out-of-range long drives post as awaiting review (validity derived by the engine) and can't lead until approved", () => {
     const { sim, p } = live();
     const e = ld(p.A2, 4, 450);
     const r = sim.run([e]);
@@ -861,9 +1057,9 @@ describe("contest_entry / contest_lead", () => {
       unit: "yd",
       rank: null,
       valid: false,
-      status: "flagged",
-      flag_reason: "Out of range: 450 yd",
-      invalid_reason: "Needs commissioner review: Out of range: 450 yd",
+      status: "ok",
+      flag_reason: null,
+      invalid_reason: "Out of range: 450 yd",
     });
     expect(ofType(r, "contest_lead")).toEqual([]);
     expect(sim.render(one(r, "contest_entry")).body.toLowerCase()).toContain("commissioner");
@@ -872,6 +1068,21 @@ describe("contest_entry / contest_lead", () => {
     expect(types(approve)).toEqual(["commissioner_override", "contest_lead"]);
     expect(one(approve, "commissioner_override").payload.summary).toBe("approved Player A2's long drive entry on hole 4");
     expect(one(approve, "contest_lead").actor_id).toBe(p.A1);
+  });
+
+  it("entry copy follows the engine's CURRENT validity: a range fix turns 'awaiting review' into a normal drive", () => {
+    const { sim, p } = live();
+    const r = sim.run([ld(p.A2, 4, 450)]);
+    const entry = one(r, "contest_entry");
+    expect(sim.render(entry).body).toContain("Out of range: 450 yd");
+    expect(sim.render(entry).tone).toBe("alert");
+    // The commissioner widens the range: the entry is valid now, leads, and its post stops asking for review.
+    const fix = sim.run([mk("trip.update", { patch: { settings: { ld_max_yd: 500 } } })], { commish: true });
+    expect(one(fix, "contest_lead").payload).toMatchObject({ leader_ids: [p.A2], distance: 450 });
+    const body = sim.render(entry).body;
+    expect(body).toContain("450 yd");
+    expect(body.toLowerCase()).not.toContain("review");
+    expect(sim.render(entry).tone).toBe("info");
   });
 
   it("withdrawing an entry removes its post", () => {
@@ -888,7 +1099,7 @@ describe("contest_entry / contest_lead", () => {
 // ---------------------------------------------------------------------------
 
 describe("lead_change", () => {
-  it("posts only when the leader set changes, with a push and a big roast", () => {
+  it("posts only when the SOLE leader changes, with a push and a big roast; ties post nothing", () => {
     const { sim, A, B, C } = live();
     // Tee-offs with nobody scored: no lead.
     expect(ofType(sim.run([tee(A, 1), tee(B, 1)]), "lead_change")).toEqual([]);
@@ -907,12 +1118,18 @@ describe("lead_change", () => {
     expect(ofType(sim.run([score(B, 2, 4)]), "lead_change")).toEqual([]);
     expect(ofType(sim.run([score(A, 2, 5)]), "lead_change")).toEqual([]);
 
-    // A tie is a change (leaders in leaderboard order: equal net to par, lower net first).
-    const r3 = sim.run([score(C, 1, 3)]);
+    // C ties B for the lead: not a lead change.
+    expect(ofType(sim.run([score(C, 1, 3)]), "lead_change")).toEqual([]);
+    // B breaks the tie: B already held the lead, so still nothing.
+    expect(ofType(sim.run([score(B, 3, 2)]), "lead_change")).toEqual([]); // par 3: B -2, C -1
+    // C ties again, then passes B: one post, crediting B as the team knocked off the top.
+    expect(ofType(sim.run([score(C, 2, 3)]), "lead_change")).toEqual([]); // C -2
+    const r3 = sim.run([score(C, 3, 2)]); // C -3
     const l3 = one(r3, "lead_change");
-    expect(l3.payload.leader_team_ids).toEqual([C, B]);
-    expect(l3.team_id).toBeNull();
-    expect(sim.render(l3).title).toBe("TIE FOR THE LEAD");
+    expect(l3.payload).toEqual({ leader_team_ids: [C], previous_leader_team_ids: [B], net_to_par: -3, thru: 3 });
+    expect(l3.team_id).toBe(C);
+    expect(sim.render(l3).title).toBe("NEW LEADER");
+    expect(sim.active("lead_change").map((e) => e.payload.leader_team_ids)).toEqual([[A], [B], [C]]);
   });
 
   it("compares against the latest lead_change post, not the batch start (one post per batch)", () => {
@@ -926,12 +1143,66 @@ describe("lead_change", () => {
     expect(one(sim.run([score(A, 3, 1)]), "lead_change").payload.leader_team_ids).toEqual([A]);
   });
 
-  it("drinks can change the lead", () => {
+  it("drinks on a scored hole (window still open) can change the lead", () => {
     const { sim, A, B, p } = live();
     sim.run([tee(A, 1), tee(B, 1), score(A, 1, 4), score(B, 1, 5)]);
     expect(sim.active("lead_change").at(-1)!.payload.leader_team_ids).toEqual([A]);
     const r = sim.run([drink(B, p.B1, 1), drink(B, p.B2, 1)]);
     expect(one(r, "lead_change").payload.leader_team_ids).toEqual([B]);
+  });
+
+  it("drinks on the open, unscored hole are banked: the lead moves when that hole is scored", () => {
+    const { sim, A, B, p } = live();
+    sim.run([tee(A, 1), tee(B, 1), score(A, 1, 4), score(B, 1, 5), tee(B, 2)]);
+    expect(sim.active("lead_change").map((e) => e.payload.leader_team_ids)).toEqual([[A]]);
+    // Two drinks on B's open hole 2: banked, not in the net yet.
+    const r1 = sim.run([drink(B, p.B1, 2), drink(B, p.B2, 2)]);
+    expect(ofType(r1, "lead_change")).toEqual([]);
+    expect(derive(sim.state).standings.find((r) => r.team_id === B)).toMatchObject({ net: 5, pending_credit: 2, pending_drinks: 2 });
+    // Scoring hole 2 (a 4, par 4) brings the banked credit in: B is -2 thru 2 and leads.
+    const r2 = sim.run([score(B, 2, 4)]);
+    expect(one(r2, "lead_change").payload).toMatchObject({ leader_team_ids: [B], previous_leader_team_ids: [A], net_to_par: -1, thru: 2 });
+  });
+
+  it("a close round synced op by op: lead changes come only from scores, never ties, and every post names a new sole leader", () => {
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const r = rng(seed);
+      const { sim, f, p } = live([4, 3, 3]);
+      const pars = f.state.holes.slice().sort((a, b) => a.number - b.number).map((h) => h.par);
+      const events: { t: number; op: () => Op }[] = [];
+      ["A", "B", "C"].forEach((T, ti) => {
+        const teamId = f.team[T];
+        const members = Object.keys(p).filter((k) => k.startsWith(T)).map((k) => p[k]);
+        for (let h = 1; h <= 18; h++) {
+          const t0 = ti * 10 + (h - 1) * 14;
+          events.push({ t: t0, op: () => tee(teamId, h, { at: at(t0) }) });
+          const nDrinks = Math.floor(r() * 3);
+          for (let i = 0; i < nDrinks; i++) {
+            const t = t0 + 1 + r() * 11;
+            const who = members[Math.floor(r() * members.length)];
+            events.push({ t, op: () => drink(teamId, who, h, "drink", { at: at(t), by: who }) });
+          }
+          const strokes = pars[h - 1] + (r() < 0.25 ? -1 : r() < 0.6 ? 0 : 1);
+          events.push({ t: t0 + 13, op: () => score(teamId, h, strokes, { at: at(t0 + 13) }) });
+        }
+      });
+      events.sort((a, b) => a.t - b.t);
+      let prevLeader: string | null = null;
+      events.forEach((e, i) => {
+        const op = e.op();
+        const res = sim.run([op], { now: Math.round(e.t * 60) + i });
+        for (const ev of ofType(res, "lead_change")) {
+          expect(op.type, `seed ${seed}`).toBe("score.set");
+          const leaders = ev.payload.leader_team_ids as string[];
+          expect(leaders, `seed ${seed}`).toHaveLength(1);
+          expect(leaders[0]).not.toBe(prevLeader);
+          prevLeader = leaders[0];
+        }
+      });
+      const posts = sim.active("lead_change").length;
+      expect(posts, `seed ${seed}`).toBeGreaterThan(0);
+      expect(posts, `seed ${seed}`).toBeLessThanOrEqual(15);
+    }
   });
 });
 
@@ -969,18 +1240,88 @@ describe("drive minimum", () => {
     const r8 = sim.run([teeshot(A, 8, p.A1)]);
     expect(one(r8, "drive_warning").payload).toMatchObject({ level: "impossible", remaining: 1 });
 
-    // Hole 9 to A1: the nine closes with A3 and A4 at zero.
-    const r9 = sim.run([teeshot(A, 9, p.A1)]);
+    // Hole 9 to A1: still on hole 9, so the nine isn't over yet (the chip can still be fixed).
+    const r9 = sim.run([teeshot(A, 9, p.A1), score(A, 9, 4)]);
     expect(ofType(r9, "drive_warning")).toEqual([]);
-    const miss = one(r9, "drive_miss");
+    expect(ofType(r9, "drive_miss")).toEqual([]);
+
+    // Teeing off 10 ends the nine with A3 and A4 at zero.
+    const r10 = sim.run([tee(A, 10)]);
+    const miss = one(r10, "drive_miss");
     expect(miss.dedupe_key).toBe(`drivemiss:${A}:1`);
     expect(miss.payload).toEqual({ nine: 1, missed: [p.A3, p.A4], commissioner_flag: true });
-    expect(r9.roast_triggers).toEqual([{ feed_event_id: miss.id, type: "drive_miss", team_id: A, hole: null, big: true }]);
+    expect(r10.roast_triggers).toEqual([{ feed_event_id: miss.id, type: "drive_miss", team_id: A, hole: null, big: true }]);
 
     // Moving on posts nothing more for the front nine.
-    const r10 = sim.run([tee(A, 10), score(A, 9, 4)]);
-    expect(ofType(r10, "drive_miss")).toEqual([]);
-    expect(ofType(r10, "drive_warning")).toEqual([]);
+    const r11 = sim.run([tee(A, 11)]);
+    expect(ofType(r11, "drive_miss")).toEqual([]);
+    expect(ofType(r11, "drive_warning")).toEqual([]);
+  });
+
+  it("a mis-tapped chip on the last hole of a nine, fixed seconds later, leaves no miss and takes back the 'cooked' post", () => {
+    const { sim, A, p } = live();
+    const shots = [p.A1, p.A2, p.A3, p.A1, p.A2, p.A3, p.A1, p.A2];
+    sim.run(shots.flatMap((who, i) => [tee(A, i + 1), teeshot(A, i + 1, who), score(A, i + 1, 4)]).concat(tee(A, 9)));
+    expect(derive(sim.state).driveMin[A].nines[0]).toMatchObject({ level: "hard", needing: [p.A4] });
+    const r1 = sim.run([teeshot(A, 9, p.A1)], { now: sim.nowSec + 5 }); // mis-tap
+    expect(ofType(r1, "drive_miss")).toEqual([]);
+    expect(r1.roast_triggers).toEqual([]);
+    const cooked = one(r1, "drive_warning");
+    expect(cooked.payload).toMatchObject({ level: "impossible", remaining: 0, needing: [p.A4] });
+
+    const r2 = sim.run([teeshot(A, 9, p.A4)], { now: sim.nowSec + 5 }); // fixed
+    expect(r2.feed).toEqual([expect.objectContaining({ id: cooked.id, deleted_at: srv(sim.nowSec) })]);
+    expect(r2.feed[0].payload.retracted).toBe(true);
+    sim.run([score(A, 9, 4), tee(A, 10)]);
+    expect(sim.active("drive_miss")).toEqual([]);
+    expect(sim.active("drive_warning").filter((e) => e.payload.level === "impossible")).toEqual([]);
+  });
+
+  it("a correction after the nine closed retracts the miss; breaking it again brings the same post back", () => {
+    const { sim, A, p } = frontNineWithA1(9);
+    const r10 = sim.run([tee(A, 10)]);
+    const miss = one(r10, "drive_miss");
+    expect(miss.payload.missed).toEqual([p.A2, p.A3, p.A4]);
+    // The commissioner fixes three tee shots: two still missed -> the same post, updated.
+    const fix1 = sim.run([teeshot(A, 7, p.A2)], { commish: true });
+    expect(ofType(fix1, "drive_miss")).toEqual([expect.objectContaining({ id: miss.id, deleted_at: null })]);
+    expect(sim.active("drive_miss")[0].payload.missed).toEqual([p.A3, p.A4]);
+    sim.run([teeshot(A, 8, p.A3)], { commish: true });
+    const fix3 = sim.run([teeshot(A, 9, p.A4)], { commish: true, now: 77_000 });
+    expect(ofType(fix3, "drive_miss")).toEqual([expect.objectContaining({ id: miss.id, deleted_at: srv(77_000) })]);
+    expect(sim.active("drive_miss")).toEqual([]);
+    // Undo the fix: the miss holds again and its post comes back (no second roast).
+    const back = sim.run([teeshot(A, 9, p.A1)], { commish: true });
+    expect(ofType(back, "drive_miss")).toEqual([expect.objectContaining({ id: miss.id, deleted_at: null })]);
+    expect(sim.active("drive_miss")[0].payload).toEqual({ nine: 1, missed: [p.A4], commissioner_flag: true });
+    expect(back.roast_triggers).toEqual([]);
+  });
+
+  it("a commissioner's feed.delete of a miss is final: it is not revived", () => {
+    const { sim, A, p } = frontNineWithA1(9);
+    const miss = one(sim.run([tee(A, 10)]), "drive_miss");
+    sim.run([mk("feed.delete", { event_id: miss.id, by: p.A1 })], { commish: true });
+    sim.run([teeshot(A, 9, p.A2)], { commish: true });
+    sim.run([teeshot(A, 9, p.A1)], { commish: true });
+    expect(sim.active("drive_miss")).toEqual([]);
+  });
+
+  it("a back-nine miss is flagged when the trip is finalized without Round complete", () => {
+    const { sim, A, p } = live();
+    const front = [p.A1, p.A2, p.A3, p.A4, p.A1, p.A1, p.A1, p.A1, p.A1];
+    const back = [p.A1, p.A2, p.A3, p.A1, p.A2, p.A3, p.A1, p.A2]; // A4 never; hole 18's chip never tapped
+    const ops: Op[] = [];
+    for (let h = 1; h <= 9; h++) ops.push(tee(A, h), teeshot(A, h, front[h - 1]), score(A, h, 4));
+    for (let h = 10; h <= 18; h++) {
+      ops.push(tee(A, h));
+      if (h < 18) ops.push(teeshot(A, h, back[h - 10]));
+      ops.push(score(A, h, 4));
+    }
+    sim.run(ops);
+    expect(sim.active("drive_miss")).toEqual([]);
+    const r = sim.run([mk("trip.finalize", {})], { commish: true });
+    expect(ofType(r, "drive_miss").map((e) => [e.team_id, e.payload.nine, e.payload.missed])).toEqual([[A, 2, [p.A4]]]);
+    expect(derive(sim.state).driveMin[A].nines[1]).toMatchObject({ closed: true, level: "ok", missed: [p.A4] });
   });
 
   it("impossible -> still impossible does not repeat", () => {

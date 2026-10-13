@@ -3,8 +3,11 @@
  * Caches (versioned names; bump CACHE_VERSION only when the caching scheme changes, so a normal
  * deploy never throws away the pages and chunks a phone needs to open with no signal):
  *   pages   navigations: network-first (4 s), cached by URL without its search string
- *   static  /_next/static/*, /icon*, /apple-icon*, /manifest.webmanifest, /favicon.ico: cache-first
- *   photos  /api/photos/* and Supabase public storage objects: cache-first (opaque OK)
+ *   static  /_next/static/*, /icon*, /apple-icon*, /favicon.ico: cache-first;
+ *           web manifests (/manifest.webmanifest, /t/<code>/manifest.webmanifest): network-first
+ *   photos  /api/photos/* and Supabase public storage objects: cache-first, and only a 200 is
+ *           ever cached (a photo requested before its upload landed 404s; caching that, or an
+ *           opaque response that might hide one, would keep it broken forever)
  * Everything else (other /api/*, non-GET, cross-origin) goes straight to the network.
  * Also: "warm" messages (cache given URLs), Web Push notifications and notification clicks.
  */
@@ -52,17 +55,23 @@ function isPhotoUrl(url) {
   return url.pathname.indexOf("/storage/v1/object/public/") !== -1 || (url.origin === self.location.origin && url.pathname.indexOf("/api/photos/") === 0);
 }
 
+const TRIP_MANIFEST_RE = /^\/t\/[^/]+\/manifest\.webmanifest$/;
+
+function isManifestPath(pathname) {
+  return pathname === "/manifest.webmanifest" || TRIP_MANIFEST_RE.test(pathname);
+}
+
 function isStaticPath(pathname) {
   return (
     pathname.indexOf("/_next/static/") === 0 ||
     pathname.indexOf("/icon") === 0 ||
     pathname.indexOf("/apple-icon") === 0 ||
-    pathname === "/manifest.webmanifest" ||
+    isManifestPath(pathname) ||
     pathname === "/favicon.ico"
   );
 }
 
-/** "page" | "static" | "photo" | null (null = network only, SW stays out of the way). */
+/** "page" | "manifest" | "static" | "photo" | null (null = network only, SW stays out of the way). */
 function classify(request) {
   if (request.method !== "GET") return null;
   let url;
@@ -76,6 +85,7 @@ function classify(request) {
   if (url.origin !== self.location.origin) return null;
   if (url.pathname.indexOf("/api/") === 0) return null;
   if (request.mode === "navigate") return "page";
+  if (isManifestPath(url.pathname)) return "manifest";
   if (isStaticPath(url.pathname)) return "static";
   return null;
 }
@@ -83,6 +93,7 @@ function classify(request) {
 self.addEventListener("fetch", (event) => {
   const kind = classify(event.request);
   if (kind === "page") event.respondWith(handlePage(event));
+  else if (kind === "manifest") event.respondWith(networkFirst(event, STATIC));
   else if (kind === "static") event.respondWith(cacheFirst(event, STATIC, false));
   else if (kind === "photo") event.respondWith(cacheFirst(event, PHOTOS, true));
 });
@@ -211,13 +222,16 @@ async function handlePage(event) {
   }
 }
 
-async function cacheFirst(event, cacheName, allowOpaque) {
+async function cacheFirst(event, cacheName, isPhoto) {
   const request = event.request;
   let cache = null;
+  let stale = null;
   try {
     cache = await caches.open(cacheName);
     const hit = await cache.match(request, { ignoreVary: true });
-    if (hit) return hit;
+    if (hit && hit.ok) return hit;
+    // A non-OK entry (an opaque photo cached by an older version) is only a last resort.
+    stale = hit || null;
   } catch (e) {
     cache = null;
   }
@@ -229,10 +243,10 @@ async function cacheFirst(event, cacheName, allowOpaque) {
     } catch (e) {
       crossOrigin = false;
     }
-    if (allowOpaque && crossOrigin) {
+    if (isPhoto && crossOrigin) {
       // <img> asks no-cors, and an opaque response hides a 404 (a photo referenced before its
-      // upload landed would stay broken forever). Supabase public storage allows CORS: ask with
-      // CORS to see the real status; fall back to the opaque request only if CORS itself fails.
+      // upload landed). Supabase public storage allows CORS: ask with CORS to see the real
+      // status; fall back to the opaque request only if CORS itself fails.
       try {
         res = await fetch(new Request(request.url, { mode: "cors", credentials: "omit" }));
       } catch (e) {
@@ -240,8 +254,8 @@ async function cacheFirst(event, cacheName, allowOpaque) {
       }
     }
     if (!res) res = await fetch(request);
-    const cacheable = res.ok || (allowOpaque && res.type === "opaque");
-    if (cache && cacheable) {
+    // Only a real 200 is cached: never a 404/5xx, and never an opaque response (it may be a 404).
+    if (cache && res.ok) {
       const copy = res.clone();
       event.waitUntil(
         cache
@@ -252,7 +266,36 @@ async function cacheFirst(event, cacheName, allowOpaque) {
     }
     return res;
   } catch (e) {
-    return new Response("", { status: 504, statusText: "Offline" });
+    return stale || new Response("", { status: 504, statusText: "Offline" });
+  }
+}
+
+/** Web manifests: network first (a renamed app shows up), the cached copy when offline. */
+async function networkFirst(event, cacheName) {
+  const request = event.request;
+  const cached = async () => {
+    try {
+      const cache = await caches.open(cacheName);
+      return (await cache.match(request, { ignoreVary: true })) || null;
+    } catch (e) {
+      return null;
+    }
+  };
+  try {
+    const res = await fetch(request);
+    if (res.ok) {
+      const copy = res.clone();
+      event.waitUntil(
+        caches
+          .open(cacheName)
+          .then((cache) => cache.put(request, copy))
+          .catch(() => undefined),
+      );
+      return res;
+    }
+    return (await cached()) || res;
+  } catch (e) {
+    return (await cached()) || new Response("", { status: 504, statusText: "Offline" });
   }
 }
 
@@ -273,7 +316,9 @@ async function warm(urls) {
       if (isStaticPath(url.pathname) || isPhotoUrl(url)) {
         const cacheName = isPhotoUrl(url) ? PHOTOS : STATIC;
         const cache = await caches.open(cacheName);
-        if (await cache.match(url.href, { ignoreVary: true })) continue;
+        // Manifests are refreshed every time (cheap, and they carry the app name).
+        const hit = isManifestPath(url.pathname) ? null : await cache.match(url.href, { ignoreVary: true });
+        if (hit && hit.ok) continue;
         const res = await fetch(url.href, { credentials: "same-origin" });
         if (res.ok) await cache.put(url.href, res);
       } else if (url.pathname.indexOf("/api/") !== 0 && !/\.[a-z0-9]+$/i.test(url.pathname)) {

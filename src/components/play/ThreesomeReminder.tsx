@@ -16,7 +16,7 @@ export function ThreesomeReminder({ onDismiss }: { onDismiss: () => void }) {
       <button
         type="button"
         onClick={onDismiss}
-        aria-label="Hide the threesome reminder for this hole"
+        aria-label="Hide the threesome reminder for the rest of the round"
         className="btn h-12 w-12 shrink-0 border-transparent bg-transparent p-0! text-ink active:bg-ghost/20"
       >
         <IconClose size={22} strokeWidth={3} />

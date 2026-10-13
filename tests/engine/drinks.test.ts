@@ -198,6 +198,35 @@ describe("computeDrinkValues — ordering and recompute", () => {
     expect(holeCredit(f, "A", 2)).toBe(2);
   });
 
+  it("spec: a drink logged after the team taps On the tee for hole 5 lands on hole 5, even if a stale phone stamped 4", () => {
+    const f = makeTrip({ teams: [4] });
+    f.teeOff("A", 4, 60).score("A", 4, 4);
+    f.teeOff("A", 5, 75); // phone A taps On the tee: hole 5
+    // Phone B hasn't seen it (dead zone): it stamps hole 4 for drinks at 78 and 79.
+    const late = f.drink("A", "A2", 4, "drink", { min: 78 });
+    const shot = f.drink("A", "A3", 4, "shot", { min: 79 });
+    // A drink logged at 70, while 4 really was open, stays on 4.
+    const early = f.drink("A", "A4", 4, "drink", { min: 70 });
+    const v = values(f.state);
+    expect([v[late].hole, v[shot].hole, v[early].hole]).toEqual([5, 5, 4]);
+    expect(holeCredit(f, "A", 4)).toBe(1);
+    expect(holeCredit(f, "A", 5)).toBe(2);
+    // The stored stamp is untouched (raw rows are the source of truth; the engine derives the hole).
+    expect(f.state.drinks.find((d) => d.id === late)!.hole).toBe(4);
+  });
+
+  it("a tee.open that syncs after the drink still re-homes it (the hole is derived, not stored)", () => {
+    const f = makeTrip({ teams: [4] });
+    f.teeOff("A", 1, 0);
+    const d = f.drink("A", "A1", 1, "drink", { min: 30 });
+    expect(values(f.state)[d].hole).toBe(1);
+    f.teeOff("A", 2, 20); // the scorer's offline tee.open (logged at 20) arrives later
+    expect(values(f.state)[d].hole).toBe(2);
+    // ...and a commissioner move pins it wherever they put it.
+    f.state = { ...f.state, drinks: f.state.drinks.map((x) => (x.id === d ? { ...x, hole: 1, moved_from_hole: 1 } : x)) };
+    expect(values(f.state)[d].hole).toBe(1);
+  });
+
   it("ignores deleted drinks and drinks of deleted teams", () => {
     const f = makeTrip({ teams: [3, 3] }).teeOff("A", 1).teeOff("B", 1);
     const gone = f.drink("A", "A1", 1);

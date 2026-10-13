@@ -1,7 +1,8 @@
 // Contests end to end against the real server: the commissioner sets hole 4's tee point and the
 // team reaches hole 4 (API); then a player measures a ~280 yd drive with a faked GPS fix, attaches
 // a photo and submits; it shows on the Contests tab. Then a closest-to-pin entry on hole 3 lands
-// on the green plot. The server ends up with both entries (and their photos) exactly once.
+// on the green plot, and an edit of it keeps its photo. The server ends up with both entries (and
+// their photos) exactly once.
 import { randomUUID } from "node:crypto";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
@@ -170,7 +171,7 @@ test("measure a long drive by GPS with a photo, then a closest-to-pin entry on t
   // Everything reaches the server (photos first, then the ops), exactly once.
   await expect(page.getByTestId("offline-badge")).toHaveCount(0, { timeout: 45_000 });
   const res = await page.request.get(`/api/t/${code}/state`);
-  const { state } = (await res.json()) as {
+  const body = (await res.json()) as {
     state: {
       contest_entries: Array<{
         hole: number;
@@ -185,7 +186,7 @@ test("measure a long drive by GPS with a photo, then a closest-to-pin entry on t
       }>;
     };
   };
-  const active = state.contest_entries.filter((e) => e.deleted_at === null);
+  const active = body.state.contest_entries.filter((e) => e.deleted_at === null);
   expect(active).toHaveLength(2);
   const ldRow = active.find((e) => e.type === "ld")!;
   expect(ldRow).toMatchObject({ hole: 4, player_id: players[1].id, distance_value: 280, status: "ok" });
@@ -199,4 +200,25 @@ test("measure a long drive by GPS with a photo, then a closest-to-pin entry on t
     expect(img.status()).toBe(200);
     expect(img.headers()["content-type"]).toContain("image/jpeg");
   }
+
+  // ---- Edit the closest to pin without retaking the photo: the photo stays with the entry (so
+  // the AI judge's verdict follows the edit instead of vanishing). No "no photo" escape hatch.
+  await card3.getByTestId("contest-enter").click();
+  await expect(ctp).toHaveAttribute("data-step", "photo");
+  await expect(page.getByTestId("ctp-photo-kept")).toBeVisible();
+  await expect(page.getByTestId("ctp-no-photo")).toHaveCount(0);
+  await page.getByTestId("ctp-next").click();
+  await expect(page.getByTestId("ctp-distance")).toHaveText(`6' 3"`);
+  await page.getByRole("button", { name: "One foot more" }).click();
+  await page.getByTestId("ctp-next").click();
+  await page.getByTestId("ctp-submit").click();
+  await dismissFanfare(page);
+  await expect(ctp).toHaveCount(0);
+  await expect(daveCtp.getByTestId("contest-distance")).toHaveText(`7' 3"`);
+  await expect(page.getByTestId("offline-badge")).toHaveCount(0, { timeout: 45_000 });
+  const after = (await (await page.request.get(`/api/t/${code}/state`)).json()) as typeof body;
+  const ctpRows = after.state.contest_entries.filter((e) => e.type === "ctp" && e.deleted_at === null);
+  expect(ctpRows).toHaveLength(1);
+  expect(ctpRows[0].distance_value).toBeCloseTo(7.25, 10);
+  expect(ctpRows[0].photo_path).toBe(ctpRow.photo_path);
 });

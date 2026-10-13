@@ -3,7 +3,9 @@
 // ops) and by the server (inside a per-trip lock; `writes` are persisted to Postgres).
 // Semantics are specified in CLAUDE.md "Reducer semantics".
 import {
+  DEFAULT_SETTINGS,
   REACTION_KINDS,
+  type AiConfidence,
   type AnyRow,
   type ContestEntry,
   type Drink,
@@ -62,6 +64,7 @@ import {
 import { contestForPar } from "./course";
 import { deriveId } from "./ids";
 import { openWindowHole } from "./engine/windows";
+import { isTripPhotoPath } from "./photos";
 
 export interface ApplyCtx {
   /** Server time on the server; client time on the client. Used for created_at/updated_at/deleted_at. */
@@ -79,7 +82,10 @@ export type ApplyResult =
   | { ok: true; state: TripState; writes: Write[] }
   | { ok: false; code: RejectCode; reason: string };
 
-/** Play ops: require trip.status === "live" (or "final" for a commissioner override). */
+/**
+ * Play ops: require trip.status === "live" (or "final" for a commissioner override, or for a late
+ * sync of something that happened before the commissioner finalized).
+ */
 export const PLAY_OPS: ReadonlySet<OpType> = new Set<OpType>([
   "tee.open",
   "round.complete",
@@ -100,6 +106,11 @@ export const MIN_TEAM_SIZE = 2;
 export const CTP_MAX_FT = 200;
 export const LD_MAX_YD = 700;
 const MAX_NAME_CHARS = 80;
+/**
+ * Clock-skew allowance between phones and the server: a play op stamped up to this long after the
+ * trip was finalized (or after its team tapped Round complete) still counts as "during the round".
+ */
+export const CLOCK_GRACE_MS = 2 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Rejections
@@ -163,11 +174,23 @@ function requireHole(v: unknown): number {
   return v;
 }
 
-/** Optional non-empty string (empty string / null / undefined -> null). */
-function optString(v: unknown, what: string): string | null {
+/** Optional photo: null, or a `trips/<this trip>/<kind>/<uuid>.jpg` path (never a URL or data: URI). */
+function optPhoto(s: TripState, v: unknown): string | null {
   if (v === null || v === undefined || v === "") return null;
-  if (typeof v !== "string") reject("invalid", `Bad ${what}.`);
+  if (!isTripPhotoPath(v, s.trip.id)) reject("invalid", "That photo isn't from this trip. Nice try, Photoshop.");
   return v;
+}
+
+/** `at` is more than CLOCK_GRACE_MS after `ref` (client timestamps). */
+const pastGrace = (at: ISODate, ref: ISODate) => time(at) > time(ref) + CLOCK_GRACE_MS;
+
+/**
+ * AI judge rule (same as server/judge.ts isSuspicious): the claim is under `ratio` × the AI's
+ * estimate and the AI isn't low-confidence.
+ */
+function isSuspiciousClaim(claimedFt: number, estimateFt: number, confidence: AiConfidence, ratio: number): boolean {
+  const r = isFiniteNum(ratio) && ratio > 0 ? ratio : DEFAULT_SETTINGS.judge_suspicious_ratio;
+  return confidence !== "low" && claimedFt < r * estimateFt;
 }
 
 function optFinite(v: unknown, what: string, min: number, max: number): number | null {
@@ -236,6 +259,15 @@ function roundStateOf(s: TripState, teamId: UUID): TeamRoundState | undefined {
 /** op.by when it names a known player (FK-safe), else null. */
 function actorId(s: TripState, op: Op): UUID | null {
   return isId(op.by) && s.players.some((p) => p.id === op.by) ? op.by : null;
+}
+
+/** op.by plays on `teamId` (players act for themselves and teammates; anyone else needs the commissioner). */
+function actsForTeam(s: TripState, op: Op, teamId: UUID): boolean {
+  return isId(op.by) && teamIdOfPlayer(s, op.by) === teamId;
+}
+
+function teamName(s: TripState, teamId: UUID): string {
+  return s.teams.find((t) => t.id === teamId)?.name ?? "another team";
 }
 
 // ---------------------------------------------------------------------------
@@ -414,9 +446,13 @@ function scoreSet(tx: Tx, op: ScoreSetOp): void {
     reject("invalid", `Strokes must be a whole number from 1 to ${MAX_STROKES}. Pick up, my guy.`);
   }
   const existing = tx.state.hole_scores.find((r) => r.team_id === team.id && r.hole === hole);
-  // LWW by client time: an older (e.g. offline) edit never clobbers a newer one. A commissioner
+  // LWW by client time: an older (e.g. offline) edit never clobbers a newer one. It's rejected
+  // (so the losing phone hears about it) unless it agrees with the stored value. A commissioner
   // override always wins, so a phone with a clock set in the future can't lock a hole forever.
-  if (existing && isAfter(existing.strokes_at, op.at) && !tx.override) return;
+  if (existing && isAfter(existing.strokes_at, op.at) && !tx.override) {
+    if (existing.strokes === op.strokes) return;
+    reject("conflict", `Hole ${hole} already got a newer edit: ${existing.strokes ?? "no score"}. Your ${op.strokes} lost the race.`);
+  }
   const by = actorId(tx.state, op);
   if (existing) {
     const changed = existing.strokes !== null && existing.strokes !== op.strokes;
@@ -443,7 +479,12 @@ function teeShotSet(tx: Tx, op: TeeShotSetOp): void {
     }
   }
   const existing = tx.state.hole_scores.find((r) => r.team_id === team.id && r.hole === hole);
-  if (existing && isAfter(existing.tee_shot_at, op.at) && !tx.override) return; // LWW, as in score.set
+  // LWW, as in score.set.
+  if (existing && isAfter(existing.tee_shot_at, op.at) && !tx.override) {
+    if (existing.tee_shot_player_id === playerId) return;
+    const current = tx.state.players.find((p) => p.id === existing.tee_shot_player_id)?.name ?? "nobody";
+    reject("conflict", `Hole ${hole}'s tee shot already got a newer edit: ${current}.`);
+  }
   const by = actorId(tx.state, op);
   if (existing) {
     tx.patch("hole_scores", existing, { tee_shot_player_id: playerId, tee_shot_at: op.at, updated_by: by });
@@ -466,13 +507,19 @@ function drinkLog(tx: Tx, op: DrinkLogOp): void {
   }
   const hole = requireHole(op.hole);
   if (!(DRINK_TYPES as readonly string[]).includes(op.drink_type)) reject("invalid", "Drink, Shotgun or Shot. Pick one.");
-  const photo = optString(op.photo_path, "photo");
+  const photo = optPhoto(s, op.photo_path);
 
   // The client refuses drinks with no open window. The server trusts the client-stamped hole so a
-  // phone that was offline (and saw a window open at the time) never loses a drink.
-  if (tx.ctx.side === "client" && !tx.override) {
+  // phone that was offline (and saw a window open at the time) never loses a drink, except a
+  // drink logged after the team tapped Round complete (+ clock grace): hole 18's window was shut.
+  // The commissioner can add a drink anywhere.
+  if (!tx.override) {
     const rs = roundStateOf(s, team.id);
-    if (openWindowHole(rs) === null) {
+    const closed =
+      tx.ctx.side === "client"
+        ? openWindowHole(rs) === null
+        : rs?.status === "complete" && rs.completed_at !== null && pastGrace(op.at, rs.completed_at);
+    if (closed) {
       reject(
         "no_window",
         rs?.status === "complete"
@@ -510,6 +557,9 @@ function drinkDelete(tx: Tx, op: DrinkDeleteOp): void {
   const drink = tx.state.drinks.find((d) => d.id === op.drink_id);
   if (!drink) reject("not_found", "That drink doesn't exist. Did you dream it?");
   if (!isActive(drink)) return;
+  if (!tx.override && !actsForTeam(tx.state, op, drink.team_id)) {
+    reject("forbidden", `That's ${teamName(tx.state, drink.team_id)}'s drink. Only they (or the commissioner) can undo it.`);
+  }
   tx.patch("drinks", drink, { deleted_at: tx.now, deleted_by: actorId(tx.state, op) });
 }
 
@@ -527,6 +577,13 @@ function mulliganUse(tx: Tx, op: MulliganUseOp): void {
   const id = requireId(op.mulligan_id, "mulligan");
   const team = requireTeam(s, op.team_id);
   const hole = requireHole(op.hole);
+  // Unused mulligans expire at the end of the round (the server allows clock grace, like drinks).
+  const rs = roundStateOf(s, team.id);
+  if (rs?.status === "complete" && !tx.override) {
+    if (tx.ctx.side === "client" || (rs.completed_at !== null && pastGrace(op.at, rs.completed_at))) {
+      reject("conflict", `${team.name} already finished the round. Unused mulligans expired on 18.`);
+    }
+  }
   if (op.source === "earned") {
     // Bank = active shotgun + shot drinks minus active earned uses (deleting the drink voids it).
     const earned = s.drinks.filter((d) => d.team_id === team.id && isActive(d) && (d.type === "shotgun" || d.type === "shot")).length;
@@ -561,7 +618,29 @@ function mulliganUndo(tx: Tx, op: MulliganUndoOp): void {
   const m = tx.state.mulligans.find((x) => x.id === op.mulligan_id);
   if (!m) reject("not_found", "That mulligan doesn't exist. Can't undo a do-over you never did.");
   if (!isActive(m)) return;
+  if (!tx.override && !actsForTeam(tx.state, op, m.team_id)) {
+    reject("forbidden", `That's ${teamName(tx.state, m.team_id)}'s mulligan. Only they (or the commissioner) can undo it.`);
+  }
   tx.patch("mulligans", m, { deleted_at: tx.now });
+}
+
+type AiJudgement = Pick<ContestEntry, "ai_estimate_ft" | "ai_confidence" | "ai_suspicious" | "ai_roast">;
+const UNJUDGED: AiJudgement = { ai_estimate_ft: null, ai_confidence: null, ai_suspicious: null, ai_roast: null };
+
+/**
+ * A closest-to-pin edit on the SAME photo keeps the AI judge's read of that photo and re-judges the
+ * new claim against it (so retyping the number can't shed a suspicious flag). Otherwise unjudged:
+ * the judge runs on the new entry's photo after commit.
+ */
+function keptJudgement(replaced: ContestEntry[], photo: string | null, claimedFt: number, ratio: number): AiJudgement {
+  const prev = photo ? replaced.find((e) => e.photo_path === photo) : undefined;
+  if (!prev || prev.ai_estimate_ft === null || prev.ai_confidence === null) return UNJUDGED;
+  return {
+    ai_estimate_ft: prev.ai_estimate_ft,
+    ai_confidence: prev.ai_confidence,
+    ai_suspicious: isSuspiciousClaim(claimedFt, prev.ai_estimate_ft, prev.ai_confidence, ratio),
+    ai_roast: prev.ai_roast,
+  };
 }
 
 function contestSubmit(tx: Tx, op: ContestSubmitOp): void {
@@ -579,6 +658,11 @@ function contestSubmit(tx: Tx, op: ContestSubmitOp): void {
   const player = requirePlayer(s, op.player_id);
   const teamId = teamIdOfPlayer(s, player.id);
   if (!teamId) reject("conflict", `${player.name} isn't on a team, so no contests. Rules.`);
+  // A submit replaces the player's entry, so it follows contest.delete's rule: the player or a
+  // teammate (the commissioner can enter for anyone).
+  if (!tx.override && !actsForTeam(s, op, teamId)) {
+    reject("forbidden", `Only ${player.name}'s team can enter for ${player.name}. Or the commissioner.`);
+  }
 
   const d = op.distance_value;
   if (type === "ctp" && (!isFiniteNum(d) || d < 0 || d > CTP_MAX_FT)) {
@@ -591,27 +675,28 @@ function contestSubmit(tx: Tx, op: ContestSubmitOp): void {
   const lat = optFinite(op.lat, "latitude", -90, 90);
   const lng = optFinite(op.lng, "longitude", -180, 180);
   const acc = optFinite(op.gps_accuracy_m, "GPS accuracy", 0, Number.MAX_VALUE);
-  const photo = optString(op.photo_path, "photo");
+  const photo = optPhoto(s, op.photo_path);
   const lowAccuracy = op.low_accuracy === true;
 
-  // Long drive sanity checks route to the commissioner instead of counting.
+  // Long drive: a position we can't trust routes to the commissioner instead of counting. The
+  // sanity range is NOT stored: the engine re-checks it against the current tee point and settings.
   let status: ContestEntry["status"] = "ok";
   let flagReason: string | null = null;
   if (type === "ld") {
-    const { ld_min_yd, ld_max_yd } = s.trip.settings;
-    if (lowAccuracy) {
+    if (op.simulated === true && !tx.override && !s.trip.is_demo) {
+      status = "flagged";
+      flagReason = "Simulated GPS";
+    } else if (lowAccuracy) {
       status = "flagged";
       flagReason = "GPS was weak";
-    } else if (d < ld_min_yd || d > ld_max_yd) {
-      status = "flagged";
-      flagReason = `Out of range: ${Math.round(d)} yd`;
     }
   }
 
   // Re-measure replaces: the player's other active entries on this hole go away.
-  for (const e of s.contest_entries) {
-    if (e.player_id === player.id && e.hole === holeNo && isActive(e)) tx.patch("contest_entries", e, { deleted_at: tx.now });
-  }
+  const replaced = s.contest_entries.filter((e) => e.player_id === player.id && e.hole === holeNo && isActive(e));
+  for (const e of replaced) tx.patch("contest_entries", e, { deleted_at: tx.now });
+
+  const ai = type === "ctp" ? keptJudgement(replaced, photo, d, s.trip.settings.judge_suspicious_ratio) : UNJUDGED;
 
   const row: ContestEntry = {
     id,
@@ -629,10 +714,7 @@ function contestSubmit(tx: Tx, op: ContestSubmitOp): void {
     gps_accuracy_m: acc,
     low_accuracy: lowAccuracy,
     photo_path: photo,
-    ai_estimate_ft: null,
-    ai_confidence: null,
-    ai_suspicious: null,
-    ai_roast: null,
+    ...ai,
     status,
     flag_reason: flagReason,
     created_at: tx.now,
@@ -646,6 +728,9 @@ function contestDelete(tx: Tx, op: ContestDeleteOp): void {
   const e = tx.state.contest_entries.find((x) => x.id === op.entry_id);
   if (!e) reject("not_found", "That contest entry doesn't exist.");
   if (!isActive(e)) return;
+  if (!tx.override && op.by !== e.player_id && !actsForTeam(tx.state, op, e.team_id)) {
+    reject("forbidden", "Hands off another team's contest entry. Only its team (or the commissioner) can pull it.");
+  }
   tx.patch("contest_entries", e, { deleted_at: tx.now });
 }
 
@@ -672,7 +757,7 @@ function postCreate(tx: Tx, op: PostCreateOp): void {
   if (op.text !== null && op.text !== undefined && typeof op.text !== "string") reject("invalid", "Bad post text.");
   const text = typeof op.text === "string" ? op.text.trim() : "";
   if (text.length > MAX_POST_CHARS) reject("invalid", `Keep it under ${MAX_POST_CHARS} characters, Hemingway.`);
-  const photo = optString(op.photo_path, "photo");
+  const photo = optPhoto(s, op.photo_path);
   if (!text && !photo) reject("invalid", "Say something (or post a photo). Silence isn't content.");
   const author = actorId(s, op);
   const row: FeedEvent = {
@@ -1147,10 +1232,13 @@ function applyOrThrow(state: TripState, op: Op, ctx: ApplyCtx): ApplyResult {
   if ((COMMISSIONER_ONLY_OPS.has(op.type) || op.as_commissioner) && !ctx.is_commissioner) {
     reject("forbidden", "Commissioner only. Nice try, though.");
   }
-  // 2. Play ops need a live round (a commissioner override may also fix a final one).
+  // 2. Play ops need a live round. A commissioner override may also fix a final one, and a late
+  //    sync of something that happened before the finalize (+ clock grace) still lands. A fresh
+  //    dispatch on a phone that already shows the round final is not late: it's after.
   if (PLAY_OPS.has(op.type)) {
-    const status = state.trip.status;
-    const allowed = status === "live" || (status === "final" && !!op.as_commissioner);
+    const { status, finalized_at } = state.trip;
+    const late = ctx.side === "server" && finalized_at !== null && !pastGrace(op.at, finalized_at);
+    const allowed = status === "live" || (status === "final" && (!!op.as_commissioner || late));
     if (!allowed) {
       reject(
         "not_live",

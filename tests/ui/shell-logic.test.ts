@@ -5,7 +5,10 @@ import { defaultTab, isTabKey, resolveTab, tabAllowed, MAIN_TABS } from "@/compo
 import { activePlayers, formatTeeTime, rosterGroups, teamOfPlayer } from "@/components/shell/roster";
 import { fanfareForEvent, FANFARE_MAX_AGE_MS } from "@/components/shell/feedFanfare";
 import { bearingDeg, destinationPoint, pointFromTee, YARD_M } from "@/components/shell/geoMath";
-import { countUnread, latestFeedAt } from "@/components/shell/hooks";
+import { countUnread, isFreshRejection, latestFeedAt, rejectionMessage } from "@/components/shell/hooks";
+import { issueKind, syncIssuesChipText } from "@/components/shell/SyncIssues";
+import { describeOp, loadSyncIssues, saveSyncIssues, syncIssuesKey, MAX_SYNC_ISSUES, type SyncIssue } from "@/lib/client/sync-issues";
+import type { Op } from "@/lib/ops";
 import { loadErrorKind } from "@/components/shell/Splash";
 import { onboardingSteps } from "@/components/join/Onboarding";
 
@@ -202,5 +205,75 @@ describe("load errors and onboarding steps", () => {
   it("skips the install step when running standalone", () => {
     expect(onboardingSteps(false)).toEqual(["install", "location", "notify"]);
     expect(onboardingSteps(true)).toEqual(["location", "notify"]);
+  });
+});
+
+describe("sync issues (changes the server refused)", () => {
+  const f = makeTrip({ teams: [4, 3], status: "live" });
+  f.state.players.find((p) => p.id === f.player.A2)!.nickname = "Moose";
+  const base = { id: "op-1", at: at(0), by: f.player.A1 };
+  const describe1 = (op: Record<string, unknown>) => describeOp({ ...base, ...op } as unknown as Op, f.state);
+
+  it("describes ops for people, with names from the trip", () => {
+    expect(describe1({ type: "score.set", team_id: f.team.A, hole: 6, strokes: 4 })).toBe("Hole 6 score: 4 · Team A");
+    expect(describe1({ type: "drink.log", drink_id: "d", team_id: f.team.A, player_id: f.player.A2, hole: 3, drink_type: "shotgun", photo_path: null })).toBe(
+      "Shotgun for Moose · hole 3",
+    );
+    expect(describe1({ type: "mulligan.use", mulligan_id: "m", team_id: f.team.B, hole: 5, source: "groom" })).toBe("Groom's Mulligan · hole 5 · Team B");
+    expect(describe1({ type: "teeshot.set", team_id: f.team.A, hole: 2, player_id: f.player.A1 })).toBe("Hole 2 tee shot: Player A1 · Team A");
+    expect(
+      describe1({ type: "contest.submit", entry_id: "e", hole: 7, player_id: f.player.A1, contest_type: "ctp", distance_value: 12.5, angle_deg: null, lat: null, lng: null, gps_accuracy_m: null, low_accuracy: false, photo_path: null }),
+    ).toBe("Closest to pin: 12.5 ft · Player A1 · hole 7");
+    expect(describe1({ type: "post.create", event_id: "p", text: "  what a   ball  ", photo_path: null })).toBe("Post: “what a ball”");
+    expect(describe1({ type: "drink.delete", drink_id: "missing" })).toBe("Undo a drink");
+    expect(describe1({ type: "trip.finalize" })).toBe("Finalize results");
+    // Unknown names don't break it.
+    expect(describeOp({ ...base, type: "score.set", team_id: "gone", hole: 1, strokes: 3 } as Op, null)).toBe("Hole 1 score: 3");
+  });
+
+  it("round-trips through storage per trip (newest 20) and ignores junk", () => {
+    const map = new Map<string, string>();
+    const storage = { getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, v), removeItem: (k: string) => void map.delete(k) };
+    const issues: SyncIssue[] = Array.from({ length: 25 }, (_, i) => ({
+      id: `op-${i}`,
+      status: "rejected",
+      code: "conflict",
+      reason: "No",
+      op_type: "score.set",
+      description: `Hole ${i}`,
+      at: at(i),
+    }));
+    saveSyncIssues("trip1", issues, storage);
+    const back = loadSyncIssues("trip1", storage);
+    expect(back).toHaveLength(MAX_SYNC_ISSUES);
+    expect(back[0].id).toBe("op-5");
+    expect(loadSyncIssues("trip2", storage)).toEqual([]);
+    map.set(syncIssuesKey("trip3"), JSON.stringify([{ id: 1 }, null, back[0]]));
+    expect(loadSyncIssues("trip3", storage)).toEqual([back[0]]);
+    map.set(syncIssuesKey("trip4"), "{not json");
+    expect(loadSyncIssues("trip4", storage)).toEqual([]);
+    saveSyncIssues("trip1", [], storage);
+    expect(map.has(syncIssuesKey("trip1"))).toBe(false);
+    expect(loadSyncIssues("trip1", null)).toEqual([]);
+  });
+
+  it("toasts say what didn't save, and only fresh rejections toast", () => {
+    expect(rejectionMessage({ description: "Hole 6 score: 4", reason: "Hole 6 already got a newer edit: 5", code: "conflict" })).toBe(
+      "Hole 6 score: 4 — Hole 6 already got a newer edit: 5",
+    );
+    expect(rejectionMessage({ code: "not_live" })).toBe("The round isn't live, so that didn't count.");
+    const mounted = Date.parse(at(10));
+    expect(isFreshRejection({ at: at(11) }, mounted)).toBe(true);
+    expect(isFreshRejection({ at: at(2) }, mounted)).toBe(false); // restored from an earlier visit
+  });
+
+  it("chip and labels", () => {
+    expect(syncIssuesChipText(0)).toBeNull();
+    expect(syncIssuesChipText(3)).toBe("⚠️ 3");
+    expect(issueKind("drink.log")).toBe("Drink");
+    expect(issueKind("teeshot.set")).toBe("Tee shot");
+    expect(issueKind("tee.open")).toBe("Hole");
+    expect(issueKind("photo")).toBe("Photo");
+    expect(issueKind("trip.update")).toBe("Setup");
   });
 });

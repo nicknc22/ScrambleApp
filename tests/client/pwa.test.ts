@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import manifest from "@/app/manifest";
+import { GET as tripManifest } from "@/app/t/[code]/manifest.webmanifest/route";
+import TripPage, { generateMetadata as tripPageMetadata } from "@/app/t/[code]/page";
+import { createTestDb, setDbForTests, type Db, type DbConnection } from "@/lib/server/db";
+import { createTrip } from "@/lib/server/trips";
 import { GET as icon192 } from "@/app/icon-192.png/route";
 import { GET as icon512 } from "@/app/icon-512.png/route";
 import AppleIcon from "@/app/apple-icon";
@@ -39,6 +43,74 @@ describe("web app manifest", () => {
     const icons = m.icons ?? [];
     for (const src of ["/icon-192.png", "/icon-512.png"]) {
       expect(icons.filter((i) => i.src === src).map((i) => i.purpose).sort()).toEqual(["any", "maskable"]);
+    }
+  });
+});
+
+describe("per-trip manifest (Home Screen icon opens the trip)", () => {
+  let db: DbConnection;
+  const params = (code: string) => ({ params: Promise.resolve({ code }) });
+  const get = async (code: string) => {
+    const res = await tripManifest(new Request(`http://localhost/t/${code}/manifest.webmanifest`), params(code));
+    return { res, body: res.ok ? ((await res.json()) as Record<string, unknown>) : null };
+  };
+
+  beforeAll(async () => {
+    db = await createTestDb();
+    setDbForTests(db);
+    await createTrip(db, { code: "bachparty", name: "Jack Frost Scramble", app_name: "Bachelor Open", pin_hash: "scrypt:x:y" });
+  });
+  afterAll(async () => {
+    setDbForTests(null);
+    await db?.close();
+  });
+
+  it("starts at the trip, scoped to the whole app, named after the trip's app_name", async () => {
+    const { res, body } = await get("BachParty");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/manifest+json");
+    expect(body).toMatchObject({
+      id: "/t/bachparty",
+      start_url: "/t/bachparty?source=homescreen",
+      scope: "/",
+      name: "Bachelor Open",
+      short_name: "Bachelor Open",
+      display: "standalone",
+      theme_color: "#0a7d3e",
+    });
+    expect(body!.icons).toEqual(manifest().icons);
+  });
+
+  it("falls back to 'Scramble' for an unknown trip or a database that doesn't answer in time", async () => {
+    expect((await get("nosuchtrip")).body).toMatchObject({ name: "Scramble", start_url: "/t/nosuchtrip?source=homescreen" });
+    const hanging: Db = { query: () => new Promise(() => undefined), tx: () => new Promise(() => undefined) };
+    setDbForTests(hanging);
+    try {
+      const t0 = Date.now();
+      const { body } = await get("bachparty");
+      expect(Date.now() - t0).toBeLessThan(5000);
+      expect(body).toMatchObject({ name: "Scramble", id: "/t/bachparty" });
+    } finally {
+      setDbForTests(db);
+    }
+  });
+
+  it("404s for something that can't be a trip code", async () => {
+    expect((await get("x")).res.status).toBe(404);
+  });
+
+  it("the trip page links it without touching the database", async () => {
+    const broken: Db = {
+      query: () => Promise.reject(new Error("the page must not query")),
+      tx: () => Promise.reject(new Error("the page must not query")),
+    };
+    setDbForTests(broken);
+    try {
+      expect(await tripPageMetadata(params("BachParty"))).toEqual({ title: "Scramble", manifest: "/t/bachparty/manifest.webmanifest" });
+      const el = (await TripPage(params("%20BachParty"))) as { props: { code: string } };
+      expect(el.props.code).toBe("bachparty");
+    } finally {
+      setDbForTests(db);
     }
   });
 });

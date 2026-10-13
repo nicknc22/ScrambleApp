@@ -5,7 +5,7 @@ import { derive } from "@/lib/engine";
 import { makeTrip } from "../fixtures";
 import { GreenPlot } from "@/components/contests/GreenPlot";
 import { ContestCard } from "@/components/contests/ContestCard";
-import { entryOf, plotEntries } from "@/components/contests/model";
+import { entryOf, plotEntries, potWinnerLine } from "@/components/contests/model";
 
 function scene() {
   const f = makeTrip({ teams: [4, 3, 3], settings: { contest_ante_cents: 500 } });
@@ -76,6 +76,47 @@ describe("ContestCard", () => {
     expect(html).toContain(`~12&#x27; 0&quot; · high confidence`);
     expect(html).toContain('data-testid="green-plot"');
     expect(html).toContain("Edit my closest to pin");
+  });
+
+  it("names the pot's real winner when the leader opted out (finding: contest card leader isn't the pot winner)", () => {
+    const f = makeTrip({ teams: [4, 3, 3], settings: { contest_ante_cents: 500 } });
+    f.optOut("A1", "contest:3");
+    f.teeOff("A", 3).teeOff("B", 3);
+    f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 3 });
+    f.entry({ hole: 3, player_id: f.player.B1, type: "ctp", distance_value: 9 });
+    const d = derive(f.state);
+    const ctp = d.contests.find((c) => c.hole === 3)!;
+    expect(ctp.leader_ids).toEqual([f.player.A1]);
+    expect(d.money.pots.find((p) => p.key === "contest:3")!.winners).toEqual([f.player.B1]);
+    expect(potWinnerLine(ctp, d.money.pots, d)).toBe("Pot → Player B1 (Player A1 opted out)");
+    const html = renderToStaticMarkup(
+      <ContestCard
+        summary={ctp}
+        derived={d}
+        pots={d.money.pots}
+        meId={f.player.B1}
+        access={{ can: true, reason: null }}
+        myEntry={entryOf(ctp, f.player.B1)}
+        photoUrl={() => null}
+        onEnter={() => {}}
+        onOpenPhoto={() => {}}
+        current={false}
+      />,
+    );
+    expect(html).toContain(`Player A1 at 3&#x27; 0&quot;`);
+    expect(html).toContain('data-testid="contest-pot-winner"');
+    expect(html).toContain("Pot → Player B1 (Player A1 opted out)");
+
+    // Nobody in the pot has an entry yet: the money isn't the leader's either.
+    const g = makeTrip({ teams: [4, 3, 3], settings: { contest_ante_cents: 500 } });
+    g.optOut("A1", "contest:3");
+    g.teeOff("A", 3);
+    g.entry({ hole: 3, player_id: g.player.A1, type: "ctp", distance_value: 3 });
+    const dg = derive(g.state);
+    expect(potWinnerLine(dg.contests.find((c) => c.hole === 3)!, dg.money.pots, dg)).toBe("Pot → nobody yet (Player A1 opted out)");
+    // The leader takes the pot: no extra line.
+    const { d: d2 } = scene();
+    expect(potWinnerLine(d2.contests.find((c) => c.hole === 3)!, d2.money.pots, d2)).toBeNull();
   });
 
   it("long drive: no plot, review status, and the reason instead of a button", () => {

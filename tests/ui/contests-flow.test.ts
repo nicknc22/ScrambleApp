@@ -18,6 +18,7 @@ import {
   ctpCanAdvance,
   ctpDistance,
   ctpNextStep,
+  ctpPhotoPath,
   ctpPrevStep,
   ctpSubmitInput,
   defaultEntrant,
@@ -49,8 +50,10 @@ const weakTry = (acc: number): GpsEvent[] => [{ type: "start" }, { type: "result
 const north = (p: { lat: number; lng: number }, yards: number) => ({ lat: p.lat + ((yards * 0.9144) / 6371008.8) * (180 / Math.PI), lng: p.lng });
 const TEE = { lat: 41.0948, lng: -75.648 };
 
+/** `by` defaults to the entrant (only the player's team, or the commissioner, may enter for them). */
 function apply(state: TripState, input: OpInput, opts: { by?: string | null; minute?: number; commish?: boolean } = {}) {
-  const op = { ...input, id: randomUUID(), at: at(opts.minute ?? 30), by: opts.by ?? null } as Op;
+  const by = opts.by !== undefined ? opts.by : ((input as { player_id?: string }).player_id ?? null);
+  const op = { ...input, id: randomUUID(), at: at(opts.minute ?? 30), by } as Op;
   return applyOp(state, op, { now: at(opts.minute ?? 30), is_commissioner: opts.commish ?? false, side: "client" });
 }
 
@@ -59,6 +62,9 @@ function mustApply(state: TripState, input: OpInput, opts: Parameters<typeof app
   if (!r.ok) throw new Error(`${input.type} rejected: ${r.reason}`);
   return r.state;
 }
+
+/** A valid photo path for the trip (the reducer only accepts trips/<trip_id>/<kind>/<uuid>.jpg). */
+const photoFor = (state: TripState, kind: "ld" | "ctp") => `trips/${state.trip.id}/${kind}/${randomUUID()}.jpg`;
 
 function withTee(state: TripState, hole: number, tee = TEE): TripState {
   return { ...state, holes: state.holes.map((h) => (h.number === hole ? { ...h, tee_lat: tee.lat, tee_lng: tee.lng } : h)) };
@@ -85,7 +91,7 @@ describe("GPS state machine", () => {
     expect(run(weakTry(13)).phase).toBe("weak");
   });
 
-  it("weak -> retry; the review fallback unlocks after 3 failed tries with the best reading", () => {
+  it("weak -> retry; the review fallback unlocks after 3 failed tries with the latest reading", () => {
     let s = run(weakTry(30));
     expect(s.phase).toBe("weak");
     expect(s.failures).toBe(1);
@@ -101,7 +107,25 @@ describe("GPS state machine", () => {
     const fixed = gpsReducer(s, { type: "accept_weak" });
     expect(fixed.phase).toBe("fixed");
     expect(fixed.lowAccuracy).toBe(true);
-    expect(fixed.fix?.accuracy).toBe(18); // the most accurate of the three
+    expect(fixed.fix?.accuracy).toBe(25); // the latest try's reading: the player may have moved since the ±18 m one
+  });
+
+  it("after 'Measure again', the weak fallback never reuses a reading from the earlier spot (finding: GPS fallback stale best)", () => {
+    // A good ±4 m fix at spot A (not at the ball yet), then three weak tries at the ball.
+    let s = run([{ type: "start" }, { type: "result", reading: reading(4, 41.0), limitM: LIMIT }]);
+    expect(s.phase).toBe("fixed");
+    s = run([{ type: "start" }, { type: "result", reading: reading(25, 41.2), limitM: LIMIT }], s);
+    // Tries start over at the new spot.
+    expect(s.failures).toBe(1);
+    expect(canAcceptWeak(s)).toBe(false);
+    s = run([{ type: "start" }, { type: "result", reading: reading(20, 41.21), limitM: LIMIT }, { type: "start" }, { type: "result", reading: reading(30, 41.22), limitM: LIMIT }], s);
+    expect(canAcceptWeak(s)).toBe(true);
+    const fixed = gpsReducer(s, { type: "accept_weak" });
+    expect(fixed).toMatchObject({ phase: "fixed", lowAccuracy: true });
+    expect(fixed.fix).toMatchObject({ lat: 41.22, accuracy: 30 }); // the latest try at the ball, not spot A's ±4 m
+    // A later try with no reading at all still sends the latest reading there is.
+    const timedOut = run([{ type: "start" }, { type: "error", code: "timeout" }], s);
+    expect(gpsReducer(timedOut, { type: "accept_weak" }).fix).toMatchObject({ lat: 41.22 });
   });
 
   it("a good reading on a retry clears the weak path", () => {
@@ -282,6 +306,7 @@ describe("submitting through the real reducer", () => {
     f.teeOff("A", 4);
     const state = withTee(f.state, 4);
     const ball = north(TEE, 281);
+    const photo = photoFor(state, "ld");
     const input = ldSubmitInput({
       entryId: randomUUID(),
       hole: 4,
@@ -289,14 +314,15 @@ describe("submitting through the real reducer", () => {
       yards: 281,
       fix: { ...ball, accuracy: 4.26 },
       lowAccuracy: false,
-      photoPath: "trips/x/ld/y.jpg",
+      photoPath: photo,
     });
     expect(input).toMatchObject({ type: "contest.submit", contest_type: "ld", angle_deg: null, gps_accuracy_m: 4.3, low_accuracy: false });
+    expect(input).not.toHaveProperty("simulated");
     const next = mustApply(state, input, { by: f.player.A1 });
     const c = derive(next).contests.find((x) => x.hole === 4)!;
     expect(c.entries).toHaveLength(1);
     expect(c.entries[0]).toMatchObject({ player_id: f.player.A2, distance: 281, valid: true, rank: 1 });
-    expect(c.entries[0].entry.photo_path).toBe("trips/x/ld/y.jpg");
+    expect(c.entries[0].entry.photo_path).toBe(photo);
   });
 
   it("a weak-GPS drive is flagged for the commissioner", () => {
@@ -309,7 +335,7 @@ describe("submitting through the real reducer", () => {
       yards: 250,
       fix: { ...north(TEE, 250), accuracy: 31 },
       lowAccuracy: true,
-      photoPath: "trips/x/ld/z.jpg",
+      photoPath: photoFor(state, "ld"),
     });
     const c = derive(mustApply(state, input)).contests.find((x) => x.hole === 4)!;
     expect(c.entries[0].valid).toBe(false);
@@ -318,11 +344,58 @@ describe("submitting through the real reducer", () => {
     expect(entryNote(c.entries[0])).toMatch(/GPS was weak/);
   });
 
+  it("a drive measured from the GPS simulator says so on the op, and goes to the commissioner", () => {
+    const f = makeTrip({ teams: [4, 3, 3] });
+    f.teeOff("A", 4);
+    const state = withTee(f.state, 4);
+    const input = ldSubmitInput({
+      entryId: randomUUID(),
+      hole: 4,
+      playerId: f.player.A1,
+      yards: 330,
+      fix: { ...north(TEE, 330), accuracy: 3, simulated: true },
+      lowAccuracy: false,
+      photoPath: photoFor(state, "ld"),
+    });
+    expect(input).toMatchObject({ simulated: true, low_accuracy: false });
+    // The sheet says so before submitting.
+    expect(ldVerdict(330, false, { ld_min_yd: 150, ld_max_yd: 400 }, true)).toMatchObject({ review: true, blocked: false, reason: expect.stringMatching(/Simulated GPS/) });
+    const c = derive(mustApply(state, input)).contests.find((x) => x.hole === 4)!;
+    expect(c.entries[0]).toMatchObject({ valid: false });
+    expect(c.entries[0].entry).toMatchObject({ status: "flagged", flag_reason: "Simulated GPS" });
+  });
+
+  it("editing a closest-to-pin entry keeps its photo, so the AI judge's flag survives (finding: ctp edit sheds AI flag)", () => {
+    const f = makeTrip({ teams: [4, 3, 3] });
+    f.teeOff("A", 3);
+    let s = f.state;
+    const photo = photoFor(s, "ctp");
+    const first = randomUUID();
+    s = mustApply(s, ctpSubmitInput({ entryId: first, hole: 3, playerId: f.player.A1, feet: 2, inches: 0, angle: 90, photoPath: photo }));
+    // The judge thinks it's 20 ft with high confidence: suspicious.
+    s = {
+      ...s,
+      contest_entries: s.contest_entries.map((e) =>
+        e.id === first ? { ...e, ai_estimate_ft: 20, ai_confidence: "high" as const, ai_suspicious: true, ai_roast: "That's not 2 feet." } : e,
+      ),
+    };
+    const previous = entryOf(derive(s).contests.find((c) => c.hole === 3), f.player.A1)!.entry;
+    // Edit without retaking the photo (the sheet uploads nothing, so the new path is null).
+    expect(ctpPhotoPath(null, previous)).toBe(photo);
+    expect(ctpPhotoPath("trips/t/ctp/new.jpg", previous)).toBe("trips/t/ctp/new.jpg");
+    expect(ctpPhotoPath(null, null)).toBeNull();
+    s = mustApply(s, ctpSubmitInput({ entryId: randomUUID(), hole: 3, playerId: f.player.A1, feet: 2, inches: 6, angle: 90, photoPath: ctpPhotoPath(null, previous) }));
+    const v = entryOf(derive(s).contests.find((c) => c.hole === 3), f.player.A1)!;
+    expect(v.entry.photo_path).toBe(photo);
+    expect(v.entry).toMatchObject({ ai_estimate_ft: 20, ai_suspicious: true });
+    expect(v.suspicious).toBe(true);
+  });
+
   it("closest to pin: feet + inches + angle, and a re-entry replaces the old one", () => {
     const f = makeTrip({ teams: [4, 3, 3] });
     let s = f.state;
     s = mustApply(s, ctpSubmitInput({ entryId: randomUUID(), hole: 3, playerId: f.player.B1, feet: 8, inches: 0, angle: 90, photoPath: null }));
-    s = mustApply(s, ctpSubmitInput({ entryId: randomUUID(), hole: 3, playerId: f.player.A1, feet: 6, inches: 4, angle: 212.6, photoPath: "trips/x/ctp/a.jpg" }));
+    s = mustApply(s, ctpSubmitInput({ entryId: randomUUID(), hole: 3, playerId: f.player.A1, feet: 6, inches: 4, angle: 212.6, photoPath: photoFor(s, "ctp") }));
     let c = derive(s).contests.find((x) => x.hole === 3)!;
     expect(c.leader_ids).toEqual([f.player.A1]);
     expect(c.entries[0].entry.distance_value).toBeCloseTo(6 + 4 / 12, 10);
@@ -345,18 +418,19 @@ describe("submitting through the real reducer", () => {
     const f = makeTrip({ teams: [4, 3, 3] });
     let s = f.state;
     const firstId = randomUUID();
-    s = mustApply(s, ctpSubmitInput({ entryId: firstId, hole: 3, playerId: f.player.A1, feet: 5, inches: 6, angle: 45, photoPath: "trips/x/ctp/first.jpg" }));
+    const photo = photoFor(s, "ctp");
+    s = mustApply(s, ctpSubmitInput({ entryId: firstId, hole: 3, playerId: f.player.A1, feet: 5, inches: 6, angle: 45, photoPath: photo }));
     const previous = s.contest_entries.find((e) => e.id === firstId) as ContestEntry;
     const secondId = randomUUID();
     s = mustApply(s, ctpSubmitInput({ entryId: secondId, hole: 3, playerId: f.player.A1, feet: 12, inches: 0, angle: 0, photoPath: null }), { minute: 31 });
     const restoreId = randomUUID();
     const ops = undoInputs(secondId, previous, restoreId);
     expect(ops.map((o) => o.type)).toEqual(["contest.delete", "contest.submit"]);
-    for (const [i, o] of ops.entries()) s = mustApply(s, o, { minute: 32 + i });
+    for (const [i, o] of ops.entries()) s = mustApply(s, o, { minute: 32 + i, by: f.player.A1 });
     const c = derive(s).contests.find((x) => x.hole === 3)!;
     expect(c.entries).toHaveLength(1);
     expect(c.entries[0].entry.id).toBe(restoreId);
-    expect(c.entries[0].entry).toMatchObject({ distance_value: 5.5, angle_deg: 45, photo_path: "trips/x/ctp/first.jpg" });
+    expect(c.entries[0].entry).toMatchObject({ distance_value: 5.5, angle_deg: 45, photo_path: photo });
     // A first entry's undo is just the delete.
     expect(undoInputs(secondId, null, restoreId)).toEqual([{ type: "contest.delete", entry_id: secondId }]);
   });

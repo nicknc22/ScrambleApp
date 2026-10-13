@@ -150,12 +150,13 @@ describe("computeAwards", () => {
 
   it("ties share awards", () => {
     const f = makeTrip({ teams: [2, 2, 2] });
-    card(f, "A", { 1: 6 }); // 74 gross, a 6 on a par 4 (+2)
-    card(f, "B", { 3: 5 }); // 74 gross, its worst is a 5 on a par 3 (+2)
-    card(f, "C", { 1: 6 }); // 74 gross: three-way tie
+    // Drinks on hole 2, logged while hole 2 was being played (before the cards below reach hole 18).
     f.drink("A", "A1", 2, "shot");
     f.drink("B", "B2", 2, "shotgun");
     f.drink("C", "C1", 2);
+    card(f, "A", { 1: 6 }); // 74 gross, a 6 on a par 4 (+2)
+    card(f, "B", { 3: 5 }); // 74 gross, its worst is a 5 on a par 3 (+2)
+    card(f, "C", { 1: 6 }); // 74 gross: three-way tie
     // Twosomes: every drink is a ghost beer worth 2, so every team nets 72.
     f.entry({ hole: 4, player_id: f.player.A2, type: "ld", distance_value: 280.4 });
     f.entry({ hole: 9, player_id: f.player.B1, type: "ld", distance_value: 279.6, photo_path: "b1.jpg" });
@@ -184,6 +185,22 @@ describe("computeAwards", () => {
     expect(a.mulligan_merchant).toMatchObject({ team_ids: [T.A, T.B], value_label: "1 mulligan" });
     expect(a.edit_bandit).toMatchObject({ player_ids: [P.A2, P.C2], value_label: "1 score edit" });
     expect(a.most_suspicious.awarded).toBe(false);
+  });
+
+  it("Biggest Beer Save counts drinks on the hole they're credited to (a stale phone's stamp doesn't pile them up)", () => {
+    const f = makeTrip({ teams: [4, 4] });
+    for (let h = 1; h <= 3; h++) f.teeOff("A", h, h * 10).teeOff("B", h, h * 10);
+    // Team A's second phone kept stamping hole 1 while A played 2 and 3: 1 drink per hole really.
+    f.drink("A", "A1", 1, "drink", { min: 15 });
+    f.drink("A", "A2", 1, "drink", { min: 25 });
+    f.drink("A", "A3", 1, "drink", { min: 35 });
+    // Team B drank 2 on hole 2.
+    f.drink("B", "B1", 2, "drink", { min: 21 });
+    f.drink("B", "B2", 2, "drink", { min: 22 });
+    f.clock.min = 60; // the cards are entered (and hole 18 opened) after those drinks
+    card(f, "A");
+    card(f, "B");
+    expect(awards(f).biggest_beer_save).toMatchObject({ team_ids: [f.team.B], value_label: "Team B, hole 2: 2 strokes of beer" });
   });
 
   it("champions compares net to par when teams are through different numbers of holes", () => {

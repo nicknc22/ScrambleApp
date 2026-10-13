@@ -56,6 +56,10 @@ export interface ScoreEditPayload {
 
 /** Batched plain drinks: same team + hole within 60 s of the batch's first drink. */
 export interface DrinksPayload {
+  /**
+   * The hole the drinks counted on when posted (engine's effective hole, not a stale phone's stamp).
+   * Templates show where the drinks count NOW (a late tee.open or a commissioner move can change it).
+   */
   hole: number;
   /** Parallel arrays, one entry per drink, in logging order. */
   drink_ids: UUID[];
@@ -81,7 +85,16 @@ export interface SingleDrinkPayload {
 export type ShotgunPayload = SingleDrinkPayload;
 export type ShotPayload = SingleDrinkPayload;
 
-export interface GhostBeerPayload {
+/**
+ * Set on an automatic post that derive took back because its claim stopped holding (the post is
+ * soft-deleted at the same time). Such a post comes back if the claim holds again; a post deleted
+ * by the commissioner (no flag) never does.
+ */
+export interface Retractable {
+  retracted?: boolean;
+}
+
+export interface GhostBeerPayload extends Retractable {
   drink_id: UUID;
   drink_type: DrinkType;
   hole: number;
@@ -115,6 +128,7 @@ export interface GroomMulliganPayload {
 }
 
 export interface LeadChangePayload {
+  /** The new SOLE leader (ties don't post). Older rows may list several tied teams. */
   leader_team_ids: UUID[];
   previous_leader_team_ids: UUID[];
   /** Leaders' round net to par. */
@@ -164,14 +178,14 @@ export interface AiJudgePayload {
   roast: string | null;
 }
 
-export interface DriveWarningPayload {
+export interface DriveWarningPayload extends Retractable {
   nine: 1 | 2;
   level: Extract<DriveLevel, "hard" | "impossible">;
   remaining: number;
   needing: UUID[];
 }
 
-export interface DriveMissPayload {
+export interface DriveMissPayload extends Retractable {
   nine: 1 | 2;
   missed: UUID[];
   /** Always true: drive-minimum misses are flagged for the commissioner (no automatic penalty). */

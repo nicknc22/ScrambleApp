@@ -195,10 +195,10 @@ describe("service worker", () => {
     expect(await text((await sw.navigate("/t/trip1")).res)).toContain("network /t/trip1");
   });
 
-  it("static assets, icons and the manifest are cache-first", async () => {
+  it("static assets and icons are cache-first", async () => {
     const sw = loadSw();
     sw.net.handler = (req) => new Response(`asset ${new URL(req.url).pathname}`, { status: 200, headers: { "content-type": "application/javascript" } });
-    for (const p of ["/_next/static/chunks/app.js", "/icon-192.png", "/apple-icon?x1", "/manifest.webmanifest"]) {
+    for (const p of ["/_next/static/chunks/app.js", "/icon-192.png", "/apple-icon?x1"]) {
       const first = await sw.get(p, "cors");
       expect(first.handled).toBe(true);
       expect(await text(first.res)).toContain("asset");
@@ -231,7 +231,7 @@ describe("service worker", () => {
     expect(await text((await sw.get("/api/photos/trips/t/drinks/u.jpg")).res)).toBe("local-photo");
   });
 
-  it("falls back to an opaque photo response when CORS isn't available (opaque is cached)", async () => {
+  it("falls back to an opaque photo response when CORS isn't available, but never caches it (it may hide a 404)", async () => {
     const sw = loadSw();
     const supa = "https://abc.supabase.co/storage/v1/object/public/photos/trips/t/posts/p.jpg";
     const opaque: Res = { type: "opaque", ok: false, status: 0, redirected: false, headers: new Headers(), clone: () => opaque };
@@ -240,8 +240,60 @@ describe("service worker", () => {
       return opaque;
     };
     expect((await sw.get(supa)).res).toBe(opaque);
+    expect(sw.caches.caches.get("scramble-photos-v1")?.entries.size ?? 0).toBe(0);
     sw.net.online = false;
+    expect(((await sw.get(supa)).res as Response).status).toBe(504);
+  });
+
+  it("never caches a 404 or 5xx photo: the next view refetches it", async () => {
+    const sw = loadSw();
+    const local = "/api/photos/trips/t/drinks/late.jpg";
+    let status = 404;
+    sw.net.handler = () => (status === 200 ? new Response("late-photo", { status: 200 }) : new Response("nope", { status }));
+    expect(((await sw.get(local)).res as Response).status).toBe(404);
+    status = 503;
+    expect(((await sw.get(local)).res as Response).status).toBe(503);
+    expect(sw.caches.caches.get("scramble-photos-v1")?.entries.size ?? 0).toBe(0);
+    status = 200;
+    expect(await text((await sw.get(local)).res)).toBe("late-photo");
+    sw.net.online = false;
+    expect(await text((await sw.get(local)).res)).toBe("late-photo");
+  });
+
+  it("a non-OK photo left in the cache by an older version is refetched (and kept only as a last resort)", async () => {
+    const sw = loadSw();
+    const supa = "https://abc.supabase.co/storage/v1/object/public/photos/trips/t/ctp/c.jpg";
+    const opaque: Res = { type: "opaque", ok: false, status: 0, redirected: false, headers: new Headers(), clone: () => opaque };
+    await (await sw.caches.open("scramble-photos-v1")).put(supa, opaque);
+    sw.net.handler = () => new Response("real-photo", { status: 200 });
+    expect(await text((await sw.get(supa)).res)).toBe("real-photo");
+    expect(sw.net.requests).toHaveLength(1);
+    sw.net.online = false;
+    expect(await text((await sw.get(supa)).res)).toBe("real-photo");
+    // Offline with only the stale entry: better than nothing.
+    await (await sw.caches.open("scramble-photos-v1")).put(supa, opaque);
     expect((await sw.get(supa)).res).toBe(opaque);
+  });
+
+  it("web manifests (the root one and each trip's) are network-first and work offline", async () => {
+    const sw = loadSw();
+    let name = "Scramble";
+    sw.net.handler = (req) =>
+      new Response(JSON.stringify({ name, start_url: new URL(req.url).pathname }), { status: 200, headers: { "content-type": "application/manifest+json" } });
+    for (const p of ["/manifest.webmanifest", "/t/abc123/manifest.webmanifest"]) {
+      const first = await sw.get(p, "cors");
+      expect(first.handled).toBe(true);
+      expect(JSON.parse(await text(first.res))).toMatchObject({ name: "Scramble" });
+    }
+    // Renamed: the network copy wins while online...
+    name = "Bachelor Open";
+    expect(JSON.parse(await text((await sw.get("/t/abc123/manifest.webmanifest", "cors")).res))).toMatchObject({ name: "Bachelor Open" });
+    // ...and the last copy is served with no signal (or when the server errors).
+    sw.net.online = false;
+    expect(JSON.parse(await text((await sw.get("/t/abc123/manifest.webmanifest", "cors")).res))).toMatchObject({ name: "Bachelor Open" });
+    sw.net.online = true;
+    sw.net.handler = () => new Response("down", { status: 502 });
+    expect(JSON.parse(await text((await sw.get("/manifest.webmanifest", "cors")).res))).toMatchObject({ name: "Scramble" });
   });
 
   it("API calls, non-GET and cross-origin requests go straight to the network", async () => {
@@ -255,9 +307,12 @@ describe("service worker", () => {
     const sw = loadSw();
     sw.net.handler = (req) =>
       req.url.includes("/_next/static/") ? new Response("chunk", { status: 200 }) : html(`warmed ${new URL(req.url).pathname}`);
-    await sw.dispatch("message", { data: { type: "warm", urls: [ORIGIN + "/t/abc?x=1", ORIGIN + "/_next/static/chunks/a.js", "https://cdn.other/x.js", ORIGIN + "/api/t/abc/state"] } });
+    await sw.dispatch("message", {
+      data: { type: "warm", urls: [ORIGIN + "/t/abc?x=1", ORIGIN + "/_next/static/chunks/a.js", ORIGIN + "/t/abc/manifest.webmanifest", "https://cdn.other/x.js", ORIGIN + "/api/t/abc/state"] },
+    });
     expect(sw.caches.page(ORIGIN + "/t/abc")).toBeDefined();
     expect(sw.caches.caches.get("scramble-static-v1")?.entries.has(ORIGIN + "/_next/static/chunks/a.js")).toBe(true);
+    expect(sw.caches.caches.get("scramble-static-v1")?.entries.has(ORIGIN + "/t/abc/manifest.webmanifest")).toBe(true);
     expect(sw.net.requests.some((u) => u.includes("cdn.other") || u.includes("/api/"))).toBe(false);
   });
 

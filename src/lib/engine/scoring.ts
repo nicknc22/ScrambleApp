@@ -114,7 +114,7 @@ export function computeStandings(
   const roundState = new Map<UUID, { status: RoundStatus; open_hole: number | null }>();
   for (const rs of state.team_round_state) roundState.set(rs.team_id, rs);
 
-  // Totals over ALL active drinks (including the open hole, which may not be scored yet).
+  // Totals over ALL of a team's active drinks (any hole, scored or not).
   const drinkTotals = new Map<UUID, { drinks: number; credit: number; ghosts: number }>();
   for (const v of Object.values(drinkValues)) {
     let tot = drinkTotals.get(v.team_id);
@@ -125,19 +125,25 @@ export function computeStandings(
   }
 
   const rows: StandingRow[] = teams.map((t) => {
+    // Spec: round net = sum of hole nets, so only SCORED holes count. Credit on a hole without a
+    // score yet (normally the open hole) is "banked" and joins the net when the hole is scored.
     let thru = 0;
     let gross = 0;
     let parPlayed = 0;
+    let drinks = 0;
+    let credit = 0;
     for (const line of teamHoles[t.id] ?? []) {
       if (line.strokes === null) continue;
       thru += 1;
       gross += line.strokes;
       parPlayed += line.par;
+      drinks += line.drinks;
+      credit += line.credit;
     }
     const tot = drinkTotals.get(t.id) ?? { drinks: 0, credit: 0, ghosts: 0 };
     const rs = roundState.get(t.id);
     const status: RoundStatus = rs?.status ?? "not_started";
-    const net = gross - tot.credit;
+    const net = gross - credit;
     return {
       team_id: t.id,
       pos: 0, // filled below
@@ -145,16 +151,15 @@ export function computeStandings(
       thru,
       thru_label: thru === 0 ? DASH : status === "complete" && thru === 18 ? "F" : String(thru),
       gross,
-      drinks: tot.drinks,
-      credit: tot.credit,
+      drinks,
+      credit,
       net,
+      pending_drinks: tot.drinks - drinks,
+      pending_credit: tot.credit - credit,
       par_played: parPlayed,
       net_to_par: net - parPlayed,
       gross_to_par: gross - parPlayed,
       ghost_beers: tot.ghosts,
-      // Placeholder until the scored-holes-only standings land (see CLAUDE.md decisions).
-      pending_drinks: 0,
-      pending_credit: 0,
       status,
       open_hole: rs?.open_hole ?? null,
     };

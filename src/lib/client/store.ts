@@ -20,18 +20,20 @@ import { getDb, hasIndexedDb, outboxFor, putBlobRow, resetConnection, rowBlob, S
 import { compressPhoto as realCompressPhoto, photoPathsOf } from "./photos";
 import {
   errorMessage,
+  flushOutbox,
   httpRequest,
   isSnapshot,
   realTimers,
   SyncWorker,
+  uploadPhotos,
   type DocumentLike,
   type EventTargetLike,
   type FetchLike,
-  type FlushResult,
   type PendingBlob,
   type PendingOp,
   type SyncHost,
   type Timers,
+  type UploadHost,
 } from "./sync";
 import { startLiveUpdates, type LiveController, type LiveOptions } from "./realtime";
 import {
@@ -43,6 +45,7 @@ import {
   setLastTripCode,
   type StorageLike,
 } from "./identity";
+import { describeOp, loadSyncIssues, MAX_SYNC_ISSUES, saveSyncIssues, type SyncIssue } from "./sync-issues";
 
 export type PhotoKind = "drinks" | "ld" | "ctp" | "posts";
 
@@ -58,16 +61,17 @@ export interface ClientState {
   derived: Derived | null;
   /** Ops + photo uploads not yet acknowledged by the server. Drives "Offline, X changes waiting". */
   pendingCount: number;
-  /** navigator.onLine AND the last request didn't fail with a network error. */
+  /** navigator.onLine AND the last op sync / state fetch didn't fail (photo uploads don't count). */
   online: boolean;
+  /** An op sync request is out (photo uploads run in their own lane and don't set this). */
   syncing: boolean;
   lastSyncAt: ISODate | null;
   /** Player chosen on this device ("tap your name"). Stored in localStorage per trip code. */
   meId: UUID | null;
   /** Commissioner cookie is valid (checked via GET /api/t/<code>/commissioner). */
   isCommissioner: boolean;
-  /** Recent server rejections (newest last), for toasts. */
-  rejected: OpResult[];
+  /** Changes the server refused (newest last, at most 20), kept across reloads until dismissed. */
+  rejected: SyncIssue[];
 }
 
 export type DispatchResult = { ok: true; op: Op } | { ok: false; code: RejectCode; reason: string };
@@ -113,7 +117,6 @@ export interface StoreConfig {
   persistTimeoutMs: number;
   /** Keep a local preview object URL this long after its photo uploaded. */
   previewGraceMs: number;
-  maxRejected: number;
 }
 
 const DEFAULT_CONFIG: StoreConfig = {
@@ -125,7 +128,6 @@ const DEFAULT_CONFIG: StoreConfig = {
   restoreTimeoutMs: 3_000,
   persistTimeoutMs: 8_000,
   previewGraceMs: 5 * 60_000,
-  maxRejected: 50,
 };
 
 interface Entry extends PendingOp {
@@ -223,7 +225,10 @@ export class TripStore {
   private readonly d: ResolvedDeps;
   private readonly cfg: StoreConfig;
   private readonly db: ScrambleDB | null;
+  /** Op sync lane. */
   private readonly worker: SyncWorker;
+  /** Photo upload lane (independent: a slow upload never holds up ops). */
+  private readonly uploader: SyncWorker;
   private live: LiveController | null = null;
 
   private snapshot: Snapshot | null = null;
@@ -246,7 +251,7 @@ export class TripStore {
   private netOk = true;
   private syncing = false;
   private lastSyncAt: ISODate | null = null;
-  private rejected: OpResult[] = [];
+  private rejected: SyncIssue[] = [];
   private loadError: string | null = null;
   private restored = false;
   private restoring: Promise<void> | null = null;
@@ -314,15 +319,19 @@ export class TripStore {
     else if (typeof deps.db === "string") this.db = hasIndexedDb() ? getDb(deps.db) : null;
     else this.db = hasIndexedDb() ? getDb() : null;
 
-    this.worker = new SyncWorker(this.syncHost(), {
+    const schedule = {
       timers,
       random: this.d.random,
       win: this.d.win,
       doc: this.d.doc,
       debounceMs: this.cfg.flushDebounceMs,
       intervalMs: this.cfg.pendingIntervalMs,
-      onPass: (r) => this.onPass(r),
-    });
+      onPass: () => this.sweepObjectUrls(),
+    };
+    const syncHost = this.syncHost();
+    this.worker = new SyncWorker(syncHost, { ...schedule, run: (o) => flushOutbox(syncHost, o), keepaliveOnHide: true });
+    const uploadHost = this.uploadHost();
+    this.uploader = new SyncWorker(uploadHost, { ...schedule, run: () => uploadPhotos(uploadHost) });
   }
 
   // ------------------------------------------------------------------ lifecycle
@@ -334,17 +343,20 @@ export class TripStore {
     const storedMe = loadMe(this.code, this.d.storage);
     if (storedMe) this.meId = storedMe;
     if (loadCommissionerHint(this.code, this.d.storage)) this.isCommissioner = true;
+    this.rejected = mergeIssues(loadSyncIssues(this.code, this.d.storage), this.rejected);
     setLastTripCode(this.code, this.d.storage);
     this.navOnline = this.d.online();
     this.d.win?.addEventListener("online", this.onNavOnline);
     this.d.win?.addEventListener("offline", this.onNavOffline);
     if (!this.restoring) this.restoring = this.restore();
     this.worker.start();
+    this.uploader.start();
     if (this.d.realtime) {
       try {
         this.live = this.d.realtime({
           refresh: () => this.refresh(),
-          // Interval polls never queue behind a request that's still out (weak signal).
+          // Interval polls never queue behind a state fetch or op sync that's still out (weak
+          // signal). A photo upload in flight doesn't hold them back.
           poll: () => (this.refreshInflight || this.syncing ? undefined : this.refresh()),
           timers: this.d.timers,
           win: this.d.win,
@@ -358,7 +370,7 @@ export class TripStore {
     }
     void this.refresh();
     void this.checkCommissioner();
-    if (this.hasPending()) this.worker.schedule(0);
+    this.kickWorkers(0);
     this.changed();
   }
 
@@ -366,6 +378,7 @@ export class TripStore {
     if (!this.started) return;
     this.started = false;
     this.worker.stop();
+    this.uploader.stop();
     this.live?.stop();
     this.live = null;
     this.d.win?.removeEventListener("online", this.onNavOnline);
@@ -551,11 +564,17 @@ export class TripStore {
     return { ok: true, op };
   }
 
-  /** Remove a not-yet-synced op from the outbox if still pending; returns false if already sent. */
+  /**
+   * Remove a not-yet-synced op from the outbox if still pending; returns false if already sent.
+   * A photo only that op referenced is dropped too (no point uploading an undone drink's photo).
+   */
   async cancelPending(opId: UUID): Promise<boolean> {
     const e = this.pending.find((p) => p.id === opId);
     if (!e || e.attempts > 0 || this.inFlight.has(opId)) return false;
     this.removeEntries([opId]);
+    for (const path of e.photo_paths) {
+      if (this.blobs.has(path) && !this.isPhotoReferenced(path)) this.dropBlob(path);
+    }
     this.changed();
     await this.persistSoon();
     return true;
@@ -572,6 +591,7 @@ export class TripStore {
     const next = opId ? this.rejected.filter((r) => r.id !== opId) : [];
     if (next.length === this.rejected.length) return;
     this.rejected = next;
+    saveSyncIssues(this.code, next, this.d.storage);
     this.changed();
   }
 
@@ -633,10 +653,15 @@ export class TripStore {
     this.changed();
   }
 
-  /** Flush the outbox now (uploads first, then ops). */
-  async flush(): Promise<void> {
+  /**
+   * Push pending ops now and start a photo upload pass. Resolves when the ops pass is done; a
+   * slow upload never holds that up unless `photos` asks to wait for the upload pass too.
+   */
+  async flush(opts: { photos?: boolean } = {}): Promise<void> {
     if (this.restoring) await this.restoring;
+    const uploads = this.uploader.flush();
     await this.worker.flush();
+    if (opts.photos) await uploads;
   }
 
   /**
@@ -660,7 +685,7 @@ export class TripStore {
     this.changed();
     // Best effort: get the photo on disk before the op that references it is dispatched.
     await this.persistSoon(2000);
-    this.worker.schedule();
+    this.uploader.schedule();
     return path;
   }
 
@@ -767,8 +792,33 @@ export class TripStore {
     return s;
   }
 
-  private hasPending(): boolean {
-    return this.pending.length > 0 || this.blobs.size > 0;
+  /** Schedule each lane that has work. */
+  private kickWorkers(delayMs?: number): void {
+    if (this.pending.length > 0) this.worker.schedule(delayMs);
+    if (this.blobs.size > 0) this.uploader.schedule(delayMs);
+  }
+
+  /** A pending op, or a row the server already has, still points at this photo. */
+  private isPhotoReferenced(path: string): boolean {
+    if (this.pending.some((e) => e.photo_paths.includes(path))) return true;
+    const state = this.snapshot?.state;
+    return !!state && Object.values(state).some((table) => jsonOf(table).includes(path));
+  }
+
+  /** Forget a queued photo (and its local preview). */
+  private dropBlob(path: string): void {
+    this.blobs.delete(path);
+    this.removedBlobPaths.add(path);
+    const cached = this.objectUrls.get(path);
+    if (cached) {
+      this.objectUrls.delete(path);
+      try {
+        this.d.revokeObjectURL?.(cached.url);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.schedulePersist();
   }
 
   private removeEntries(ids: UUID[]): void {
@@ -784,10 +834,28 @@ export class TripStore {
     this.schedulePersist();
   }
 
-  private pushRejected(results: OpResult[]): void {
+  /** Surface rejections: describe each (while its op is still at hand) and persist the list. */
+  private pushRejected(results: OpResult[], ops: ReadonlyMap<UUID, Op> = new Map(), opType?: string): void {
     if (results.length === 0) return;
-    const ids = new Set(results.map((r) => r.id));
-    this.rejected = [...this.rejected.filter((r) => !ids.has(r.id)), ...results].slice(-this.cfg.maxRejected);
+    const at = iso(this.d.now());
+    const state = this.snapshot?.state ?? null;
+    const issues = results.map((r): SyncIssue => {
+      const op = ops.get(r.id);
+      let description = "A change";
+      try {
+        if (op) description = describeOp(op, state);
+      } catch {
+        /* keep the generic text */
+      }
+      return { ...r, status: "rejected", op_type: op?.type ?? opType ?? "unknown", description, at };
+    });
+    this.rejected = mergeIssues(this.rejected, issues);
+    saveSyncIssues(this.code, this.rejected, this.d.storage);
+  }
+
+  private opsById(ids: readonly UUID[]): Map<UUID, Op> {
+    const wanted = new Set(ids);
+    return new Map(this.pending.filter((e) => wanted.has(e.id)).map((e) => [e.id, e.op]));
   }
 
   private syncHost(): SyncHost {
@@ -802,46 +870,11 @@ export class TripStore {
         return store.d.timers;
       },
       syncTimeoutMs: this.cfg.syncTimeoutMs,
-      uploadTimeoutMs: this.cfg.uploadTimeoutMs,
       ready: async () => {
         if (store.restoring) await store.restoring;
       },
-      pendingBlobs: () => [...store.blobs.values()],
       pendingOps: () => store.pending,
-      hasPending: () => store.hasPending(),
-      onUploaded: (path) => {
-        const b = store.blobs.get(path);
-        store.blobs.delete(path);
-        store.removedBlobPaths.add(path);
-        const cached = store.objectUrls.get(path);
-        if (cached) cached.expires = store.d.now() + store.cfg.previewGraceMs;
-        else if (b && store.d.createObjectURL && store.cfg.previewGraceMs > 0) {
-          // Keep a local preview briefly so the image doesn't flicker while the remote loads.
-          try {
-            store.objectUrls.set(path, { url: store.d.createObjectURL(b.blob), expires: store.d.now() + store.cfg.previewGraceMs });
-          } catch {
-            /* ignore */
-          }
-        }
-        store.sweepObjectUrls();
-        store.schedulePersist();
-        store.changed();
-      },
-      onUploadFailed: (path, permanent, message) => {
-        const b = store.blobs.get(path);
-        if (!b) return;
-        b.failures++;
-        if (permanent) {
-          b.permanentFailures++;
-          if (b.permanentFailures >= 3) {
-            store.blobs.delete(path);
-            store.removedBlobPaths.add(path);
-            store.pushRejected([{ id: path, status: "rejected", code: "invalid", reason: `A photo couldn't be uploaded (${message}). Everything else was saved.` }]);
-            store.schedulePersist();
-            store.changed();
-          }
-        }
-      },
+      hasPending: () => store.pending.length > 0,
       onSending: (ids) => {
         for (const e of store.pending) {
           if (ids.includes(e.id)) {
@@ -875,16 +908,18 @@ export class TripStore {
         // Nothing is on the wire after a response (passes and batches are sequential). Ops the
         // server didn't answer for stay pending and are resent later (idempotent by id).
         store.inFlight.clear();
+        const ops = store.opsById(rejected.map((r) => r.id));
         store.removeEntries(done);
-        store.pushRejected(rejected);
+        store.pushRejected(rejected, ops);
         if (snapshot) store.adoptSnapshot(snapshot, true);
         store.lastSyncAt = iso(store.d.now());
         store.changed();
       },
       onPoisonOp: (id, code, reason) => {
+        const ops = store.opsById([id]);
         store.inFlight.delete(id);
         store.removeEntries([id]);
-        store.pushRejected([{ id, status: "rejected", code, reason }]);
+        store.pushRejected([{ id, status: "rejected", code, reason }], ops);
         store.changed();
       },
       onNetwork: (ok) => {
@@ -900,9 +935,61 @@ export class TripStore {
     };
   }
 
-  private onPass(r: FlushResult): void {
-    void r;
-    this.sweepObjectUrls();
+  private uploadHost(): UploadHost {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const store = this;
+    return {
+      code: this.code,
+      get fetch() {
+        return store.d.fetch;
+      },
+      get timers() {
+        return store.d.timers;
+      },
+      uploadTimeoutMs: this.cfg.uploadTimeoutMs,
+      ready: async () => {
+        if (store.restoring) await store.restoring;
+      },
+      pendingBlobs: () => [...store.blobs.values()],
+      hasPending: () => store.blobs.size > 0,
+      onUploaded: (path) => {
+        const b = store.blobs.get(path);
+        store.blobs.delete(path);
+        store.removedBlobPaths.add(path);
+        const cached = store.objectUrls.get(path);
+        if (cached) cached.expires = store.d.now() + store.cfg.previewGraceMs;
+        else if (b && store.d.createObjectURL && store.cfg.previewGraceMs > 0) {
+          // Keep a local preview briefly so the image doesn't flicker while the remote loads.
+          try {
+            store.objectUrls.set(path, { url: store.d.createObjectURL(b.blob), expires: store.d.now() + store.cfg.previewGraceMs });
+          } catch {
+            /* ignore */
+          }
+        }
+        store.sweepObjectUrls();
+        store.schedulePersist();
+        store.changed();
+      },
+      onUploadFailed: (path, permanent, message) => {
+        const b = store.blobs.get(path);
+        if (!b) return;
+        b.failures++;
+        if (permanent) {
+          b.permanentFailures++;
+          if (b.permanentFailures >= 3) {
+            store.blobs.delete(path);
+            store.removedBlobPaths.add(path);
+            store.pushRejected(
+              [{ id: path, status: "rejected", code: "invalid", reason: `A photo couldn't be uploaded (${message}). Everything else was saved.` }],
+              undefined,
+              "photo",
+            );
+            store.schedulePersist();
+            store.changed();
+          }
+        }
+      },
+    };
   }
 
   private sweepObjectUrls(): void {
@@ -991,7 +1078,7 @@ export class TripStore {
         persisted: true,
       });
     }
-    if (this.started && this.hasPending()) this.worker.schedule(0);
+    if (this.started) this.kickWorkers(0);
   }
 
   private isDirty(): boolean {
@@ -1111,6 +1198,12 @@ export class TripStore {
       resetConnection(db);
     }
   }
+}
+
+/** `base` plus `added` (an id already listed moves to the end), newest MAX_SYNC_ISSUES kept. */
+function mergeIssues(base: readonly SyncIssue[], added: readonly SyncIssue[]): SyncIssue[] {
+  const ids = new Set(added.map((r) => r.id));
+  return [...base.filter((r) => !ids.has(r.id)), ...added].slice(-MAX_SYNC_ISSUES);
 }
 
 // ------------------------------------------------------------------ registry

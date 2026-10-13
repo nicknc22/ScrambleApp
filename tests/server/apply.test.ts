@@ -337,11 +337,12 @@ describe("last write wins (by client time)", () => {
     expect(r2.events.feed.map((e) => e.id)).toContain(edits[0].id);
     await expectMatchesDb(lt, r2);
 
-    // A third phone was offline and entered a 6 BEFORE phone 2's correction; it syncs last.
+    // A third phone was offline and entered a 6 BEFORE phone 2's correction; it syncs last. It
+    // loses, and is told so (the phone toasts the reason).
     const feedBefore = await count(db, "feed_events", lt.trip.id);
     const stale = mk("score.set", { team_id: A, hole: 1, strokes: 6, at: cli(45), by: A1 });
     const r3 = await sync(lt, [stale], { now: 600 });
-    expect(r3.results).toEqual([{ id: stale.id, status: "applied" }]); // processed; it just lost
+    expect(r3.results).toEqual([{ id: stale.id, status: "rejected", code: "conflict", reason: expect.stringMatching(/Hole 1 already got a newer edit: 4/) }]);
     expect(r3.snapshot.state.hole_scores.find((h) => h.team_id === A && h.hole === 1)).toMatchObject({
       strokes: 4,
       edit_count: 1,
@@ -360,7 +361,7 @@ describe("last write wins (by client time)", () => {
     const later = mk("score.set", { team_id: A, hole: 1, strokes: 3, at: cli(70) });
     const earlier = mk("score.set", { team_id: A, hole: 1, strokes: 7, at: cli(60) });
     const out = await sync(lt, [later, earlier], { now: 100 });
-    expect(statuses(out)).toEqual(["applied", "applied"]);
+    expect(statuses(out)).toEqual(["applied", "rejected"]);
     expect(out.snapshot.state.hole_scores.find((h) => h.team_id === A && h.hole === 1)).toMatchObject({ strokes: 3, edit_count: 0 });
     expect(feedOf(out, "score_edit")).toEqual([]);
     await expectMatchesDb(lt, out);
@@ -368,7 +369,7 @@ describe("last write wins (by client time)", () => {
 });
 
 describe("validation and rejections", () => {
-  it("records rejections (a resend is a duplicate); commissioner-only ops need the cookie", async () => {
+  it("records rejections (a resend gets the same rejection, never re-evaluated); commissioner-only ops need the cookie", async () => {
     const lt = await liveTrip(db, [2, 2]);
     const A = lt.team.A;
     const { A1 } = lt.player;
@@ -394,9 +395,10 @@ describe("validation and rejections", () => {
     expect(await count(db, "drinks", lt.trip.id)).toBe(0);
     expect(out.snapshot.state.holes.find((h) => h.number === 1)?.par).toBe(4);
 
-    // Resent (even with the cookie now): duplicates, never re-evaluated.
+    // Resent (even with the cookie now): the recorded answers, never re-evaluated.
     const again = await sync(lt, batch, { now: 20, commish: true });
-    expect(statuses(again)).toEqual(["duplicate", "duplicate", "duplicate", "duplicate", "duplicate"]);
+    expect(again.results).toEqual([...out.results.slice(0, 4), { id: ok.id, status: "duplicate" }]);
+    expect(again.applied).toEqual([]);
     expect((await loadTripState(db, lt.trip.id)).holes.find((h) => h.number === 1)?.par).toBe(4);
 
     // With the cookie, a fresh override applies and posts a commissioner_override event (live).
@@ -454,19 +456,8 @@ describe("validation and rejections", () => {
     expect(recorded.size).toBe(4);
 
     const again = await sync(lt, batch, { now: 20 });
-    expect(statuses(again)).toEqual([
-      "rejected",
-      "rejected",
-      "rejected",
-      "rejected",
-      "duplicate",
-      "duplicate",
-      "duplicate",
-      "duplicate",
-      "rejected", // no uuid, so nothing to remember it by
-      "rejected",
-      "duplicate",
-    ]);
+    // Recorded rejections come back as they were; ops with no uuid are simply re-checked.
+    expect(again.results).toEqual([...out.results.slice(0, 10), { id: good.id, status: "duplicate" }]);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -608,6 +599,167 @@ function faultyDb(inner: Db, failWhen: FailWhen, code: string | null = "23514"):
 const touches = (table: string, needle?: string): FailWhen => (sql, params) =>
   sql.includes(`into "${table}"`) && (needle === undefined || JSON.stringify(params).includes(needle));
 
+describe("offline phones vs the end of the round", () => {
+  /** Both teams play 18 holes of 4s online and tap Round complete at client second `completeAt`. */
+  async function playedOut(lt: LiveTrip, completeAt: number): Promise<void> {
+    const ops: Op[] = [];
+    for (const letter of ["A", "B"]) {
+      for (let hole = 1; hole <= 18; hole++) {
+        ops.push(mk("tee.open", { team_id: lt.team[letter], hole, at: cli(hole * 40) }));
+        ops.push(mk("score.set", { team_id: lt.team[letter], hole, strokes: 4, at: cli(hole * 40 + 30) }));
+      }
+      ops.push(mk("round.complete", { team_id: lt.team[letter], at: cli(completeAt) }));
+    }
+    expect(statuses(await sync(lt, ops, { now: completeAt + 5 })).every((st) => st === "applied")).toBe(true);
+  }
+
+  it("ops queued offline before the commissioner finalized still land (late sync); fresh ones after don't", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    await playedOut(lt, 900);
+    // B2's phone logged a shotgun on 18 and a re-count in a dead zone, then was pocketed.
+    const shotgun = drinkOp(lt, "B", "B2", 18, "shotgun", { at: cli(880) });
+    const recount = mk("score.set", { team_id: lt.team.B, hole: 18, strokes: 3, at: cli(895), by: lt.player.B2 });
+    const fin = await sync(lt, [mk("trip.finalize", {})], { now: 1000, commish: true });
+    expect(fin.snapshot.state.trip).toMatchObject({ status: "final", finalized_at: srv(1000).toISOString() });
+
+    // The phone comes back at the bar.
+    const late = await sync(lt, [shotgun, recount], { now: 1500 });
+    expect(late.results).toEqual([
+      { id: shotgun.id, status: "applied" },
+      { id: recount.id, status: "applied" },
+    ]);
+    const state = late.snapshot.state;
+    expect(state.trip.status).toBe("final");
+    expect(state.drinks.map((d) => d.id)).toEqual([shotgun.drink_id]);
+    const b = derive(state).standings.find((r) => r.team_id === lt.team.B)!;
+    expect(b.gross).toBe(71);
+    await expectMatchesDb(lt, late);
+
+    // Fresh play after the final whistle (+ 2 min grace) is refused...
+    const afterFinal = drinkOp(lt, "A", "A1", 18, "drink", { at: cli(1000 + 121) });
+    const r = await sync(lt, [afterFinal], { now: 1600 });
+    expect(r.results).toEqual([{ id: afterFinal.id, status: "rejected", code: "not_live", reason: expect.stringMatching(/final/) }]);
+    // ...and stays refused after a reopen: the resend gets the same rejection (not "duplicate").
+    await sync(lt, [mk("trip.reopen", {})], { now: 1700, commish: true });
+    expect((await sync(lt, [afterFinal], { now: 1800 })).results).toEqual(r.results);
+    expect(await count(db, "drinks", lt.trip.id)).toBe(1);
+  });
+
+  it("a drink logged on a stale phone after the team's Round complete doesn't count", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    await playedOut(lt, 900);
+    // B2's phone still showed 18 open; the beer was at the clubhouse 15 minutes later.
+    const late = drinkOp(lt, "B", "B2", 18, "drink", { at: cli(900 + 15 * 60) });
+    // B1's phone logged one on 18 just before the tap, and syncs after it: that one counts.
+    const onTime = drinkOp(lt, "B", "B1", 18, "drink", { at: cli(890) });
+    const out = await sync(lt, [late, onTime], { now: 2000 });
+    expect(out.results).toEqual([
+      { id: late.id, status: "rejected", code: "no_window", reason: expect.stringMatching(/over/i) },
+      { id: onTime.id, status: "applied" },
+    ]);
+    expect(out.snapshot.state.drinks.map((d) => d.id)).toEqual([onTime.drink_id]);
+    // The commissioner can still add one by hand (Day-of fallback).
+    const fix = drinkOp(lt, "B", "B2", 18, "drink", { at: cli(3000), by: null, as_commissioner: true });
+    expect((await sync(lt, [fix], { now: 3000, commish: true })).results).toEqual([{ id: fix.id, status: "applied" }]);
+  });
+
+  it("a lost response doesn't hide a rejection: the resend answers with the recorded rejection", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    await sync(lt, [mk("tee.open", { team_id: lt.team.A, hole: 1 }), drinkOp(lt, "A", "A1", 1, "shotgun")], { now: 10 });
+    // Two phones spend team A's only mulligan; phone B's response is lost in the tunnel.
+    const phoneA = mk("mulligan.use", { mulligan_id: newId(), team_id: lt.team.A, hole: 2, source: "earned", by: lt.player.A1 });
+    const phoneB = mk("mulligan.use", { mulligan_id: newId(), team_id: lt.team.A, hole: 2, source: "earned", by: lt.player.A2 });
+    expect(statuses(await sync(lt, [phoneA], { now: 20 }))).toEqual(["applied"]);
+    const lost = await sync(lt, [phoneB], { now: 30 });
+    expect(lost.results).toEqual([{ id: phoneB.id, status: "rejected", code: "conflict", reason: expect.stringMatching(/bank/) }]);
+    // Resent, alone or twice in a batch (any id case), it gets the same rejection.
+    const again = await sync(lt, [phoneB, { ...phoneB, id: phoneB.id.toUpperCase() }], { now: 40 });
+    expect(again.results).toEqual([lost.results[0], { ...lost.results[0], id: phoneB.id.toUpperCase() }]);
+    // Within one batch, a repeated rejected op mirrors its first answer.
+    const twice = mk("mulligan.use", { mulligan_id: newId(), team_id: lt.team.A, hole: 3, source: "earned", by: lt.player.A2 });
+    const both = await sync(lt, [twice, twice], { now: 50 });
+    expect(both.results[1]).toEqual(both.results[0]);
+    expect(both.results[0]).toMatchObject({ status: "rejected", code: "conflict" });
+    expect(await count(db, "mulligans", lt.trip.id)).toBe(1);
+  });
+
+  it("two phones edit the same hole in either sync order: the later edit wins and the loser is told", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    const A = lt.team.A;
+    await sync(lt, [mk("tee.open", { team_id: A, hole: 1, at: cli(10) })], { now: 20 });
+    const dave = mk("score.set", { team_id: A, hole: 1, strokes: 5, at: cli(30), by: lt.player.A1 });
+    const mike = mk("score.set", { team_id: A, hole: 1, strokes: 3, at: cli(50), by: lt.player.A2 });
+    // Mike's later 3 gets signal first.
+    expect(statuses(await sync(lt, [mike], { now: 60 }))).toEqual(["applied"]);
+    const r = await sync(lt, [dave], { now: 70 });
+    expect(r.results).toEqual([{ id: dave.id, status: "rejected", code: "conflict", reason: expect.stringMatching(/Hole 1 already got a newer edit: 3/) }]);
+    expect(r.snapshot.state.hole_scores.find((h) => h.team_id === A && h.hole === 1)).toMatchObject({ strokes: 3, edit_count: 0 });
+    // An earlier entry that agrees is no conflict at all.
+    const agree = mk("score.set", { team_id: A, hole: 1, strokes: 3, at: cli(40), by: lt.player.A1 });
+    expect(statuses(await sync(lt, [agree], { now: 80 }))).toEqual(["applied"]);
+  });
+
+  it("cross-team deletes need the commissioner; a player's own team may undo", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    await sync(lt, [mk("tee.open", { team_id: lt.team.A, hole: 1 })], { now: 5 });
+    const d = drinkOp(lt, "A", "A1", 1, "shotgun");
+    await sync(lt, [d], { now: 10 });
+    const rival = mk("drink.delete", { drink_id: d.drink_id, by: lt.player.B1 });
+    expect((await sync(lt, [rival], { now: 20 })).results[0]).toMatchObject({ status: "rejected", code: "forbidden" });
+    expect(await count(db, "drinks", lt.trip.id, "deleted_at is null")).toBe(1);
+    const undo = mk("drink.delete", { drink_id: d.drink_id, by: lt.player.A2 });
+    expect(statuses(await sync(lt, [undo], { now: 30 }))).toEqual(["applied"]);
+    expect(await count(db, "drinks", lt.trip.id, "deleted_at is null")).toBe(0);
+  });
+
+  it("photo_path is validated: only this trip's trips/<id>/<kind>/<uuid>.jpg (no megabyte strings, no URLs)", async () => {
+    const lt = await liveTrip(db, [2, 2], { start: false });
+    const huge = mk("post.create", { event_id: newId(), text: null, photo_path: "x".repeat(1_000_000), by: null });
+    const url = mk("post.create", { event_id: newId(), text: "pixel", photo_path: "https://attacker.example/p.jpg", by: null });
+    const good = mk("post.create", { event_id: newId(), text: null, photo_path: `trips/${lt.trip.id}/posts/${newId()}.jpg`, by: null });
+    const out = await sync(lt, [huge, url, good], { now: 10 });
+    expect(out.results.map((r) => r.code ?? r.status)).toEqual(["invalid", "invalid", "applied"]);
+    expect(out.snapshot.state.feed_events.filter((e) => e.type === "post").map((e) => e.id)).toEqual([good.event_id]);
+  });
+
+  it("editing a closest-to-pin claim on the same photo keeps the AI judge's estimate and re-judges the claim", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    const photo = `trips/${lt.trip.id}/ctp/${newId()}.jpg`;
+    const ctp = (feet: number, photo_path: string | null) =>
+      mk("contest.submit", {
+        entry_id: newId(),
+        hole: 3,
+        player_id: lt.player.A1,
+        contest_type: "ctp",
+        distance_value: feet,
+        angle_deg: 45,
+        lat: null,
+        lng: null,
+        gps_accuracy_m: null,
+        low_accuracy: false,
+        photo_path,
+        by: lt.player.A1,
+      });
+    const first = ctp(2, photo);
+    await sync(lt, [first], { now: 10 });
+    // The judge (post-commit) read the photo as ~20 ft and flagged the 2-footer.
+    await db.query(
+      "update contest_entries set ai_estimate_ft = 20, ai_confidence = 'high', ai_suspicious = true, ai_roast = 'Liar.' where id = $1",
+      [first.entry_id],
+    );
+    const nudge = ctp(2.5, photo);
+    const out = await sync(lt, [nudge], { now: 20 });
+    const entry = out.snapshot.state.contest_entries.find((e) => e.id === nudge.entry_id)!;
+    expect(entry).toMatchObject({ ai_estimate_ft: 20, ai_confidence: "high", ai_suspicious: true, ai_roast: "Liar.", deleted_at: null });
+    expect(derive(out.snapshot.state).awards.find((a) => a.key === "most_suspicious")).toMatchObject({ awarded: true, player_ids: [lt.player.A1] });
+    await expectMatchesDb(lt, out);
+    // An honest correction on the same photo clears the flag but keeps the estimate.
+    const honest = ctp(14, photo);
+    const r2 = await sync(lt, [honest], { now: 30 });
+    expect(r2.snapshot.state.contest_entries.find((e) => e.id === honest.entry_id)).toMatchObject({ ai_estimate_ft: 20, ai_suspicious: false });
+  });
+});
+
 describe("failure isolation", () => {
   it("a data error on one op's rows rejects that op only; the rest commit with their events", async () => {
     const lt = await liveTrip(db, [4, 3]);
@@ -628,8 +780,8 @@ describe("failure isolation", () => {
     expect(post?.payload).toMatchObject({ count: 2, drink_ids: [d1.drink_id, d3.drink_id] });
     await expectMatchesDb(lt, out);
     expect((await getAppliedOps(db, lt.trip.id, [poison.id])).get(poison.id)).toMatchObject({ status: "rejected", code: "invalid" });
-    // The resend is a duplicate (no endless retry of a poison op).
-    expect(statuses(await sync(lt, [poison], { now: 20 }))).toEqual(["duplicate"]);
+    // The resend gets the recorded rejection (the phone drops it: no endless retry of a poison op).
+    expect((await sync(lt, [poison], { now: 20 })).results).toEqual([out.results[1]]);
   });
 
   it("isolates several poison ops in a big batch, in order, with duplicates spanning the split", async () => {
@@ -654,7 +806,7 @@ describe("failure isolation", () => {
       "applied",
       "invalid",
       "applied",
-      "duplicate",
+      "invalid", // p1 again: its recorded rejection, not "duplicate"
       "applied",
       "applied",
     ]);
@@ -671,7 +823,8 @@ describe("failure isolation", () => {
       expect(out.events.feed.find((e) => e.id === posts[0].id)).toEqual(posts[0]);
     }
     await expectMatchesDb(lt, out);
-    expect(statuses(await sync(lt, batch, { now: 20 })).every((s) => s === "duplicate")).toBe(true);
+    const resent = await sync(lt, batch, { now: 20 });
+    expect(resent.results.map((r) => r.code ?? r.status)).toEqual(batch.map((o) => (o === p1 || o === p2 ? "invalid" : "duplicate")));
   });
 
   it("a timestamp JS accepts but Postgres refuses (year 0) is isolated as a real data error", async () => {

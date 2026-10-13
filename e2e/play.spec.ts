@@ -1,8 +1,9 @@
 // Play tab end to end against the real server: a threesome player tees off, logs drinks (the 3rd
 // is a ghost beer), undoes one, scores, records a tee shot, advances a hole, then keeps playing
-// offline and syncs exactly once when the signal comes back.
+// offline and syncs exactly once when the signal comes back. Plus: two phones on one team, the
+// par-default advance, drink undo toasts vs. the drink buttons, and the first-screen layout.
 import { randomUUID } from "node:crypto";
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { devices, expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 interface SetupPlayer {
   id: string;
@@ -62,6 +63,38 @@ async function expectNoHorizontalOverflow(page: Page) {
 const drinkButton = (page: Page, name: string) => page.getByRole("button", { name: `Drink for ${name}`, exact: true });
 const drinksHeader = (page: Page) => page.getByTestId("drinks-panel").locator("h2 + span");
 
+async function joinAs(page: Page, code: string, playerId: string, viewport?: { width: number; height: number }) {
+  await page.context().addInitScript(
+    ([c, id]) => {
+      localStorage.setItem(`scramble:me:${c}`, id);
+      localStorage.setItem("scramble:onboarded", "1");
+    },
+    [code, playerId],
+  );
+  if (viewport) await page.setViewportSize(viewport);
+  await page.goto(`/t/${code}`);
+  await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play", { timeout: 30_000 });
+  await expect(page.getByTestId("hole-number")).toBeVisible();
+}
+
+interface ServerState {
+  hole_scores: Array<{ team_id: string; hole: number; strokes: number | null; tee_shot_player_id: string | null }>;
+  team_round_state: Array<{ team_id: string; open_hole: number | null }>;
+  drinks: Array<{ team_id: string; player_id: string; hole: number; deleted_at: string | null }>;
+}
+
+async function serverState(request: APIRequestContext, code: string): Promise<ServerState> {
+  const res = await request.get(`/api/t/${code}/state`);
+  expect(res.ok()).toBe(true);
+  return ((await res.json()) as { state: ServerState }).state;
+}
+
+const strokesOf = (state: ServerState, teamId: string) =>
+  state.hole_scores
+    .filter((s) => s.team_id === teamId && s.strokes !== null)
+    .sort((a, b) => a.hole - b.hole)
+    .map((s) => [s.hole, s.strokes]);
+
 test("score a hole, drinks with a ghost beer and undo, next hole, then offline and back", async ({ page, context }) => {
   test.setTimeout(150_000);
   const { code, players, threesome } = await createLiveTrip(page.request);
@@ -102,11 +135,19 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await dismissFanfare(page, "ghost");
   await expect(drinksHeader(page)).toHaveText(/Hole 1: −4/);
 
-  // Undo the ghost beer (the newest undo toast).
-  await page.getByRole("button", { name: "Undo", exact: true }).last().click();
-  await expect(page.getByText("Drink undone. Pretend it never happened.")).toBeVisible();
+  // One merged undo toast for the burst; Undo removes the latest drink (the ghost beer).
+  await expect(page.getByText("3 drinks logged", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo", exact: true })).toHaveCount(1);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByText("Drink undone", { exact: true })).toBeVisible();
+  await expect(page.getByText("2 still logged · last: Jimmy", { exact: true })).toBeVisible();
   await expect(drinksHeader(page)).toHaveText(/Hole 1: −2/);
   await expect(page.getByTestId("drink-row").filter({ hasText: "Rob" }).getByTestId("drink-count")).toHaveText("0");
+  await expect(page.getByTestId("drink-row").filter({ hasText: "Jimmy" }).getByTestId("drink-count")).toHaveText("1");
+
+  // The threesome reminder goes away for the rest of the round once dismissed (checked on hole 2).
+  await page.getByRole("button", { name: "Hide the threesome reminder for the rest of the round" }).click();
+  await expect(page.getByTestId("threesome-reminder")).toHaveCount(0);
 
   // Score: par 4 default, bump to 5, live net preview, save.
   await page.getByRole("button", { name: "One more stroke" }).click();
@@ -127,6 +168,7 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await dialog.getByRole("button", { name: "Tee off 2" }).click();
   await expect(page.getByTestId("hole-number")).toHaveText("2");
   await expect(drinksHeader(page)).toHaveText(/Hole 2: −0/);
+  await expect(page.getByTestId("threesome-reminder")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
   // Make sure everything so far reached the server before going offline.
@@ -147,15 +189,7 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await expect(page.getByTestId("offline-badge")).toHaveCount(0, { timeout: 45_000 });
 
   // The server has everything exactly once.
-  const res = await page.request.get(`/api/t/${code}/state`);
-  expect(res.ok()).toBe(true);
-  const { state } = (await res.json()) as {
-    state: {
-      drinks: Array<{ team_id: string; player_id: string; hole: number; deleted_at: string | null }>;
-      hole_scores: Array<{ team_id: string; hole: number; strokes: number | null; tee_shot_player_id: string | null }>;
-      team_round_state: Array<{ team_id: string; open_hole: number | null }>;
-    };
-  };
+  const state = await serverState(page.request, code);
   const byName = (n: string) => players.find((p) => p.name === n)!.id;
   const drinks = state.drinks.filter((d) => d.team_id === threesome.id);
   expect(drinks).toHaveLength(4);
@@ -191,10 +225,14 @@ test("scorecard strip: open an earlier hole, edit it, and come back", async ({ p
   await dismissFanfare(page, "hype");
   await expect(page.getByRole("button", { name: /Groom's Mulligan/ })).toBeVisible();
 
-  await page.getByTestId("save-score").click(); // par 4 on hole 1
+  // Leave the stepper at par and go: the confirm's main button saves the par it shows.
   await page.getByRole("button", { name: "On the tee: hole 2" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Tee off 2" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Par 4 on hole 1?");
+  await expect(dialog.getByRole("button", { name: "Tee off without a score" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Save 4 & tee off hole 2" }).click();
   await expect(page.getByTestId("hole-number")).toHaveText("2");
+  await expect(page.getByTestId("scorecard-strip").getByRole("button", { name: /^Hole 1, par 4, 4 strokes/ })).toBeVisible();
 
   // Tap hole 1 on the strip: editing bar, change 4 -> 3, save, back.
   await page.getByTestId("scorecard-strip").getByRole("button", { name: /^Hole 1,/ }).click();
@@ -208,4 +246,126 @@ test("scorecard strip: open an earlier hole, edit it, and come back", async ({ p
   await expect(page.getByTestId("hole-number")).toHaveText("2");
   await expect(page.getByTestId("scorecard-strip").getByRole("button", { name: /^Hole 1, par 4, 3 strokes/ })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+});
+
+test("a teammate's tee-off doesn't move a phone with an unsaved score, and Save can't land on the new hole", async ({ browser, page }) => {
+  test.setTimeout(150_000);
+  const { code, players, threesome } = await createLiveTrip(page.request);
+  const id = (n: string) => players.find((p) => p.name === n)!.id;
+  const phone = { ...devices["iPhone 13"], baseURL: test.info().project.use.baseURL };
+  const ctxA = await browser.newContext(phone);
+  const ctxB = await browser.newContext(phone);
+  const a = await ctxA.newPage();
+  const b = await ctxB.newPage();
+  await joinAs(a, code, id("Tom"));
+  await joinAs(b, code, id("Jimmy"));
+
+  await a.getByTestId("tee-cta").click();
+  await dismissFanfare(a, "hype");
+  // B picks up hole 1 on its next poll, then bumps the stepper to 5 without saving.
+  await expect(b.getByTestId("tee-cta")).toHaveCount(0, { timeout: 15_000 });
+  await b.getByRole("button", { name: "One more stroke" }).click();
+  await expect(b.getByTestId("save-score")).toHaveText(/Save\s*5/);
+
+  // A saves 4 on hole 1 and tees off hole 2.
+  await a.getByTestId("save-score").click();
+  await a.getByRole("button", { name: "On the tee: hole 2" }).click();
+  await a.getByRole("dialog").getByRole("button", { name: "Tee off 2" }).click();
+  await expect(a.getByTestId("hole-number")).toHaveText("2");
+
+  // B stays on hole 1 with its 5 and is told why.
+  await expect(b.getByText("Hole 2 teed off on another phone", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(b.getByTestId("hole-number")).toHaveText("1");
+  await expect(b.getByTestId("editing-bar")).toContainText("The team is on hole 2");
+  await b.getByTestId("save-score").click();
+  await expect(b.getByTestId("saved-state")).toBeVisible();
+  await expect.poll(async () => strokesOf(await serverState(page.request, code), threesome.id), { timeout: 20_000 }).toEqual([[1, 5]]);
+  await b.getByRole("button", { name: "Back to hole 2" }).first().click();
+  await expect(b.getByTestId("hole-number")).toHaveText("2");
+
+  // No draft this time: B follows A to hole 3, and its Save (same spot, same "Save 4") is
+  // disabled for a moment, so a tap meant for hole 2 can't score hole 3.
+  await a.getByTestId("save-score").click();
+  await a.getByRole("button", { name: "On the tee: hole 3" }).click();
+  await a.getByRole("dialog").getByRole("button", { name: "Tee off 3" }).click();
+  await expect(b.getByTestId("hole-number")).toHaveText("3", { timeout: 15_000 });
+  await expect(b.getByTestId("save-score")).toBeDisabled();
+  await expect(b.getByText("On the tee: hole 3", { exact: true })).toBeVisible();
+  await expect(b.getByTestId("save-score")).toBeEnabled();
+  const state = await serverState(page.request, code);
+  expect(strokesOf(state, threesome.id)).toEqual([
+    [1, 5],
+    [2, 4],
+  ]);
+  await ctxA.close();
+  await ctxB.close();
+});
+
+test("drink undo: one compact toast per burst that never covers a drink button (360x740)", async ({ page }) => {
+  test.setTimeout(120_000);
+  const { code, players } = await createLiveTrip(page.request);
+  await page.context().clearCookies();
+  await joinAs(page, code, players.find((p) => p.name === "Dave")!.id, { width: 360, height: 740 });
+  await page.getByTestId("tee-cta").click();
+  await dismissFanfare(page, "hype");
+
+  // Drinks panel right under the header: the spot where the old stacked toasts swallowed taps.
+  await page.getByTestId("drinks-panel").evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 110));
+  const coveredButtons = () =>
+    page.evaluate(() => {
+      const top = document.querySelector('[data-testid="trip-shell"] > header')!.getBoundingClientRect().bottom;
+      const bottom = document.querySelector('[data-testid="play-action-bar"]')!.getBoundingClientRect().top;
+      const out: string[] = [];
+      for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-testid="drink-row"] button')) {
+        const r = btn.getBoundingClientRect();
+        const y = r.top + r.height / 2;
+        if (y <= top || y >= bottom) continue; // off screen / under the header or action bar anyway
+        const hit = document.elementFromPoint(r.left + r.width / 2, y);
+        if (!hit || !btn.contains(hit)) out.push(btn.getAttribute("aria-label") ?? "?");
+      }
+      return out;
+    });
+
+  for (const name of ["Nick", "Dave", "Mike", "Chris"]) {
+    const btn = drinkButton(page, name);
+    await btn.scrollIntoViewIfNeeded();
+    expect(await coveredButtons(), `buttons covered before logging for ${name}`).toEqual([]);
+    await btn.click();
+  }
+  await expect(page.getByText("4 drinks logged", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo", exact: true })).toHaveCount(1);
+  expect(await coveredButtons()).toEqual([]);
+  // The toast sits on the action bar, not above it.
+  const toastBox = await page.getByText("4 drinks logged", { exact: true }).boundingBox();
+  const barBox = await page.getByTestId("play-action-bar").boundingBox();
+  expect(toastBox!.y).toBeGreaterThanOrEqual(barBox!.y);
+  for (const row of await page.getByTestId("drink-row").all()) await expect(row.getByTestId("drink-count")).toHaveText("1");
+  await expectNoHorizontalOverflow(page);
+
+  // Undo removes only the latest (Chris).
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByText("3 still logged · last: Mike", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("drink-row").filter({ hasText: "Chris" }).getByTestId("drink-count")).toHaveText("0");
+  await expect(page.getByTestId("drink-row").filter({ hasText: "Mike" }).getByTestId("drink-count")).toHaveText("1");
+});
+
+test("the tee-shot chips are on the first screen of a normal hole (390x844)", async ({ page }) => {
+  test.setTimeout(120_000);
+  const { code, players } = await createLiveTrip(page.request);
+  await page.context().clearCookies();
+  for (const who of ["Tom", "Dave"]) {
+    await joinAs(page, code, players.find((p) => p.name === who)!.id, { width: 390, height: 844 });
+    if (await page.getByTestId("tee-cta").count()) {
+      await page.getByTestId("tee-cta").click();
+      await dismissFanfare(page, "hype");
+    }
+    const m = await page.evaluate(() => {
+      const bar = document.querySelector('[data-testid="play-action-bar"]')!.getBoundingClientRect().top;
+      const chips = [...document.querySelectorAll('[data-testid="teeshot-panel"] [role="group"] button')].map((b) => b.getBoundingClientRect().bottom);
+      return { scrollY: window.scrollY, bar, chips };
+    });
+    expect(m.scrollY).toBe(0);
+    expect(m.chips.length).toBeGreaterThanOrEqual(3);
+    for (const bottom of m.chips) expect(bottom, `${who}: chip bottom ${bottom} vs action bar ${m.bar}`).toBeLessThanOrEqual(m.bar);
+  }
 });

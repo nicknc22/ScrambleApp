@@ -55,7 +55,8 @@ export function makeTrip(opts: {
   groom?: string; // player label, default "A1"
   base_team_size?: number;
 }): TripFixture {
-  const tripId = id("trip");
+  // uuid-shaped, like real trip ids (photo paths embed it: trips/<trip_id>/<kind>/<uuid>.jpg).
+  const tripId = `00000000-0000-4000-8000-${String(++seq).padStart(12, "0")}`;
   const now = at(-60);
   const players: Player[] = [];
   const teams: Team[] = [];

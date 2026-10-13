@@ -1,29 +1,36 @@
 "use client";
 // The team hole screen: one team, one hole at a time. Follows the team's current hole (so it
 // moves when another phone tees off the next one) unless the user opened another hole from the
-// scorecard strip. Every write goes through usePlayActions -> store.dispatch.
-import { useState } from "react";
+// scorecard strip, or has an unsaved score on the hole it was showing (then it stays put and says
+// so). Every write goes through usePlayActions -> store.dispatch.
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DrinkType, MulliganSource, TripState, UUID } from "@/lib/types";
 import type { Derived } from "@/lib/engine/types";
-import { Button, Card, TeamPill, displayName, useConfirm, useToast, IconUserSwap } from "@/components/ui";
+import { Button, Card, TeamPill, displayName, useToast, IconUserSwap } from "@/components/ui";
+import { readPref, writePref } from "@/lib/client/ui-prefs";
 import { Screen } from "@/components/shell/Screen";
 import { ClosestToPinSheet } from "@/components/contests/ClosestToPinSheet";
 import { LongDriveSheet } from "@/components/contests/LongDriveSheet";
 import {
+  HOLE_MOVE_GUARD_MS,
   advanceConfirm,
   canEditPlay,
   drinksForRound,
   drinksOnHole,
   driveView,
+  hasUnsavedDraft,
   mulliganOptions,
   needsOverride,
   nextAction,
   nineOf,
+  pinAfterTeamMove,
   roundSummary,
   scoreDraft,
+  teamMoveNotice,
   teeCtaHole,
   unscoredHoles,
   viewingHole,
+  type AdvanceConfirm,
 } from "./model";
 import { usePlayActions } from "./usePlayActions";
 import { useStickyTop } from "./useStickyTop";
@@ -37,6 +44,10 @@ import { ThreesomeReminder } from "./ThreesomeReminder";
 import { ScorecardStrip } from "./ScorecardStrip";
 import { RoundSummaryCard } from "./RoundSummaryCard";
 import { ActionBar, ActionBarSpacer, NextButton, SaveButton, TeeButton } from "./ActionBar";
+import { AdvanceSheet, type AdvanceChoice } from "./AdvanceSheet";
+
+/** Threesome rule reminder dismissed on this device for this team's round. */
+const reminderKey = (code: string, teamId: UUID) => `scramble:threesome-hint:${code}:${teamId}`;
 
 export function TeamHoleScreen({
   view,
@@ -55,7 +66,6 @@ export function TeamHoleScreen({
   canSwitch: boolean;
   onSwitchTeam: () => void;
 }) {
-  const confirm = useConfirm();
   const toast = useToast();
   const stickyTop = useStickyTop();
   const tripStatus = view.trip.status;
@@ -69,22 +79,53 @@ export function TeamHoleScreen({
   const openWindow = derived.openWindow[teamId] ?? null;
   const roundComplete = rs?.status === "complete";
   const finished = roundComplete || tripStatus === "final";
+  const lines = useMemo(() => derived.teamHoles[teamId] ?? [], [derived.teamHoles, teamId]);
 
-  // Hole opened from the scorecard strip (null = follow the team's current hole).
+  // Hole opened from the scorecard strip, or kept on screen for an unsaved score (null = follow
+  // the team's current hole).
   const [pin, setPin] = useState<number | null>(null);
-  // When the team reaches the pinned hole (e.g. saving a score on hole N+1 opened it), follow again.
-  const [seenCurrent, setSeenCurrent] = useState(currentHole);
-  if (seenCurrent !== currentHole) {
-    setSeenCurrent(currentHole);
-    if (pin === currentHole && !finished) setPin(null);
-  }
   // Stepper values the user changed but hasn't saved, per hole.
   const [drafts, setDrafts] = useState<Record<number, number>>({});
-  const [hiddenReminders, setHiddenReminders] = useState<number[]>([]);
+  // The team moved (another phone teed off, or this phone's score on N+1 opened it): follow, un-pin
+  // on reaching the pinned hole, or stay on a hole with an unsaved score.
+  const [seen, setSeen] = useState({ hole: currentHole, finished });
+  // Save is disabled for a moment after the screen changed holes under the user's thumb.
+  const [moveGuard, setMoveGuard] = useState(false);
+  if (seen.hole !== currentHole || seen.finished !== finished) {
+    setSeen({ hole: currentHole, finished });
+    setMoveGuard(true);
+    const nextPin = pinAfterTeamMove({
+      from: seen.hole,
+      to: currentHole,
+      pin,
+      wasSummary: seen.finished && pin === null,
+      finished,
+      unsavedOnFrom: hasUnsavedDraft(drafts, lines, seen.hole),
+    });
+    if (nextPin !== pin) setPin(nextPin);
+  }
+  const [reminderHidden, setReminderHidden] = useState(() => readPref(reminderKey(view.trip.code, teamId)) === "1");
   const [contestHole, setContestHole] = useState<number | null>(null);
+  const [advancePrompt, setAdvancePrompt] = useState<{ from: number; to: number | "complete"; c: AdvanceConfirm } | null>(null);
+  useEffect(() => {
+    if (!moveGuard) return;
+    const t = setTimeout(() => setMoveGuard(false), HOLE_MOVE_GUARD_MS);
+    return () => clearTimeout(t);
+  }, [moveGuard, seen]);
+  // performance.now() of this phone's last write that can move the team's hole: moves within a
+  // moment of it are this phone's own (it already said so), anything else came from another phone.
+  const localMoveAt = useRef(Number.NEGATIVE_INFINITY);
+  const shown = useRef({ hole: currentHole, finished });
+  useEffect(() => {
+    if (shown.current.hole === currentHole && shown.current.finished === finished) return;
+    shown.current = { hole: currentHole, finished };
+    if (performance.now() - localMoveAt.current < 2000) return;
+    const kept = pin !== null && hasUnsavedDraft(drafts, lines, pin) ? pin : null;
+    const notice = teamMoveNotice({ to: currentHole, finished, keptHole: kept, keptValue: kept !== null ? (drafts[kept] ?? null) : null });
+    if (notice) toast.show({ id: "tee-open", tone: kept !== null ? "roast" : "info", duration: kept !== null ? 6000 : 3500, ...notice });
+  }, [currentHole, finished, pin, drafts, lines, toast]);
 
   const team = derived.teamById[teamId];
-  const lines = derived.teamHoles[teamId] ?? [];
   if (!team || lines.length !== 18) {
     return (
       <Screen>
@@ -144,11 +185,12 @@ export function TeamHoleScreen({
   };
 
   const save = () => {
+    localMoveAt.current = performance.now(); // a score on hole N+1 opens it
     if (actions.saveScore(hole, draft.value)) clearDraft(hole);
   };
 
   /** "On the tee: hole N" / "Round complete" from the team's current hole, with a confirm. */
-  const advance = async (to: number | "complete") => {
+  const advance = (to: number | "complete") => {
     const from = currentHole;
     const fromLine = lines[from - 1];
     const fromDraft = scoreDraft(fromLine.strokes, drafts[from], fromLine.par);
@@ -162,13 +204,18 @@ export function TeamHoleScreen({
     // Transient "saved" / "on the tee" toasts would only crowd the confirm sheet.
     toast.dismiss("score-saved");
     toast.dismiss("tee-open");
-    const ok = await confirm({ title: c.title, body: c.body, emoji: c.emoji, confirmLabel: c.confirmLabel, tone: c.tone });
-    if (!ok) return;
-    if (c.saveFirst !== null) {
-      if (!actions.saveScore(from, c.saveFirst, { announce: false })) return;
-      clearDraft(from);
-    }
-    const done = to === "complete" ? actions.completeRound() : actions.teeOff(to);
+    setAdvancePrompt({ from, to, c });
+  };
+
+  const finishAdvance = (choice: AdvanceChoice | null) => {
+    const p = advancePrompt;
+    setAdvancePrompt(null);
+    if (!p || choice === null) return;
+    if (choice === "confirm" && p.c.saveFirst !== null && !actions.saveScore(p.from, p.c.saveFirst, { announce: false })) return;
+    // Skipping drops an unsaved stepper value too (otherwise it would hold the screen on that hole).
+    clearDraft(p.from);
+    localMoveAt.current = performance.now();
+    const done = p.to === "complete" ? actions.completeRound() : actions.teeOff(p.to);
     if (done) {
       setPin(null);
       scrollTop();
@@ -178,10 +225,16 @@ export function TeamHoleScreen({
   const onTee = () => {
     if (teeCta === null) return;
     if (teeCta === 1 && (rs?.open_hole ?? null) === null) {
+      localMoveAt.current = performance.now();
       if (actions.teeOff(1)) setPin(null);
       return;
     }
-    void advance(teeCta);
+    advance(teeCta);
+  };
+
+  const hideReminder = () => {
+    setReminderHidden(true);
+    writePref(reminderKey(view.trip.code, teamId), "1");
   };
 
   const teamRow = (
@@ -285,9 +338,6 @@ export function TeamHoleScreen({
             </p>
           </Card>
         )}
-        {derived.teamSize[teamId] === 3 && !hiddenReminders.includes(hole) && (
-          <ThreesomeReminder onDismiss={() => setHiddenReminders((h) => [...h, hole])} />
-        )}
         <ScorePanel
           hole={hole}
           par={par}
@@ -303,8 +353,13 @@ export function TeamHoleScreen({
           nine={nine}
           driveView={drive}
           disabled={disabled}
-          onSelect={(pid) => actions.setTeeShot(hole, pid)}
+          onSelect={(pid) => {
+            localMoveAt.current = performance.now(); // a tee shot on hole N+1 opens it
+            actions.setTeeShot(hole, pid);
+          }}
         />
+        {/* Below the tee-shot chips so it never pushes them off the first screen. */}
+        {derived.teamSize[teamId] === 3 && !reminderHidden && <ThreesomeReminder onDismiss={hideReminder} />}
         <ContestPanel
           hole={hole}
           contest={line.contest}
@@ -345,7 +400,9 @@ export function TeamHoleScreen({
             <TeeButton hole={teeCta} onClick={onTee} />
           ) : (
             <>
-              <SaveButton value={draft.value} dirty={draft.dirty} onSave={save} />
+              {/* Disabled right after the hole changed under the thumb: a tap meant for the hole
+                  that was on screen a moment ago must not score this one. */}
+              <SaveButton value={draft.value} dirty={draft.dirty} disabled={moveGuard} onSave={save} />
               {editingOther ? (
                 <NextButton
                   ariaLabel={finished ? "Back to summary" : `Back to hole ${currentHole}`}
@@ -361,16 +418,17 @@ export function TeamHoleScreen({
                   sub="On the tee"
                   label={`Hole ${next.hole}`}
                   testId="next-hole"
-                  onClick={() => void advance(next.hole)}
+                  onClick={() => advance(next.hole)}
                 />
               ) : next.kind === "complete" ? (
-                <NextButton ariaLabel="Round complete" sub="Hole 18 done?" label="Finish 🏁" tone="flag" testId="round-complete" onClick={() => void advance("complete")} />
+                <NextButton ariaLabel="Round complete" sub="Hole 18 done?" label="Finish 🏁" tone="flag" testId="round-complete" onClick={() => advance("complete")} />
               ) : null}
             </>
           )}
         </ActionBar>
       )}
 
+      <AdvanceSheet prompt={advancePrompt?.c ?? null} onChoose={finishAdvance} />
       <ClosestToPinSheet open={contestHole !== null && line.contest === "ctp"} onClose={() => setContestHole(null)} hole={contestHole ?? hole} />
       <LongDriveSheet open={contestHole !== null && line.contest === "ld"} onClose={() => setContestHole(null)} hole={contestHole ?? hole} />
     </>

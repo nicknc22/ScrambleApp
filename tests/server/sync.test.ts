@@ -346,10 +346,31 @@ describe("POST /api/t/[code]/sync: scenarios", () => {
     expect(edits).toHaveLength(1);
     expect(edits[0].payload).toMatchObject({ hole: 1, from: 6, to: 5 });
 
+    // The stale phone loses LWW and is told (its toast names the winning value).
     const r3 = await syncOk(s.trip.code, [stale]);
-    expect(r3.results).toEqual([{ id: stale.id, status: "applied" }]);
+    expect(r3.results).toEqual([{ id: stale.id, status: "rejected", code: "conflict", reason: expect.stringMatching(/Hole 1 already got a newer edit: 5/) }]);
     expect(r3.snapshot.state.hole_scores.find((h) => h.team_id === A && h.hole === 1)).toMatchObject({ strokes: 5, edit_count: 1 });
     expect(feedOf(r3, "score_edit")).toHaveLength(1);
+  });
+
+  it("a resend after a lost response gets the original rejection, not a silent 'duplicate'", async () => {
+    const s = await setupTrip([2, 2]);
+    // Phone A logs a drink for team B's player (not on team A): rejected...
+    const bad = mk("drink.log", {
+      drink_id: newId(),
+      team_id: s.team.A,
+      player_id: s.player.B1,
+      hole: 1,
+      drink_type: "shotgun",
+      photo_path: null,
+      by: s.player.A1,
+    });
+    const first = await syncOk(s.trip.code, [bad]);
+    expect(first.results).toEqual([{ id: bad.id, status: "rejected", code: "invalid", reason: expect.stringMatching(/isn't on Team A/) }]);
+    // ...but the response never reached the phone, which sends it again.
+    const again = await syncOk(s.trip.code, [bad]);
+    expect(again.results).toEqual(first.results);
+    expect(again.snapshot.state.drinks).toEqual([]);
   });
 
   it("commissioner-only ops: forbidden without (or with another trip's) cookie, applied with a valid one", async () => {

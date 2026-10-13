@@ -127,23 +127,44 @@ export function CameraButton({ cta, onFile, testId }: { cta: string; onFile: (fi
 
 /** The picked photo with a Retake button. */
 export function PhotoPreview({ photo, onFile, testId }: { photo: PhotoDraft; onFile: (file: Blob) => void; testId: string }) {
+  return <PhotoFrame url={photo.url} badge="✓ Got it" onFile={onFile} testId={`${testId}-preview`} retakeTestId={`${testId}-retake`} />;
+}
+
+/** The entry's current photo while editing: it stays with the edit unless a new one is taken. */
+export function KeptPhoto({ url, onFile, testId }: { url: string | null; onFile: (file: Blob) => void; testId: string }) {
+  return <PhotoFrame url={url} badge="✓ Current photo, kept" onFile={onFile} testId={`${testId}-kept`} retakeTestId={`${testId}-retake`} />;
+}
+
+function PhotoFrame({
+  url,
+  badge,
+  onFile,
+  testId,
+  retakeTestId,
+}: {
+  url: string | null;
+  badge: string;
+  onFile: (file: Blob) => void;
+  testId: string;
+  retakeTestId: string;
+}) {
   return (
-    <div className="space-y-2" data-testid={`${testId}-preview`}>
+    <div className="space-y-2" data-testid={testId}>
       <div className="relative overflow-hidden rounded-2xl border-2 border-ink bg-sand">
-        {photo.url ? (
-          // eslint-disable-next-line @next/next/no-img-element -- local preview blob
-          <img src={photo.url} alt="Your photo" className="block max-h-[30dvh] w-full object-cover" />
+        {url ? (
+          // eslint-disable-next-line @next/next/no-img-element -- local preview blob / stored photo
+          <img src={url} alt="Your photo" className="block max-h-[30dvh] w-full object-cover" />
         ) : (
           <p className="px-4 py-8 text-center text-base font-bold text-muted">Photo attached (no preview on this phone).</p>
         )}
         <span className="absolute top-2 left-2 rounded-full border-2 border-ink bg-fairway px-2.5 py-1 text-xs font-black tracking-wide text-white uppercase">
-          ✓ Got it
+          {badge}
         </span>
       </div>
       <label className="btn w-full border-ink bg-paper text-ink active:bg-sand">
         <IconCamera size={22} strokeWidth={2.5} />
         Retake
-        <CameraInput testId={`${testId}-retake`} onFile={onFile} />
+        <CameraInput testId={retakeTestId} onFile={onFile} />
       </label>
     </div>
   );

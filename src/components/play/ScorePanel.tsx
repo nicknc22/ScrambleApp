@@ -25,7 +25,7 @@ export function ScorePanel({
   const over = draft.value - par >= 2;
   return (
     <Card padded={false} className="overflow-hidden border-ink" data-testid="score-panel">
-      <div className="flex items-center justify-between gap-2 border-b-2 border-line px-4 py-2">
+      <div className="flex items-center justify-between gap-2 border-b-2 border-line px-4 py-1.5">
         <h2 className="text-lg font-black uppercase">Team score</h2>
         <span
           className={cx(
@@ -37,7 +37,7 @@ export function ScorePanel({
           {draft.dirty ? (draft.saved === null ? "Not saved" : "Unsaved change") : "✓ Saved"}
         </span>
       </div>
-      <div className="px-3 pt-3 pb-3">
+      <div className="px-3 pt-2.5 pb-2.5">
         <Stepper
           value={draft.value}
           onChange={onChange}
@@ -50,7 +50,7 @@ export function ScorePanel({
           hint={<span className={cx("font-black uppercase", under ? "text-fairway-dark" : over ? "text-flag-dark" : "text-muted")}>{name}</span>}
         />
         <div
-          className="num mt-3 flex items-center justify-center gap-2 rounded-2xl border-2 border-beer-dark bg-beer-soft px-3 py-2 text-center text-xl font-black"
+          className="num mt-2 flex items-center justify-center gap-2 rounded-2xl border-2 border-beer-dark bg-beer-soft px-3 py-1.5 text-center text-xl font-black"
           data-testid="net-preview"
           aria-live="polite"
         >

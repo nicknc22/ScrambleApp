@@ -150,7 +150,11 @@ describe("derive — spec scoring checks end to end", () => {
     f.deleteDrink(second);
     d = derive(f.state);
     expect([d.teamHoles[f.team.B][0].credit, d.teamHoles[f.team.B][1].credit]).toEqual([1, 1]);
-    expect(d.standings.find((r) => r.team_id === f.team.B)).toMatchObject({ drinks: 2, credit: 2, ghost_beers: 0 });
+    // Nothing scored yet: the credit is banked (round net = sum of SCORED hole nets).
+    expect(d.standings.find((r) => r.team_id === f.team.B)).toMatchObject({ drinks: 0, credit: 0, pending_drinks: 2, pending_credit: 2, ghost_beers: 0 });
+    f.score("B", 1, 4).score("B", 2, 4);
+    d = derive(f.state);
+    expect(d.standings.find((r) => r.team_id === f.team.B)).toMatchObject({ drinks: 2, credit: 2, pending_drinks: 0, pending_credit: 0, net: 6 });
   });
 
   it("shotgun and shot: -1 each, one mulligan each; using mulligans never changes net", () => {

@@ -1,7 +1,9 @@
 "use client";
 // Live updates. The server broadcasts an invalidation ("changed") on topic trip:<trip_id> after
-// every commit; we refetch the snapshot (debounced). Polling is the safety net: every 20 s when
-// Realtime is configured, every 3 s when it isn't. Also refetch on focus / online / visible.
+// every commit; we refetch the snapshot (debounced). Polling is the safety net: every 20 s while
+// the broadcast channel is SUBSCRIBED, every 3 s otherwise (Realtime not configured, still
+// connecting, CHANNEL_ERROR / TIMED_OUT / CLOSED, or supabase-js failed to load). Also refetch on
+// focus / online / visible.
 // Polls are skipped while the page is hidden (iOS freezes it anyway; saves battery and data).
 import type { SnapshotMeta } from "../types";
 import { realTimers, type DocumentLike, type EventTargetLike, type Timers } from "./sync";
@@ -27,9 +29,9 @@ export interface LiveOptions {
   win?: EventTargetLike | null;
   doc?: DocumentLike | null;
   connect?: RealtimeConnector;
-  /** Poll interval with Realtime configured. Default 20000. */
+  /** Poll interval while the Realtime channel is subscribed. Default 20000. */
   pollMs?: number;
-  /** Poll interval without Realtime. Default 3000. */
+  /** Poll interval while it isn't (not configured, connecting, or down). Default 3000. */
   fallbackPollMs?: number;
   /** Debounce for "changed" broadcasts. Default 400. */
   debounceMs?: number;
@@ -112,7 +114,7 @@ export function startLiveUpdates(opts: LiveOptions): LiveController {
     }, delayMs);
   };
 
-  const interval = () => (cfg ? pollMs : fallbackPollMs);
+  const interval = () => (cfg && connected ? pollMs : fallbackPollMs);
   const armPoll = () => {
     if (stopped) return;
     if (pollTimer !== null) timers.clearTimeout(pollTimer);
@@ -121,6 +123,13 @@ export function startLiveUpdates(opts: LiveOptions): LiveController {
       if (!hidden()) poll();
       armPoll();
     }, interval());
+  };
+
+  /** Track the channel state; the poll interval follows it (fast while not subscribed). */
+  const setConnected = (on: boolean) => {
+    if (connected === on) return;
+    connected = on;
+    armPoll();
   };
 
   const teardown = () => {
@@ -148,11 +157,11 @@ export function startLiveUpdates(opts: LiveOptions): LiveController {
       (status) => {
         if (stopped || gen !== connecting) return;
         if (status === "SUBSCRIBED") {
-          connected = true;
+          setConnected(true);
           // Catch up on anything broadcast while we weren't listening.
           poke(0);
         } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-          connected = false;
+          setConnected(false);
         }
       },
     ).then(
@@ -168,8 +177,8 @@ export function startLiveUpdates(opts: LiveOptions): LiveController {
         disconnect = fn;
       },
       () => {
-        // supabase-js chunk unavailable (offline first load) or bad config: polling covers it.
-        if (gen === connecting) connected = false;
+        // supabase-js chunk unavailable (offline first load) or bad config: fast polling covers it.
+        if (gen === connecting) setConnected(false);
       },
     );
   };
@@ -188,12 +197,13 @@ export function startLiveUpdates(opts: LiveOptions): LiveController {
       if (stopped) return;
       const n = next ?? null;
       const changed = !configKnown || !sameConfig(cfg, n);
-      const intervalChanged = !configKnown || !!cfg !== !!n;
       configKnown = true;
       if (!changed) return;
+      const wasConnected = connected;
       cfg = n;
-      if (intervalChanged) armPoll();
       reconnect();
+      // A new channel isn't subscribed yet: poll fast until it is.
+      if (wasConnected) armPoll();
     },
     poke,
     get connected() {

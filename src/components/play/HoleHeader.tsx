@@ -51,7 +51,7 @@ export function HoleHeader({
           )}
         </div>
       )}
-      <div className="flex items-end gap-3 px-4 pt-2.5 pb-2.5">
+      <div className="flex items-end gap-3 px-4 pt-2 pb-2">
         <div className="min-w-0 shrink-0">
           <div className="text-[11px] font-black tracking-[0.25em] uppercase opacity-90">Hole</div>
           <div className="loud num text-[4.75rem] leading-[0.8] tracking-tight" data-testid="hole-number" style={{ textShadow: "0 4px 0 rgba(0,0,0,0.35)" }}>
@@ -76,7 +76,7 @@ export function HoleHeader({
         </div>
       </div>
       <dl className="grid grid-cols-3 divide-x-2 divide-white/25 border-t-2 border-white/25 bg-black/25">
-        <Stat label="Net" value={started ? formatToPar(standing!.net_to_par) : "E"} big={started && standing!.net_to_par < 0} />
+        <Stat label="To par" value={started ? formatToPar(standing!.net_to_par) : "E"} big={started && standing!.net_to_par < 0} />
         <Stat label="Pos" value={standing?.pos_label ?? "–"} />
         <Stat label="Thru" value={standing?.thru_label ?? "–"} />
       </dl>
@@ -86,7 +86,7 @@ export function HoleHeader({
 
 function Stat({ label, value, big = false }: { label: string; value: string; big?: boolean }) {
   return (
-    <div className="flex min-w-0 items-baseline justify-center gap-1.5 px-2 py-1.5">
+    <div className="flex min-w-0 items-baseline justify-center gap-1.5 px-2 py-1">
       <dt className="text-[11px] font-black tracking-widest uppercase opacity-90">{label}</dt>
       <dd className={cx("num text-xl leading-tight font-black", big && "text-hazard")}>{value}</dd>
     </div>

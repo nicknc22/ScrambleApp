@@ -2,22 +2,26 @@
 // Every Play-tab write goes through here: store.dispatch (never the sync API), plus the toast /
 // undo / fanfare that goes with it. Reads fresh state from the store inside each action so a
 // callback created on an older render never stamps a stale hole.
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import type { DrinkType, MulliganSource, UUID } from "@/lib/types";
 import type { DispatchResult } from "@/lib/client/store";
 import type { OpInput } from "@/lib/ops";
 import { useTripStore } from "@/lib/client/react";
 import { newId } from "@/lib/ids";
 import { formatToPar } from "@/lib/engine/format";
-import { displayName, useFanfare, useToast } from "@/components/ui";
+import { UNDO_MS, displayName, useFanfare, useToast } from "@/components/ui";
+import { drinkUndoToast } from "./DrinkUndoToast";
 import {
   GROOM_FANFARE,
+  drinkBurstCopy,
   drinkFeedback,
+  drinkUndoneCopy,
   ghostFanfareCopy,
   noWindowMessage,
   roundCompleteFanfare,
   savedScoreLine,
   teeOffFanfare,
+  type BurstDrink,
 } from "./model";
 
 export interface PlayActions {
@@ -33,10 +37,32 @@ export interface PlayActions {
 
 type FailResult = Extract<DispatchResult, { ok: false }>;
 
+/** Drinks logged in a row on this phone (newest last); the burst ends once its undo toast timed out. */
+interface DrinkBurst {
+  drinks: BurstDrink[];
+  at: number;
+}
+
+function pushBurst(b: DrinkBurst, drink: BurstDrink): void {
+  const now = Date.now();
+  if (now - b.at > UNDO_MS) b.drinks = [];
+  b.drinks.push(drink);
+  b.at = now;
+}
+
+/** Take the newest drink off the burst; the re-shown toast restarts the burst's clock. */
+function popBurst(b: DrinkBurst): BurstDrink | undefined {
+  b.at = Date.now();
+  return b.drinks.pop();
+}
+
 export function usePlayActions({ teamId, override }: { teamId: UUID; override: boolean }): PlayActions {
   const store = useTripStore();
   const toast = useToast();
   const fanfare = useFanfare();
+  // Drinks logged in a row share ONE undo toast (fixed id): a stack of per-drink toasts would cover
+  // the next teammate's buttons. Undo removes the latest; the burst ends when its toast times out.
+  const burst = useRef<DrinkBurst>({ drinks: [], at: 0 });
 
   return useMemo<PlayActions>(() => {
     const extra = override ? { as_commissioner: true } : {};
@@ -51,18 +77,32 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
       toast.roast(noWindowMessage(roundStatus(), `${playerId}:${Date.now()}`), { title: "That one doesn't count", emoji: "🚫" });
     };
 
-    const undoDrink = async (opId: UUID, drinkId: UUID) => {
+    const drinkToastId = `drink-undo-${teamId}`;
+    const showBurst = (undone: boolean) => {
+      const drinks = burst.current.drinks;
+      if (drinks.length === 0) {
+        toast.show(drinkUndoToast({ id: drinkToastId, tone: "info", ...drinkUndoneCopy(drinks), duration: 3000 }));
+        return;
+      }
+      const copy = undone ? drinkUndoneCopy(drinks) : drinkBurstCopy(drinks);
+      toast.show(drinkUndoToast({ id: drinkToastId, tone: "success", ...copy, action: { label: "Undo", onAction: () => void undoLastDrink() } }));
+    };
+
+    /** Undo the burst's most recent drink; the toast comes back for the rest of the burst. */
+    const undoLastDrink = async () => {
+      const last = popBurst(burst.current);
+      if (!last) return;
       let cancelled = false;
       try {
-        cancelled = await store.cancelPending(opId);
+        cancelled = await store.cancelPending(last.opId);
       } catch {
         cancelled = false;
       }
       if (!cancelled) {
-        const r = dispatch({ type: "drink.delete", drink_id: drinkId });
+        const r = dispatch({ type: "drink.delete", drink_id: last.drinkId });
         if (!r.ok) return fail(r);
       }
-      toast.info("Drink undone. Pretend it never happened.", { emoji: "↩️", id: `undo-${drinkId}`, duration: 3000 });
+      showBurst(true);
     };
 
     const undoMulligan = async (opId: UUID, mulliganId: UUID) => {
@@ -148,15 +188,8 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
         const name = playerName(playerId);
         const fb = drinkFeedback(type, value, name, hole);
         if (fb.ghost) fanfare.show({ tone: "ghost", emoji: "👻", ...ghostFanfareCopy(name, value ?? 2), key: `ghost-${drinkId}` });
-        const opId = r.op.id;
-        toast.show({
-          id: `drink-${drinkId}`,
-          tone: "success",
-          emoji: fb.emoji,
-          title: fb.title,
-          message: fb.message,
-          action: { label: "Undo", onAction: () => void undoDrink(opId, drinkId) },
-        });
+        pushBurst(burst.current, { opId: r.op.id, drinkId, name, type, value, hole });
+        showBurst(false);
         return true;
       },
 

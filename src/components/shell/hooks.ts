@@ -1,8 +1,9 @@
 "use client";
-// Shell side effects: toasts for server rejections, fanfare for other people's big moments,
-// unread feed count, recent-trip bookkeeping.
+// Shell side effects: toasts for server rejections (SyncIssues keeps listing them), fanfare for
+// other people's big moments, unread feed count, recent-trip bookkeeping.
 import { useEffect, useRef } from "react";
-import type { OpResult, RejectCode } from "@/lib/ops";
+import type { RejectCode } from "@/lib/ops";
+import type { SyncIssue } from "@/lib/client/sync-issues";
 import type { FeedEvent, TripState } from "@/lib/types";
 import type { Derived } from "@/lib/engine/types";
 import { renderFeedEvent } from "@/lib/events/templates";
@@ -19,18 +20,39 @@ const REJECT_FALLBACK: Record<RejectCode, string> = {
   conflict: "Somebody beat you to it. Refresh and try again.",
 };
 
-/** Toast every new entry in store.rejected. */
-export function useRejectedToasts(rejected: readonly OpResult[] | undefined) {
+/** Toast body for a rejection: what it was, and why the server said no. */
+export function rejectionMessage(r: Pick<SyncIssue, "code" | "reason"> & { description?: string }): string {
+  const why = r.reason || (r.code ? REJECT_FALLBACK[r.code] : null) || "The server said no.";
+  return r.description ? `${r.description} — ${why}` : why;
+}
+
+/**
+ * Whether a rejection is news for a shell mounted at `sinceMs`. Ones restored from an earlier
+ * visit were already toasted then; they stay listed under the header's ⚠️ chip instead.
+ */
+export function isFreshRejection(r: Pick<SyncIssue, "at">, sinceMs: number): boolean {
+  const at = Date.parse(r.at);
+  return !Number.isFinite(at) || at >= sinceMs - 1000;
+}
+
+/** Toast id for a rejection (opening the ⚠️ list clears the toasts it repeats). */
+export const rejectionToastId = (opId: string) => `rejected-${opId}`;
+
+/** Toast every new entry in store.rejected (they also stay listed under the header's ⚠️ chip). */
+export function useRejectedToasts(rejected: readonly SyncIssue[] | undefined) {
   const toast = useToast();
   const seen = useRef(new Set<string>());
+  const since = useRef<number | null>(null);
   useEffect(() => {
+    since.current ??= Date.now();
     for (const r of rejected ?? []) {
       const key = `${r.id}:${r.code ?? ""}`;
       if (seen.current.has(key)) continue;
       seen.current.add(key);
-      toast.error(r.reason || (r.code ? REJECT_FALLBACK[r.code] : null) || "The server said no.", {
+      if (!isFreshRejection(r, since.current)) continue;
+      toast.error(rejectionMessage(r), {
         title: "That didn't save",
-        id: `rejected-${r.id}`,
+        id: rejectionToastId(r.id),
       });
     }
   }, [rejected, toast]);

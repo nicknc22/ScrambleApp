@@ -183,6 +183,10 @@ class FakeServer {
   batchSizes: number[] = [];
   failSync = 0;
   failUpload = 0;
+  /** Uploads hang (a weak uplink) until released or aborted by the client's timeout. */
+  hangUploads = false;
+  private uploadWaiters: Array<() => void> = [];
+  uploadAttempts = 0;
   loseNextSyncResponse = false;
   rejectIds = new Set<string>();
   poisonIds = new Set<string>();
@@ -213,6 +217,12 @@ class FakeServer {
     };
   }
 
+  /** Let hanging uploads through. */
+  releaseUploads(): void {
+    this.hangUploads = false;
+    for (const w of this.uploadWaiters.splice(0)) w();
+  }
+
   appliedCount(id: string): number {
     return this.appliedOrder.filter((x) => x === id).length;
   }
@@ -235,6 +245,13 @@ class FakeServer {
         return json(this.snapshot());
       }
       case "upload": {
+        this.uploadAttempts++;
+        if (this.hangUploads) {
+          await new Promise<void>((resolve, reject) => {
+            this.uploadWaiters.push(resolve);
+            init.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+          });
+        }
         if (this.failUpload > 0) {
           this.failUpload--;
           return json({ error: "storage down" }, 503);
@@ -429,17 +446,16 @@ describe("TripStore offline-first sync", () => {
 
     // Reconnect.
     server.online = true;
-    await b.store.flush();
+    await b.store.flush({ photos: true });
     expect(b.store.getState().pendingCount).toBe(0);
     expect(b.store.getState().online).toBe(true);
     expect(b.store.getState().lastSyncAt).not.toBeNull();
     for (const op of dispatched) expect(server.appliedCount(op.id)).toBe(1);
     expect(server.appliedOrder).toEqual(dispatched.map((op) => op.id));
     expect(new Set(server.received).size).toBe(server.received.length);
-    // The photo went up before the op that references it.
+    // The photo went up exactly once (in its own lane; the op carried its path without waiting).
     const photoOp = dispatched[1];
     expect(server.uploads.has(photoPath)).toBe(true);
-    expect(server.events.indexOf(`upload:${photoPath}`)).toBeLessThan(server.events.indexOf(`op:${photoOp.id}`));
     expect(server.events.filter((e) => e === `upload:${photoPath}`)).toHaveLength(1);
     // Server state now matches the optimistic view.
     expect(lite(b.store).activeDrinks).toBe(2);
@@ -518,10 +534,52 @@ describe("TripStore offline-first sync", () => {
     await h.store.flush();
     const s = h.store.getState();
     expect(s.pendingCount).toBe(0);
-    expect(s.rejected).toEqual([{ id: bad.op.id, status: "rejected", code: "conflict", reason: "Server says no" }]);
+    expect(s.rejected).toEqual([
+      {
+        id: bad.op.id,
+        status: "rejected",
+        code: "conflict",
+        reason: "Server says no",
+        op_type: "drink.log",
+        description: "Drink for Player A1 · hole 1",
+        at: "2026-10-24T17:05:00.000Z",
+      },
+    ]);
     expect(lite(h.store).activeDrinks).toBe(1);
     h.store.dismissRejected(bad.op.id);
     expect(h.store.getState().rejected).toHaveLength(0);
+  });
+
+  it("rejections persist per trip (newest 20) with op type, description and time, until dismissed", async () => {
+    const f = makeTrip({ teams: [4, 3, 3] });
+    const server = new FakeServer(f.state);
+    const storage = new MemStorage();
+    const a = await started(server, { storage });
+    const ops: Op[] = [];
+    for (let i = 1; i <= 25; i++) {
+      a.tick();
+      const r = a.store.dispatch({ type: "score.set", team_id: f.team.A, hole: 1, strokes: (i % 9) + 1 });
+      if (!r.ok) throw new Error("dispatch failed");
+      server.rejectIds.add(r.op.id);
+      ops.push(r.op);
+    }
+    await a.store.flush();
+    const rejected = a.store.getState().rejected;
+    expect(rejected.map((r) => r.id)).toEqual(ops.slice(-20).map((o) => o.id));
+    expect(rejected[19]).toMatchObject({ op_type: "score.set", description: "Hole 1 score: 8 · Team A", reason: "Server says no" });
+    expect(Date.parse(rejected[19].at)).not.toBeNaN();
+    a.store.dismissRejected(ops[24].id);
+    a.store.stop();
+
+    // A reload (new store, same localStorage) still lists them; other trips don't see them.
+    const b = await started(server, { storage });
+    expect(b.store.getState().rejected.map((r) => r.id)).toEqual(ops.slice(-20, -1).map((o) => o.id));
+    expect(b.store.getState().rejected[0]).toMatchObject({ op_type: "score.set", description: expect.stringMatching(/^Hole 1 score: \d · Team A$/) });
+    expect(storage.map.has("scramble:sync-issues:other")).toBe(false);
+    b.store.dismissRejected();
+    expect(b.store.getState().rejected).toEqual([]);
+    const c = await started(server, { storage });
+    expect(c.store.getState().rejected).toEqual([]);
   });
 
   it("a dispatch the reducer rejects queues nothing", async () => {
@@ -866,7 +924,7 @@ describe("TripStore offline-first sync", () => {
     expect(h.store.photoUrl(path)).toBe(local); // cached per path
     const r = h.store.dispatch({ type: "post.create", event_id: newTestId(), text: null, photo_path: path });
     expect(r.ok).toBe(true);
-    await h.store.flush();
+    await h.store.flush({ photos: true });
     expect(h.store.getState().pendingCount).toBe(0);
     expect(server.uploads.get(path)).toBeInstanceOf(Blob);
     // Still the local preview right after upload (no flicker)...
@@ -874,53 +932,152 @@ describe("TripStore offline-first sync", () => {
     // ...then the remote URL once the grace period passed.
     h.clock.now += 11_000;
     h.store.dispatch(drinkInput(f));
-    await h.store.flush();
+    await h.store.flush({ photos: true });
     expect(h.store.photoUrl(path)).toBe(`https://cdn.test/photos/${path}`);
     expect(h.revoked).toContain(local);
   });
 
-  it("an op waits for its photo, but a photo that keeps failing can't strand it", async () => {
+  it("ops never wait for a photo: a score logged after a photo drink syncs while the upload hangs, and the phone stays online", async () => {
+    const f = makeTrip({ teams: [4, 3, 3] });
+    const server = new FakeServer(f.state);
+    const h = await started(server);
+    server.hangUploads = true;
+    const path = await h.store.addPhoto(new Blob(["jpeg"], { type: "image/jpeg" }), "drinks");
+    const drink = h.store.dispatch(drinkInput(f, { photo_path: path }));
+    const score = h.store.dispatch({ type: "score.set", team_id: f.team.A, hole: 1, strokes: 4 });
+    if (!drink.ok || !score.ok) throw new Error("dispatch failed");
+    expect(h.store.getState().pendingCount).toBe(3);
+    // The debounced passes fire: the upload starts (and hangs), the ops go anyway.
+    h.timers.fire(0, 250);
+    await until(() => server.appliedCount(score.op.id) === 1);
+    expect(server.appliedOrder).toEqual([drink.op.id, score.op.id]);
+    expect(server.uploadAttempts).toBe(1);
+    expect(server.uploads.has(path)).toBe(false);
+    const s = h.store.getState();
+    expect(s.online).toBe(true);
+    expect(s.syncing).toBe(false);
+    expect(s.pendingCount).toBe(1); // just the photo
+    expect(s.view!.drinks.find((d) => d.photo_path === path)).toBeDefined();
+    // flush() (e.g. before a commissioner import) returns once the ops are in, upload or not.
+    await h.store.flush();
+    expect(server.uploads.has(path)).toBe(false);
+    // Another score while the upload is still out goes on the next debounce, not after the upload.
+    const score2 = h.store.dispatch({ type: "score.set", team_id: f.team.A, hole: 1, strokes: 5 });
+    if (!score2.ok) throw new Error("dispatch failed");
+    h.timers.fire(250, 250);
+    await until(() => server.appliedCount(score2.op.id) === 1);
+    // The photo lands whenever the uplink manages it.
+    server.releaseUploads();
+    await until(() => server.uploads.has(path));
+    await until(() => h.store.getState().pendingCount === 0);
+    expect(server.events.indexOf(`upload:${path}`)).toBeGreaterThan(server.events.indexOf(`op:${score2.op.id}`));
+  });
+
+  it("a failing photo upload retries with its own backoff and never marks the phone offline", async () => {
     const f = makeTrip({ teams: [4, 3, 3] });
     const server = new FakeServer(f.state);
     const h = await started(server);
     const path = await h.store.addPhoto(new Blob(["jpeg"], { type: "image/jpeg" }), "drinks");
     const before = h.store.dispatch(drinkInput(f));
     const withPhoto = h.store.dispatch(drinkInput(f, { photo_path: path }));
+    if (!withPhoto.ok) throw new Error("dispatch failed");
+    const undo = h.store.dispatch({ type: "drink.delete", drink_id: (withPhoto.op as Extract<Op, { type: "drink.log" }>).drink_id });
     const after = h.store.dispatch({ type: "score.set", team_id: f.team.A, hole: 1, strokes: 4 });
-    if (!before.ok || !withPhoto.ok || !after.ok) throw new Error("dispatch failed");
+    if (!before.ok || !undo.ok || !after.ok) throw new Error("dispatch failed");
     server.failUpload = 100;
-    await h.store.flush();
-    // Ops before the photo op went; the photo op and everything after it wait.
-    expect(server.appliedCount(before.op.id)).toBe(1);
-    expect(server.appliedCount(withPhoto.op.id)).toBe(0);
-    expect(server.appliedCount(after.op.id)).toBe(0);
-    await h.store.flush();
-    await h.store.flush();
-    // Third failed upload: stop holding the data hostage.
-    expect(server.appliedCount(withPhoto.op.id)).toBe(1);
-    expect(server.appliedCount(after.op.id)).toBe(1);
-    expect(h.store.getState().pendingCount).toBe(1); // the photo keeps retrying
+    await h.store.flush({ photos: true });
+    // Every op went, in order (the undo never overtakes its drink); only the photo waits.
+    expect(server.appliedOrder).toEqual([before.op.id, withPhoto.op.id, undo.op.id, after.op.id]);
+    expect(h.store.getState().online).toBe(true);
+    expect(h.store.getState().pendingCount).toBe(1);
+    expect(h.store.getState().rejected).toEqual([]);
+    expect(h.timers.delays()).toContain(1000); // the upload lane's first backoff retry
+    await h.store.flush({ photos: true });
+    await h.store.flush({ photos: true });
+    expect(h.store.getState().online).toBe(true);
     server.failUpload = 0;
-    await h.store.flush();
+    await h.store.flush({ photos: true });
     expect(server.uploads.has(path)).toBe(true);
     expect(h.store.getState().pendingCount).toBe(0);
   });
 
-  it("scores don't wait behind a slow photo upload", async () => {
+  it("scores dispatched before and after a photo post both go without waiting for the upload", async () => {
     const f = makeTrip({ teams: [4, 3, 3] });
     const server = new FakeServer(f.state);
     const h = await started(server);
     const score = h.store.dispatch({ type: "score.set", team_id: f.team.A, hole: 1, strokes: 4 });
     const path = await h.store.addPhoto(new Blob(["jpeg"], { type: "image/jpeg" }), "posts");
     const post = h.store.dispatch({ type: "post.create", event_id: newTestId(), text: "look", photo_path: path });
-    if (!score.ok || !post.ok) throw new Error("dispatch failed");
-    await h.store.flush();
-    const iScore = server.events.indexOf(`op:${score.op.id}`);
-    const iUpload = server.events.indexOf(`upload:${path}`);
-    const iPost = server.events.indexOf(`op:${post.op.id}`);
-    expect(iScore).toBeGreaterThanOrEqual(0);
-    expect(iScore).toBeLessThan(iUpload);
-    expect(iUpload).toBeLessThan(iPost);
+    const score2 = h.store.dispatch({ type: "score.set", team_id: f.team.A, hole: 2, strokes: 3 });
+    if (!score.ok || !post.ok || !score2.ok) throw new Error("dispatch failed");
+    server.hangUploads = true;
+    h.timers.fire(0, 250);
+    await until(() => server.appliedCount(score2.op.id) === 1);
+    expect(server.appliedOrder).toEqual([score.op.id, post.op.id, score2.op.id]);
+    expect(server.uploads.has(path)).toBe(false);
+    server.releaseUploads();
+    await until(() => h.store.getState().pendingCount === 0);
+  });
+
+  it("interval polls keep running while only a photo upload is in flight", async () => {
+    const f = makeTrip({ teams: [4, 3, 3] });
+    const server = new FakeServer(f.state);
+    let poll: (() => unknown) | null = null;
+    const h = await started(server, {
+      realtime: (opts) => {
+        poll = opts.poll ?? null;
+        return { setConfig: () => undefined, poke: () => undefined, connected: false, stop: () => undefined };
+      },
+    });
+    server.hangUploads = true;
+    await h.store.addPhoto(new Blob(["jpeg"], { type: "image/jpeg" }), "drinks");
+    h.timers.fire(0, 250);
+    await until(() => server.uploadAttempts === 1);
+    const statesBefore = server.requests.filter((r) => r.path.endsWith("/state")).length;
+    await (poll as unknown as () => Promise<void> | undefined)();
+    expect(server.requests.filter((r) => r.path.endsWith("/state")).length).toBe(statesBefore + 1);
+    server.releaseUploads();
+    await until(() => h.store.getState().pendingCount === 0);
+  });
+
+  it("undoing a photo drink before it synced drops its queued photo too (unless something else uses it)", async () => {
+    const f = makeTrip({ teams: [4, 3, 3] });
+    const server = new FakeServer(f.state);
+    const dbName = `scramble-undo-photo-${Date.now()}`;
+    const h = await started(server, { dbName });
+    // A synced drink whose photo is still queued (its first upload attempt failed).
+    const shared = await h.store.addPhoto(new Blob(["jpeg1"], { type: "image/jpeg" }), "drinks");
+    const synced = h.store.dispatch(drinkInput(f, { photo_path: shared }));
+    if (!synced.ok) throw new Error("dispatch failed");
+    server.failUpload = 1;
+    await h.store.flush({ photos: true });
+    expect(server.appliedCount(synced.op.id)).toBe(1);
+    expect(h.store.getState().pendingCount).toBe(1);
+    // Undoing another op that carries the same photo keeps it: the synced drink still needs it.
+    const again = h.store.dispatch(drinkInput(f, { photo_path: shared }));
+    if (!again.ok) throw new Error("dispatch failed");
+    expect(await h.store.cancelPending(again.op.id)).toBe(true);
+    expect(h.store.getState().pendingCount).toBe(1);
+    // Undoing a fresh photo drink drops its photo: no upload, no preview, nothing left on disk.
+    const own = await h.store.addPhoto(new Blob(["jpeg2"], { type: "image/jpeg" }), "drinks");
+    const preview = h.store.photoUrl(own);
+    expect(preview).toMatch(/^blob:/);
+    const r = h.store.dispatch(drinkInput(f, { photo_path: own }));
+    if (!r.ok) throw new Error("dispatch failed");
+    await h.store.settled();
+    expect(h.store.getState().pendingCount).toBe(3);
+    expect(await h.store.cancelPending(r.op.id)).toBe(true);
+    expect(h.store.getState().pendingCount).toBe(1);
+    expect(h.revoked).toContain(preview);
+    expect(h.store.photoUrl(own)).toBe(`https://cdn.test/photos/${own}`);
+    await h.store.settled();
+    const db = new ScrambleDB(dbName);
+    expect((await db.blobs.where("code").equals(CODE).toArray()).map((b) => b.path)).toEqual([shared]);
+    db.close();
+    await h.store.flush({ photos: true });
+    expect(server.uploads.has(shared)).toBe(true);
+    expect(server.uploads.has(own)).toBe(false);
+    expect(h.store.getState().pendingCount).toBe(0);
   });
 
   it("identity: setMe persists per trip and notifies", async () => {
@@ -1121,7 +1278,8 @@ describe("TripStore with the real reducer and engine", () => {
     // Meanwhile a teammate's phone taps "Round complete" and the server has it.
     const done = real.applyOp(
       server.state,
-      { type: "round.complete", id: real.newId(), at: new Date(server.time).toISOString(), by: f.player.A2, team_id: f.team.A },
+      // (after this phone's drink: a drink logged after completion + 2 min is refused by design)
+      { type: "round.complete", id: real.newId(), at: new Date(h.clock.now + 1000).toISOString(), by: f.player.A2, team_id: f.team.A },
       { now: new Date(server.time).toISOString(), is_commissioner: false, side: "server" },
     );
     if (!done.ok) throw new Error(done.reason);

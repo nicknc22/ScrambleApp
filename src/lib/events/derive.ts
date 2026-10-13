@@ -2,14 +2,17 @@
 //
 // Most events come from comparing each step's before/after states (so they fire on what actually
 // changed, not on what an op asked for: idempotent re-sends and no-op ops post nothing). Leaderboard
-// lead changes, contest lead changes and drive-minimum callouts compare the whole batch (first
-// step's before vs last step's after). Auto events that must never repeat carry a dedupe_key
-// (unique per trip); their id is deriveId(trip_id, dedupe_key). Everything else gets
-// deriveId(op.id, type, extra). Pure: time comes from `now`, ids from ops.
+// and contest lead changes compare the batch's final state with the latest post of that kind; ghost
+// beers and drive-minimum callouts reconcile the batch's final state with their posts (a post whose
+// claim no longer holds is retracted: soft-deleted with payload.retracted, and revived if it holds
+// again). Auto events that must never repeat carry a dedupe_key (unique per trip); their id is
+// deriveId(trip_id, dedupe_key). Everything else gets deriveId(op.id, type, extra). Pure: time
+// comes from `now`, ids from ops.
 import type { ContestEntry, Drink, FeedEvent, FeedEventType, ISODate, Mulligan, TripSettings, TripState, UUID } from "../types";
 import { COMMISSIONER_ONLY_OPS, type Op, type OpType } from "../ops";
 import { derive } from "../engine";
 import type { Derived, DriveNineStatus, StandingRow } from "../engine/types";
+import { effectiveDrinkHole } from "../engine/windows";
 import { formatCents, formatFeetInches } from "../engine/format";
 import { deriveId } from "../ids";
 import { renderFeedEvent } from "./templates";
@@ -166,7 +169,8 @@ function safely(label: string, fn: () => void): void {
 class FeedBuilder {
   /** Every known row by id: existing feed, reducer changes during the batch, our new/updated rows. */
   private readonly rows = new Map<UUID, FeedEvent>();
-  private readonly keys = new Set<string>();
+  /** dedupe_key -> row id */
+  private readonly keys = new Map<string, UUID>();
   /** Rows to persist (new or updated), latest version, in first-touch order. */
   private readonly touched = new Map<UUID, FeedEvent>();
   private readonly created = new Set<UUID>();
@@ -179,11 +183,17 @@ class FeedBuilder {
 
   private remember(ev: FeedEvent): void {
     this.rows.set(ev.id, ev);
-    if (ev.dedupe_key) this.keys.add(ev.dedupe_key);
+    if (ev.dedupe_key) this.keys.set(ev.dedupe_key, ev.id);
   }
 
   hasKey(key: string): boolean {
     return this.keys.has(key);
+  }
+
+  /** The row (active or soft-deleted, latest version) carrying this dedupe key, if any. */
+  byKey(key: string): FeedEvent | null {
+    const id = this.keys.get(key);
+    return id === undefined ? null : (this.rows.get(id) ?? null);
   }
 
   all(): FeedEvent[] {
@@ -265,6 +275,10 @@ interface Ctx {
   fb: FeedBuilder;
   /** Memoized derive (states are immutable; reducer no-ops keep identity). */
   d(s: TripState): Derived;
+  /** Teams whose drink rows changed during the batch (ghost posts are only added for these). */
+  drinkTeams: Set<UUID>;
+  /** drink_id -> actor, for drinks logged during the batch. */
+  drinkActors: Map<UUID, UUID | null>;
 }
 
 interface NewEvent {
@@ -298,6 +312,41 @@ function emit(ctx: Ctx, e: NewEvent): FeedEvent | null {
     updated_at: ctx.now,
     deleted_at: null,
   });
+}
+
+/** Take back an automatic post whose claim no longer holds (marked so it can come back if it holds again). */
+function retract(ctx: Ctx, ev: FeedEvent): void {
+  if (ev.deleted_at !== null) return;
+  ctx.fb.update({ ...ev, payload: { ...ev.payload, retracted: true }, deleted_at: ctx.now, updated_at: ctx.now });
+}
+
+/**
+ * emit() for a keyed event that may have been retracted earlier: a retracted row comes back with the
+ * new payload. A row deleted by somebody else (the commissioner's feed.delete) stays deleted, and an
+ * active one is left alone.
+ */
+function emitOrRevive(ctx: Ctx, e: NewEvent & { dedupe_key: string }): void {
+  const existing = ctx.fb.byKey(e.dedupe_key);
+  if (!existing) {
+    emit(ctx, e);
+    return;
+  }
+  if (existing.deleted_at === null || existing.payload?.retracted !== true) return;
+  ctx.fb.update({
+    ...existing,
+    team_id: e.team_id ?? null,
+    player_id: e.player_id ?? null,
+    actor_id: e.actor_id ?? null,
+    payload: { ...e.payload } as Record<string, unknown>,
+    photo_path: e.photo_path ?? existing.photo_path,
+    updated_at: ctx.now,
+    deleted_at: null,
+  });
+}
+
+/** The hole a drink's credit lands on in state `s` (see effectiveDrinkHole). */
+function drinkHoleIn(s: TripState, dr: Drink): number {
+  return effectiveDrinkHole(dr, s.team_round_state.find((rs) => rs.team_id === dr.team_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -557,8 +606,11 @@ function drinkChanges(ctx: Ctx, step: OpStep, actor: UUID | null): void {
   for (const drink of A.drinks) {
     const old = prev.get(drink.id);
     if (old === drink) continue;
-    if (!old && isActive(drink)) drinkLogged(ctx, step, drink, actor);
-    else if (old && isActive(old) && !isActive(drink)) drinkDeleted(ctx, step, drink);
+    ctx.drinkTeams.add(drink.team_id);
+    if (!old && isActive(drink)) {
+      ctx.drinkActors.set(drink.id, actor);
+      drinkLogged(ctx, step, drink, actor);
+    } else if (old && isActive(old) && !isActive(drink)) drinkDeleted(ctx, drink);
   }
 }
 
@@ -566,16 +618,18 @@ function drinkLogged(ctx: Ctx, step: OpStep, drink: Drink, actor: UUID | null): 
   const { after: A, op } = step;
   const dA = ctx.d(A);
   const value = dA.drinkValues[drink.id]?.value ?? 1;
+  // The hole the drink is credited to, which may be later than the hole a stale phone stamped.
+  const hole = dA.drinkValues[drink.id]?.hole ?? drinkHoleIn(A, drink);
   const loggedBy = drink.logged_by;
 
   if (drink.type === "drink") {
-    // A plain drink worth more than 1 is a ghost beer and gets only the ghost post (below).
-    if (value <= 1) addToDrinkBatch(ctx, op, drink, actor);
+    // A plain drink worth more than 1 is a ghost beer and gets only the ghost post (ghostBeers).
+    if (value <= 1) addToDrinkBatch(ctx, op, drink, hole, actor);
   } else {
     const payload: SingleDrinkPayload = {
       drink_id: drink.id,
       drink_type: drink.type,
-      hole: drink.hole,
+      hole,
       player_id: drink.player_id,
       logged_by: loggedBy,
       value,
@@ -593,26 +647,24 @@ function drinkLogged(ctx: Ctx, step: OpStep, drink: Drink, actor: UUID | null): 
       id_extra: [drink.id],
     });
   }
-
-  ghostBeers(ctx, step, drink, actor);
 }
 
 /**
  * Plain drinks batch per team + hole: join the latest active "drinks" post for that team and hole
  * if it was created within 60 s of now (server time). A batch carries at most one photo.
  */
-function addToDrinkBatch(ctx: Ctx, op: Op, drink: Drink, actor: UUID | null): void {
+function addToDrinkBatch(ctx: Ctx, op: Op, drink: Drink, hole: number, actor: UUID | null): void {
   // Already posted (the same steps derived twice): never count a drink twice.
   if (ctx.fb.all().some((ev) => ev.type === "drinks" && strArr(ev.payload.drink_ids).includes(drink.id))) return;
   const target = ctx.fb.latest(
-    (ev) => ev.type === "drinks" && isActive(ev) && ev.team_id === drink.team_id && ev.payload.hole === drink.hole,
+    (ev) => ev.type === "drinks" && isActive(ev) && ev.team_id === drink.team_id && ev.payload.hole === hole,
   );
   const age = target ? ctx.nowMs - Date.parse(target.created_at) : Infinity;
   if (target && age <= DRINK_BATCH_WINDOW_MS && (target.photo_path === null || drink.photo_path === null)) {
     const p = target.payload as Partial<DrinksPayload>;
     const drinkIds = [...strArr(p.drink_ids), drink.id];
     const payload: DrinksPayload = {
-      hole: drink.hole,
+      hole,
       drink_ids: drinkIds,
       player_ids: [...strArr(p.player_ids), drink.player_id],
       logged_by_ids: [...(Array.isArray(p.logged_by_ids) ? p.logged_by_ids : []), drink.logged_by],
@@ -627,7 +679,7 @@ function addToDrinkBatch(ctx: Ctx, op: Op, drink: Drink, actor: UUID | null): vo
     return;
   }
   const payload: DrinksPayload = {
-    hole: drink.hole,
+    hole,
     drink_ids: [drink.id],
     player_ids: [drink.player_id],
     logged_by_ids: [drink.logged_by],
@@ -652,53 +704,59 @@ function teamGhosts(d: Derived, teamId: UUID) {
 }
 
 /**
- * Ghost beers: post when the team's ghost count goes up. Normally the drink just logged is the
- * new ghost; when an offline drink syncs late with an earlier time it shifts the order and an
- * existing drink becomes the ghost instead, so we credit that one.
+ * Ghost beers, reconciled once per batch so the feed matches the scorecard ("any drink worth more
+ * than 1 posts a GHOST BEER event"):
+ * - a ghost post whose drink is no longer a ghost (an earlier drink was undone, the team size
+ *   changed, the drink itself was deleted) is retracted;
+ * - a drink that BECAME a ghost during this batch (logged into a ghost slot, or shifted into one by a
+ *   late offline drink or an undo) gets a post, or its retracted post back. Only teams whose drinks
+ *   the batch touched get new posts, so a roster change never floods the feed.
  */
-function ghostBeers(ctx: Ctx, step: OpStep, drink: Drink, actor: UUID | null): void {
-  const { before: B, after: A } = step;
-  const dA = ctx.d(A);
-  const before = new Set(teamGhosts(ctx.d(B), drink.team_id).map((v) => v.drink_id));
-  const after = teamGhosts(dA, drink.team_id);
-  let gained = after.length - before.size;
-  if (gained <= 0) return;
-  const candidates = after.filter((v) => !before.has(v.drink_id) && !ctx.fb.hasKey(`ghost:${v.drink_id}`));
-  // Prefer the drink just logged, else the latest newly-ghost drink.
-  candidates.sort((a, b) => (a.drink_id === drink.id ? 1 : b.drink_id === drink.id ? -1 : a.seq - b.seq));
-  const drinksById = byId(A.drinks);
-  while (gained > 0 && candidates.length > 0) {
-    gained -= 1;
-    const v = candidates.pop()!;
-    const row = drinksById.get(v.drink_id);
-    const payload: GhostBeerPayload = {
-      drink_id: v.drink_id,
-      drink_type: v.type,
-      hole: v.hole,
-      player_id: v.player_id,
-      logged_by: row?.logged_by ?? null,
-      value: v.value,
-      seq: v.seq,
-      team_size: dA.teamSize[drink.team_id] ?? 0,
-      base_team_size: A.trip.base_team_size,
-      ghost_count: after.length,
-    };
-    emit(ctx, {
-      type: "ghost_beer",
-      team_id: v.team_id,
-      player_id: v.player_id,
-      actor_id: actor,
-      payload,
-      // Shotgun/shot photos already ride on their own post.
-      photo_path: v.drink_id === drink.id && drink.type === "drink" ? drink.photo_path : null,
-      dedupe_key: `ghost:${v.drink_id}`,
+function ghostBeers(ctx: Ctx, first: TripState, last: TripState, actorByTeam: Map<UUID, UUID | null>): void {
+  const dFirst = ctx.d(first);
+  const dLast = ctx.d(last);
+  const posted = new Set<UUID>();
+  for (const ev of ctx.fb.all()) {
+    if (ev.type !== "ghost_beer" || !isActive(ev)) continue;
+    const drinkId = String(ev.payload.drink_id);
+    if (dLast.drinkValues[drinkId]?.ghost) posted.add(drinkId);
+    else retract(ctx, ev);
+  }
+
+  const drinksById = byId(last.drinks);
+  for (const teamId of ctx.drinkTeams) {
+    teamGhosts(dLast, teamId).forEach((v, i) => {
+      if (posted.has(v.drink_id) || dFirst.drinkValues[v.drink_id]?.ghost) return;
+      const row = drinksById.get(v.drink_id);
+      const loggedNow = ctx.drinkActors.has(v.drink_id);
+      const payload: GhostBeerPayload = {
+        drink_id: v.drink_id,
+        drink_type: v.type,
+        hole: v.hole,
+        player_id: v.player_id,
+        logged_by: row?.logged_by ?? null,
+        value: v.value,
+        seq: v.seq,
+        team_size: dLast.teamSize[teamId] ?? 0,
+        base_team_size: last.trip.base_team_size,
+        ghost_count: i + 1,
+      };
+      emitOrRevive(ctx, {
+        type: "ghost_beer",
+        team_id: teamId,
+        player_id: v.player_id,
+        actor_id: loggedNow ? (ctx.drinkActors.get(v.drink_id) ?? null) : (actorByTeam.get(teamId) ?? null),
+        payload,
+        // A plain ghost drink has no batch post, so its photo rides here (shotgun/shot photos ride on their own post).
+        photo_path: loggedNow && row?.type === "drink" ? row.photo_path : null,
+        dedupe_key: `ghost:${v.drink_id}`,
+      });
     });
   }
 }
 
 /** Undo / commissioner delete: take the drink out of its posts so the feed stays truthful. */
-function drinkDeleted(ctx: Ctx, step: OpStep, drink: Drink): void {
-  const { before: B, after: A } = step;
+function drinkDeleted(ctx: Ctx, drink: Drink): void {
   const fb = ctx.fb;
   for (const ev of fb.all()) {
     if (!isActive(ev)) continue;
@@ -728,22 +786,7 @@ function drinkDeleted(ctx: Ctx, step: OpStep, drink: Drink): void {
       fb.update(next);
     }
   }
-
-  // If the team lost a ghost beer, retire one ghost post (this drink's, else the latest whose drink
-  // is no longer a ghost). If the ghost just moved to another drink the count is unchanged: keep it.
-  const lost = teamGhosts(ctx.d(B), drink.team_id).length - teamGhosts(ctx.d(A), drink.team_id).length;
-  if (lost <= 0) return;
-  const stillGhost = new Set(teamGhosts(ctx.d(A), drink.team_id).map((v) => v.drink_id));
-  const posts = fb
-    .all()
-    .filter((ev) => ev.type === "ghost_beer" && isActive(ev) && ev.team_id === drink.team_id)
-    .filter((ev) => !stillGhost.has(String(ev.payload.drink_id)));
-  posts.sort((a, b) => {
-    if (a.payload.drink_id === drink.id) return 1;
-    if (b.payload.drink_id === drink.id) return -1;
-    return timeOf(a.created_at) - timeOf(b.created_at);
-  });
-  for (let n = 0; n < lost && posts.length > 0; n++) fb.softDelete(posts.pop()!, ctx.now);
+  // Ghost posts are reconciled once per batch (ghostBeers).
 }
 
 // ---- Mulligans ----
@@ -932,18 +975,21 @@ function overrideSummary(op: Op, B: TripState, A: TripState): OverrideSummary | 
       return res(`opened hole ${op.hole} for ${T(op.team_id)}`, op.team_id);
     case "round.complete":
       return res(`marked ${T(op.team_id)}'s round complete`, op.team_id);
-    case "drink.log":
-      return res(`logged a ${op.drink_type} for ${P(op.player_id)} on hole ${op.hole}`, op.team_id, op.player_id);
+    case "drink.log": {
+      const dr = A.drinks.find((x) => x.id === op.drink_id);
+      const hole = dr ? drinkHoleIn(A, dr) : op.hole;
+      return res(`logged a ${op.drink_type} for ${P(op.player_id)} on hole ${hole}`, op.team_id, op.player_id);
+    }
     case "drink.delete": {
       const dr = B.drinks.find((x) => x.id === op.drink_id);
       if (!dr) return null;
-      return res(`deleted ${P(dr.player_id)}'s ${dr.type} on hole ${dr.hole}`, dr.team_id, dr.player_id);
+      return res(`deleted ${P(dr.player_id)}'s ${dr.type} on hole ${drinkHoleIn(B, dr)}`, dr.team_id, dr.player_id);
     }
     case "drink.move": {
       const dr = B.drinks.find((x) => x.id === op.drink_id);
       if (!dr) return null;
       return res(
-        `moved a drink from hole ${dr.hole} to hole ${op.hole} (${P(dr.player_id)}, ${T(dr.team_id)})`,
+        `moved a drink from hole ${drinkHoleIn(B, dr)} to hole ${op.hole} (${P(dr.player_id)}, ${T(dr.team_id)})`,
         dr.team_id,
         dr.player_id,
       );
@@ -1081,38 +1127,45 @@ function overrideSummary(op: Op, B: TripState, A: TripState): OverrideSummary | 
 // Batch-level state diffs
 // ---------------------------------------------------------------------------
 
-/** Leaderboard lead vs the latest lead_change post (or nobody). */
+/**
+ * Leaderboard lead vs the latest lead_change post (or nobody). Only a new SOLE leader posts: moving
+ * into or out of a tie is not a lead change (a tie broken by the same team that led before it posts
+ * nothing). Standings count scored holes only, so drinks on the open hole never move the lead.
+ */
 function leadChange(ctx: Ctx, last: TripState, lastOp: Op): void {
   const d = ctx.d(last);
-  const leaders = sortIds(d.leaderTeamIds);
-  if (leaders.length === 0) return; // nobody has scored
+  if (d.leaderTeamIds.length !== 1) return; // nobody has scored, or a tie
+  const leader = d.leaderTeamIds[0];
   const prevEv = ctx.fb.latest((ev) => ev.type === "lead_change");
   const prev = prevEv ? sortIds(strArr(prevEv.payload.leader_team_ids)) : [];
-  if (sameIds(prev, leaders)) return;
-  const row = d.standings.find((r) => r.team_id === leaders[0]);
-  // Present leaders in leaderboard order.
-  const ordered = d.standings.filter((r) => leaders.includes(r.team_id)).map((r) => r.team_id);
+  if (sameIds(prev, [leader])) return;
+  const row = d.standings.find((r) => r.team_id === leader);
   const payload: LeadChangePayload = {
-    leader_team_ids: ordered,
+    leader_team_ids: [leader],
     previous_leader_team_ids: prev,
     net_to_par: row?.net_to_par ?? 0,
     thru: row?.thru ?? 0,
   };
   emit(ctx, {
     type: "lead_change",
-    team_id: ordered.length === 1 ? ordered[0] : null,
+    team_id: leader,
     payload,
     op_id: lastOp.id,
   });
 }
 
-function contestLeads(ctx: Ctx, first: TripState, last: TripState, actorByHole: Map<number, UUID | null>): void {
-  const before = new Map(ctx.d(first).contests.map((c) => [c.hole, c]));
+/**
+ * Contest leads vs the latest contest_lead post for that hole (so a leader who is passed and then
+ * retakes the lead posts again). Nothing posts while a hole has no valid entry.
+ */
+function contestLeads(ctx: Ctx, last: TripState, lastOp: Op, actorByHole: Map<number, UUID | null>): void {
   for (const c of ctx.d(last).contests) {
     const cur = sortIds(c.leader_ids);
     if (cur.length === 0 || c.best === null) continue;
-    const prevSummary = before.get(c.hole);
-    const prev = prevSummary && prevSummary.type === c.type ? sortIds(prevSummary.leader_ids) : [];
+    const prevEv = ctx.fb.latest(
+      (ev) => ev.type === "contest_lead" && ev.payload.hole === c.hole && ev.payload.contest_type === c.type,
+    );
+    const prev = prevEv ? sortIds(strArr(prevEv.payload.leader_ids)) : [];
     if (sameIds(prev, cur)) continue;
     // Leaderboard order (earliest submission first among ties).
     const leaderViews = c.entries.filter((v) => v.valid && v.rank === 1);
@@ -1132,20 +1185,25 @@ function contestLeads(ctx: Ctx, first: TripState, last: TripState, actorByHole: 
       actor_id: actorByHole.get(c.hole) ?? null,
       payload,
       photo_path: payload.leader_ids.length === 1 ? (leaderView?.entry.photo_path ?? null) : null,
-      dedupe_key: `ctplead:${c.hole}:${cur.join(",")}`,
+      op_id: lastOp.id,
+      id_extra: [String(c.hole)],
     });
   }
 }
 
 /**
  * Drive minimum. Hard (remaining === players needing): one post per remaining count, so each hole
- * where it's still on the edge says so. Impossible: once when it gets there. Misses: once per nine.
+ * where it's still on the edge says so. Impossible: once when it gets there, retracted if everybody
+ * gets a drive after all (a mis-tapped chip fixed). Misses: once per nine when it closes (the team
+ * moves past it, completes the round, or the trip is final); retracted when a correction leaves
+ * nobody at zero (or the nine reopens), revived if the miss comes back.
  */
 function driveMinimum(ctx: Ctx, first: TripState, last: TripState, actorByTeam: Map<UUID, UUID | null>): void {
   if (last.trip.status === "setup") return;
   const dPrev = ctx.d(first).driveMin;
   for (const st of Object.values(ctx.d(last).driveMin)) {
     const teamId = st.team_id;
+    const actor = actorByTeam.get(teamId) ?? null;
     for (const nine of st.nines) {
       const prev: DriveNineStatus | undefined = dPrev[teamId]?.nines[nine.nine - 1];
       if (last.trip.status === "live" && (nine.level === "hard" || nine.level === "impossible")) {
@@ -1157,24 +1215,36 @@ function driveMinimum(ctx: Ctx, first: TripState, last: TripState, actorByTeam: 
             remaining: nine.remaining,
             needing: [...nine.needing],
           };
-          emit(ctx, {
+          emitOrRevive(ctx, {
             type: "drive_warning",
             team_id: teamId,
-            actor_id: actorByTeam.get(teamId) ?? null,
+            actor_id: actor,
             payload,
             dedupe_key: `drivehard:${teamId}:${nine.nine}:${nine.remaining}`,
           });
         }
       }
+      if (nine.needing.length === 0) {
+        // "Mathematically cooked" turned out wrong: everybody got a drive after all.
+        const cooked = (ev: FeedEvent) =>
+          ev.type === "drive_warning" && ev.team_id === teamId && ev.payload.nine === nine.nine && ev.payload.level === "impossible";
+        for (const ev of ctx.fb.all()) if (cooked(ev)) retract(ctx, ev);
+      }
+
+      const missKey = `drivemiss:${teamId}:${nine.nine}`;
+      const missPost = ctx.fb.byKey(missKey);
       if (nine.closed && nine.missed.length > 0) {
         const payload: DriveMissPayload = { nine: nine.nine, missed: [...nine.missed], commissioner_flag: true };
-        emit(ctx, {
-          type: "drive_miss",
-          team_id: teamId,
-          actor_id: actorByTeam.get(teamId) ?? null,
-          payload,
-          dedupe_key: `drivemiss:${teamId}:${nine.nine}`,
-        });
+        if (missPost && missPost.deleted_at === null) {
+          // Still missed, maybe by different players now: keep the callout truthful.
+          if (!sameIds(sortIds(strArr(missPost.payload.missed)), sortIds(nine.missed))) {
+            ctx.fb.update({ ...missPost, payload: { ...missPost.payload, ...payload }, updated_at: ctx.now });
+          }
+        } else {
+          emitOrRevive(ctx, { type: "drive_miss", team_id: teamId, actor_id: actor, payload, dedupe_key: missKey });
+        }
+      } else if (missPost) {
+        retract(ctx, missPost);
       }
     }
   }
@@ -1295,6 +1365,8 @@ export function deriveFeedEvents(args: {
     now,
     nowMs: Number.isFinite(parsedNow) ? parsedNow : 0,
     fb: new FeedBuilder(existingFeed),
+    drinkTeams: new Set(),
+    drinkActors: new Map(),
     d(s) {
       let d = cache.get(s);
       if (!d) {
@@ -1322,8 +1394,10 @@ export function deriveFeedEvents(args: {
   const first = steps[0].before;
   const last = steps[steps.length - 1].after;
   if (last !== first) {
-    safely("lead change", () => leadChange(ctx, last, steps[steps.length - 1].op));
-    safely("contest leads", () => contestLeads(ctx, first, last, actorByContestHole));
+    const lastOp = steps[steps.length - 1].op;
+    safely("ghost beers", () => ghostBeers(ctx, first, last, actorByTeam));
+    safely("lead change", () => leadChange(ctx, last, lastOp));
+    safely("contest leads", () => contestLeads(ctx, last, lastOp, actorByContestHole));
     safely("drive minimum", () => driveMinimum(ctx, first, last, actorByTeam));
   }
 

@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   backoffDelay,
+  flushOutbox,
   httpRequest,
-  sendablePrefix,
   SyncWorker,
-  PHOTO_BLOCK_MAX_FAILURES,
+  uploadPhotos,
   type FlushResult,
   type PendingBlob,
   type PendingOp,
   type SyncHost,
   type Timers,
+  type UploadHost,
 } from "@/lib/client/sync";
 import type { Op } from "@/lib/ops";
 
@@ -66,18 +67,85 @@ describe("backoffDelay", () => {
   });
 });
 
-describe("sendablePrefix", () => {
-  it("stops at the first op waiting for a photo, keeping seq order", () => {
+const jsonRes = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+describe("photos never block ops", () => {
+  it("flushOutbox sends every op in seq order, photo ops included, without touching uploads", async () => {
     const ops = [op("o1"), op("o2", "p1"), op("o3"), op("o4", "p2")];
-    expect(sendablePrefix(ops, []).map((o) => o.id)).toEqual(["o1", "o2", "o3", "o4"]);
-    expect(sendablePrefix(ops, [blob("p1")]).map((o) => o.id)).toEqual(["o1"]);
-    expect(sendablePrefix(ops, [blob("p2")]).map((o) => o.id)).toEqual(["o1", "o2", "o3"]);
+    const sent: string[][] = [];
+    const urls: string[] = [];
+    const host: SyncHost = {
+      code: "c",
+      fetch: async (url, init) => {
+        urls.push(url);
+        const ids = (JSON.parse(String(init?.body)) as { ops: Array<{ id: string }> }).ops.map((o) => o.id);
+        sent.push(ids);
+        return jsonRes({ results: ids.map((id) => ({ id, status: "applied" })), snapshot: null });
+      },
+      timers: new ManualTimers(),
+      ready: async () => undefined,
+      pendingOps: () => ops,
+      hasPending: () => true,
+      onSending: () => undefined,
+      onSendFailed: () => undefined,
+      onResults: () => undefined,
+      onPoisonOp: () => undefined,
+      onNetwork: () => undefined,
+      setSyncing: () => undefined,
+    };
+    const r = await flushOutbox(host);
+    expect(r).toMatchObject({ failed: false, acked: 4, uploaded: 0 });
+    expect(sent).toEqual([["o1", "o2", "o3", "o4"]]);
+    expect(urls.every((u) => u.endsWith("/sync"))).toBe(true);
   });
-  it("a photo that failed too often stops blocking, except in strict mode", () => {
-    const ops = [op("o1"), op("o2", "p1"), op("o3")];
-    const stuck = blob("p1", PHOTO_BLOCK_MAX_FAILURES);
-    expect(sendablePrefix(ops, [stuck]).map((o) => o.id)).toEqual(["o1", "o2", "o3"]);
-    expect(sendablePrefix(ops, [stuck], true).map((o) => o.id)).toEqual(["o1"]);
+
+  it("uploadPhotos retries later on failure but never reports the network as down", async () => {
+    const blobs = [blob("p1"), blob("p2")];
+    const events: string[] = [];
+    let fail = true;
+    const host: UploadHost = {
+      code: "c",
+      fetch: async (url) => {
+        const path = new URL(url, "http://x").searchParams.get("path")!;
+        events.push(`upload:${path}`);
+        if (fail) throw new TypeError("Failed to fetch");
+        return jsonRes({ path });
+      },
+      timers: new ManualTimers(),
+      ready: async () => undefined,
+      pendingBlobs: () => blobs,
+      hasPending: () => blobs.length > 0,
+      onUploaded: (path) => void events.push(`ok:${path}`),
+      onUploadFailed: (path, permanent) => void events.push(`fail:${path}:${permanent}`),
+    };
+    const r1 = await uploadPhotos(host);
+    expect(r1).toMatchObject({ failed: true, uploaded: 0, error: "Failed to fetch" });
+    // The rest would fail too: one attempt per pass.
+    expect(events).toEqual(["upload:p1", "fail:p1:false"]);
+    fail = false;
+    events.length = 0;
+    const r2 = await uploadPhotos(host);
+    expect(r2).toMatchObject({ failed: false, uploaded: 2 });
+    expect(events).toEqual(["upload:p1", "ok:p1", "upload:p2", "ok:p2"]);
+  });
+
+  it("a permanent refusal (413) is reported as such and the pass moves on", async () => {
+    const events: string[] = [];
+    const host: UploadHost = {
+      code: "c",
+      fetch: async (url) => {
+        const path = new URL(url, "http://x").searchParams.get("path")!;
+        return path === "big" ? jsonRes({ error: "Too big" }, 413) : jsonRes({ path });
+      },
+      timers: new ManualTimers(),
+      ready: async () => undefined,
+      pendingBlobs: () => [blob("big"), blob("ok")],
+      hasPending: () => true,
+      onUploaded: (path) => void events.push(`ok:${path}`),
+      onUploadFailed: (path, permanent, message) => void events.push(`fail:${path}:${permanent}:${message}`),
+    };
+    expect(await uploadPhotos(host)).toMatchObject({ failed: false, uploaded: 1 });
+    expect(events).toEqual(["fail:big:true:Too big", "ok:ok"]);
   });
 });
 
@@ -138,11 +206,8 @@ function fakeHost(over: Partial<SyncHost> = {}) {
     },
     timers: new ManualTimers(),
     ready: async () => undefined,
-    pendingBlobs: () => [],
     pendingOps: () => (pending ? [op("o1")] : []),
     hasPending: () => pending > 0,
-    onUploaded: () => undefined,
-    onUploadFailed: () => undefined,
     onSending: () => undefined,
     onSendFailed: () => undefined,
     onResults: () => undefined,
@@ -179,7 +244,7 @@ describe("SyncWorker", () => {
     const timers = new ManualTimers();
     const { host, calls, setPending } = fakeHost({ timers });
     const passes: FlushResult[] = [];
-    const w = new SyncWorker(host, { timers, win, doc, onPass: (r) => passes.push(r) });
+    const w = new SyncWorker(host, { run: (o) => flushOutbox(host, o), timers, win, doc, onPass: (r) => passes.push(r) });
     w.start();
     expect(win.count() + doc.count()).toBe(2);
     win.emit("online");
@@ -207,7 +272,7 @@ describe("SyncWorker", () => {
       },
       hasPending: () => fetches < 2,
     });
-    const w = new SyncWorker(host, { timers, win: null, doc: null });
+    const w = new SyncWorker(host, { run: (o) => flushOutbox(host, o), timers, win: null, doc: null });
     w.start();
     w.schedule();
     w.schedule();
@@ -234,7 +299,7 @@ describe("SyncWorker", () => {
         throw new TypeError("offline");
       },
     });
-    const w = new SyncWorker(host, { timers, win: null, doc: null, intervalMs: 15_000, random: () => 0 });
+    const w = new SyncWorker(host, { run: (o) => flushOutbox(host, o), timers, win: null, doc: null, intervalMs: 15_000, random: () => 0 });
     w.start();
     await w.flush();
     const delays = [...timers.q.values()].map((t) => t.ms);
@@ -243,5 +308,39 @@ describe("SyncWorker", () => {
     expect(w.failures).toBe(1);
     w.stop();
     expect(timers.q.size).toBe(0);
+  });
+
+  it("only a worker with keepaliveOnHide fires a keepalive pass when the page is hidden", async () => {
+    const doc = new FakeTarget();
+    const timers = new ManualTimers();
+    const runs: Array<{ worker: string; keepalive: boolean }> = [];
+    const host = { hasPending: () => true };
+    const ops = new SyncWorker(host, {
+      run: async (o) => {
+        runs.push({ worker: "ops", keepalive: !!o.keepalive });
+        return { failed: false, uploaded: 0, acked: 1, error: null };
+      },
+      keepaliveOnHide: true,
+      timers,
+      win: null,
+      doc,
+    });
+    const photos = new SyncWorker(host, {
+      run: async (o) => {
+        runs.push({ worker: "photos", keepalive: !!o.keepalive });
+        return { failed: false, uploaded: 1, acked: 0, error: null };
+      },
+      timers,
+      win: null,
+      doc,
+    });
+    ops.start();
+    photos.start();
+    doc.visibilityState = "hidden";
+    doc.emit("visibilitychange");
+    await new Promise((r) => setTimeout(r, 5));
+    expect(runs).toEqual([{ worker: "ops", keepalive: true }]);
+    ops.stop();
+    photos.stop();
   });
 });

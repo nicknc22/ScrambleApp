@@ -1,7 +1,8 @@
 // Ghost beer math. credit(d) = floor(base * d / n); a drink's value = credit(d) - credit(d-1),
 // d = the drink's 1-based position among the team's ACTIVE drinks ordered by (logged_at, id).
-import type { Drink, TripState, UUID } from "../types";
+import type { Drink, TeamRoundState, TripState, UUID } from "../types";
 import type { DrinkValue } from "./types";
+import { effectiveDrinkHole } from "./windows";
 
 /** Spec default base team size, used only if the trip row carries something unusable. */
 const DEFAULT_BASE = 4;
@@ -34,11 +35,16 @@ export function compareDrinkOrder(a: Drink, b: Drink): number {
   return 0;
 }
 
-/** Values for every active (non-deleted) drink of every team. teamSize: team_id -> member count. */
+/**
+ * Values for every active (non-deleted) drink of every team. teamSize: team_id -> member count.
+ * DrinkValue.hole is the EFFECTIVE hole (effectiveDrinkHole): every per-hole consumer reads it.
+ */
 export function computeDrinkValues(state: TripState, teamSize: Record<UUID, number>): Record<UUID, DrinkValue> {
   const base = state.trip.base_team_size;
   const activeTeams = new Set<UUID>();
   for (const t of state.teams) if (t.deleted_at === null) activeTeams.add(t.id);
+  const roundState = new Map<UUID, TeamRoundState>();
+  for (const rs of state.team_round_state) roundState.set(rs.team_id, rs);
 
   // Group active drinks of active teams by team.
   const byTeam = new Map<UUID, Drink[]>();
@@ -63,7 +69,7 @@ export function computeDrinkValues(state: TripState, teamSize: Record<UUID, numb
         drink_id: d.id,
         team_id: teamId,
         player_id: d.player_id,
-        hole: d.hole,
+        hole: effectiveDrinkHole(d, roundState.get(teamId)),
         type: d.type,
         value,
         ghost: value > 1,

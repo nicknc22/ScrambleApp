@@ -458,6 +458,28 @@ describe("Pot payouts and settle-up sum to zero, ties split, and empty contest p
     expect(payoutsByLabel(f, pot(m, "team_match"))).toEqual({ A1: 2000, A2: 2000 });
   });
 
+  it("a finished team with an unscored hole is ranked by net to par over its scored holes; credit banked there doesn't count", () => {
+    const f = makeTrip({ teams: [2, 2], settings: { team_match_ante_cents: 1000 } });
+    f.teeOff("A", 1);
+    f.drink("A", "A1", 1);
+    f.drink("A", "A2", 1); // twosome: 4 credit on hole 1
+    finish(f, { A: 2 }, false); // A: +2 gross, 4 credit -> -2 net to par
+    for (let h = 1; h <= 17; h++) f.teeOff("B", h).score("B", h, PAR[h]);
+    f.teeOff("B", 18);
+    f.drink("B", "B1", 18);
+    f.drink("B", "B2", 18); // 4 credit banked on hole 18, which never got a score
+    f.complete("B");
+    setStatus(f, "final");
+    const d = derive(f.state, { strict: true });
+    expect(d.standings.map((r) => [r.team_id, r.thru, r.net_to_par, r.pending_credit])).toEqual([
+      [f.team.A, 18, -2, 0],
+      [f.team.B, 17, 0, 4],
+    ]);
+    const m = d.money;
+    expectConsistent(m);
+    expect(payoutsByLabel(f, pot(m, "team_match"))).toEqual({ A1: 2000, A2: 2000 });
+  });
+
   it("orders pots: team match first, then contest holes", () => {
     const f = makeTrip({ teams: [2, 2], settings: ANTES });
     expect(money(f).pots.map((p) => p.key)).toEqual(["team_match", "contest:3", "contest:4", "contest:8", "contest:9", "contest:11", "contest:12", "contest:16", "contest:18"]);

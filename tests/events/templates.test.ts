@@ -235,6 +235,40 @@ describe("renderFeedEvent", () => {
     expect(r.body).toContain("2 drinks on hole 7");
   });
 
+  it("drinks posts say who logged drinks for a teammate, in every variant", () => {
+    const e = ev("drinks", { hole: 7, drink_ids: ["l1", "l2", "l3"], player_ids: [P.A2, P.A3, P.A4], logged_by_ids: [P.A1, P.A3, P.A1], count: 3 });
+    for (const r of allVariants(e)) {
+      expect(r.body).toContain("Logged by Player A1 👑 for Bombs and Player A4.");
+      expect(r.body).not.toContain("for Player A3"); // A3 logged their own
+    }
+    // Nobody logged for anybody else: no byline.
+    for (const r of allVariants(SAMPLES.drinks)) expect(r.body).not.toContain("ogged by");
+  });
+
+  it("ghost beers say who logged them for a teammate, in every variant", () => {
+    const e = ev("ghost_beer", { drink_id: "x9", drink_type: "drink", hole: 5, player_id: P.B1, logged_by: P.B2, value: 2, seq: 3 }, { team_id: T.B, player_id: P.B1 });
+    for (const r of allVariants(e)) expect(r.body).toContain("(logged by Player B2)");
+    const self = ev("ghost_beer", { drink_id: "x9", drink_type: "drink", hole: 5, player_id: P.B1, logged_by: P.B1, value: 2, seq: 3 }, { team_id: T.B, player_id: P.B1 });
+    for (const r of allVariants(self)) expect(r.body).not.toContain("logged by");
+  });
+
+  it("drink posts name the hole the drinks count on now (stale phone stamp, commissioner move)", () => {
+    const g = makeTrip({ teams: [4, 3] });
+    g.teeOff("A", 4, 60).teeOff("A", 5, 75);
+    const stale = g.drink("A", "A2", 4, "drink", { min: 78 }); // stamped 4 by a phone that missed hole 5 opening
+    const onFour = g.drink("A", "A3", 4, "drink", { min: 70 });
+    const shotgun = g.drink("A", "A4", 4, "shotgun", { min: 79 });
+    const batch = (ids: string[]) => ev("drinks", { hole: 4, drink_ids: ids, player_ids: [], count: ids.length }, { team_id: g.team.A });
+    const r = (e: FeedEvent) => renderFeedEvent(e, g.state, derive(g.state)).body;
+    expect(r(batch([stale]))).toContain("1 drink on hole 5");
+    expect(r(batch([onFour, stale]))).toContain("2 drinks on holes 4 and 5");
+    const sg = ev("shotgun", { drink_id: shotgun, drink_type: "shotgun", hole: 4, player_id: g.player.A4, logged_by: g.player.A4 }, { team_id: g.team.A });
+    expect(r(sg)).toContain("hole 5");
+    // The commissioner moves the stale drink to hole 6: the post follows.
+    g.state = { ...g.state, drinks: g.state.drinks.map((x) => (x.id === stale ? { ...x, hole: 6, moved_from_hole: 4 } : x)) };
+    expect(r(batch([stale]))).toContain("1 drink on hole 6");
+  });
+
   it("ghost beers are big with GHOST BEER in the title", () => {
     for (const r of allVariants(SAMPLES.ghost_beer)) {
       expect(r.title).toContain("GHOST BEER");
@@ -302,6 +336,28 @@ describe("renderFeedEvent", () => {
       derive(g.state),
     );
     expect(r.body).toContain("(Since re-measured.)");
+  });
+
+  it("contest entries use the engine's current validity and distance, not the reducer status at submit", () => {
+    const g = makeTrip({ teams: [4, 3] });
+    const id = g.entry({ hole: 4, player_id: g.player.A2, type: "ld", distance_value: 450 });
+    const e = ev(
+      "contest_entry",
+      { entry_id: id, hole: 4, contest_type: "ld", distance: 450, unit: "yd", rank: null, valid: false, status: "ok", flag_reason: null, invalid_reason: "Out of range: 450 yd", replaced: false, valid_count: 0 },
+      { player_id: g.player.A2, team_id: g.team.A },
+    );
+    const r = () => renderFeedEvent(e, g.state, derive(g.state));
+    expect(r().body).toContain("Out of range: 450 yd");
+    expect(r().tone).toBe("alert");
+    // Range widened: the engine says valid now, so the post is a normal long drive.
+    g.state = { ...g.state, trip: { ...g.state.trip, settings: { ...g.state.trip.settings, ld_max_yd: 500 } } };
+    expect(r().tone).toBe("info");
+    expect(r().body).toContain("450 yd");
+    expect(r().body.toLowerCase()).not.toContain("review");
+    // A commissioner flag (with its reason) shows up the other way round.
+    g.state = { ...g.state, contest_entries: g.state.contest_entries.map((x) => ({ ...x, status: "flagged" as const, flag_reason: "Looks like a cart path" })) };
+    expect(r().tone).toBe("alert");
+    expect(r().body).toContain("Looks like a cart path");
   });
 
   it("AI judge shows the estimate and flags suspicious entries", () => {

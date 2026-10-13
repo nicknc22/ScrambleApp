@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentHoleFor, openWindowHole } from "@/lib/engine/windows";
+import { currentHoleFor, effectiveDrinkHole, openWindowHole } from "@/lib/engine/windows";
 import type { TeamRoundState } from "@/lib/types";
 
 function rs(p: Partial<TeamRoundState>): TeamRoundState {
@@ -65,5 +65,49 @@ describe("currentHoleFor", () => {
 
   it("ignores a stray open_hole on a not-started row", () => {
     expect(currentHoleFor(rs({ status: "not_started", open_hole: 4 }))).toBe(1);
+  });
+});
+
+describe("effectiveDrinkHole", () => {
+  const t = (min: number) => new Date(Date.parse("2026-10-24T17:00:00.000Z") + min * 60_000).toISOString();
+  const opened = rs({ status: "playing", open_hole: 6, hole_opened_at: { "4": t(60), "5": t(75), "6": t(90) } });
+  const drinkAt = (hole: number, min: number, moved_from_hole: number | null = null) => ({ hole, logged_at: t(min), moved_from_hole });
+
+  it("is the hole whose window was open when the drink was logged, even if a stale phone stamped an older hole", () => {
+    expect(effectiveDrinkHole(drinkAt(4, 78), opened)).toBe(5); // phone still showed 4; hole 5 opened at 75
+    expect(effectiveDrinkHole(drinkAt(4, 95), opened)).toBe(6);
+    expect(effectiveDrinkHole(drinkAt(5, 80), opened)).toBe(5);
+  });
+
+  it("a drink logged exactly when the next window opened belongs to the new hole", () => {
+    expect(effectiveDrinkHole(drinkAt(4, 75), opened)).toBe(5);
+  });
+
+  it("never moves a drink earlier than its stamp (a missing or late tee.open can't drag it back)", () => {
+    expect(effectiveDrinkHole(drinkAt(6, 70), opened)).toBe(6);
+    expect(effectiveDrinkHole(drinkAt(9, 95), opened)).toBe(9);
+    expect(effectiveDrinkHole(drinkAt(4, 61), opened)).toBe(4);
+  });
+
+  it("ignores windows that opened after the drink was logged", () => {
+    expect(effectiveDrinkHole(drinkAt(4, 74.9), opened)).toBe(4);
+  });
+
+  it("a commissioner-moved drink stays where it was put", () => {
+    expect(effectiveDrinkHole(drinkAt(4, 95, 6), opened)).toBe(4);
+  });
+
+  it("falls back to the stamp with no round state, no open times or an unreadable time", () => {
+    expect(effectiveDrinkHole(drinkAt(4, 95), undefined)).toBe(4);
+    expect(effectiveDrinkHole(drinkAt(4, 95), null)).toBe(4);
+    expect(effectiveDrinkHole(drinkAt(4, 95), rs({}))).toBe(4);
+    expect(effectiveDrinkHole({ hole: 4, logged_at: "garbage", moved_from_hole: null }, opened)).toBe(4);
+    expect(effectiveDrinkHole(drinkAt(4, 95), rs({ hole_opened_at: { "5": "garbage", x: t(0), "40": t(0) } }))).toBe(4);
+  });
+
+  it("with skewed phone clocks, takes the highest hole opened by the drink's time", () => {
+    // Hole 3 was opened by a phone whose clock runs slow: its time is before hole 2's.
+    const skewed = rs({ status: "playing", open_hole: 3, hole_opened_at: { "1": t(0), "2": t(20), "3": t(18) } });
+    expect(effectiveDrinkHole(drinkAt(1, 19), skewed)).toBe(3);
   });
 });

@@ -83,7 +83,8 @@ describe("computeDriveMin", () => {
     ]);
     const front = nine(f, "A", 1);
     expect(front.counts).toEqual({ [f.player.A1]: 6, [f.player.A2]: 1, [f.player.A3]: 1, [f.player.A4]: 1 });
-    expect(front).toMatchObject({ closed: true, missed: [] });
+    // Still on hole 9: the nine isn't over until the team moves on.
+    expect(front).toMatchObject({ closed: false, needing: [], level: "ok", missed: [] });
     // The back nine is untouched by front-nine drives.
     expect(nine(f, "A", 2)).toMatchObject({ remaining: 9, level: "ok", needing: Object.values(f.player) });
     f.teeOff("A", 10);
@@ -103,10 +104,15 @@ describe("computeDriveMin", () => {
       [7, "A1", ["hard", 3, 3], ["impossible", 2, 3]],
       [8, "A2", ["impossible", 2, 3], ["impossible", 1, 2]],
     ]);
-    // Last hole: A3 drives, so A4 is left at 0 and the nine closes with a miss.
+    // Last hole: A3 drives, so A4 is left at 0. Still on hole 9 it's "impossible" (a mis-tap could
+    // still be fixed); teeing off 10 closes the nine with a miss.
     f.teeOff("A", 9);
     f.score("A", 9, 5, "A3");
-    const front = nine(f, "A", 1);
+    let front = nine(f, "A", 1);
+    expect(front).toMatchObject({ closed: false, remaining: 0, level: "impossible", missed: [] });
+    expect(labels(f, front.needing)).toEqual(["A4"]);
+    f.teeOff("A", 10);
+    front = nine(f, "A", 1);
     expect(front).toMatchObject({ closed: true, remaining: 0, level: "ok" });
     expect(labels(f, front.missed)).toEqual(["A4"]);
     expect(labels(f, front.needing)).toEqual(["A4"]);
@@ -118,7 +124,7 @@ describe("computeDriveMin", () => {
       f.teeOff("A", h);
       f.score("A", h, PAR[h], `A${(h % 3) + 1}`);
     }
-    expect(nine(f, "A", 1)).toMatchObject({ closed: true, missed: [], level: "ok" });
+    expect(nine(f, "A", 1)).toMatchObject({ closed: false, needing: [], missed: [], level: "ok" });
     walk(f, "A", [
       [10, "A1", ["ok", 9, 3], ["ok", 8, 2]],
       [11, "A1", ["ok", 8, 2], ["ok", 7, 2]], // par 3
@@ -131,6 +137,9 @@ describe("computeDriveMin", () => {
       [18, "A3", ["hard", 1, 1], ["ok", 0, 0]],
     ]);
     expect(drive(f, "A").current_nine).toBe(2);
+    expect(nine(f, "A", 1)).toMatchObject({ closed: true, missed: [] });
+    expect(nine(f, "A", 2)).toMatchObject({ closed: false, needing: [], missed: [] });
+    f.complete("A");
     expect(nine(f, "A", 2)).toMatchObject({ closed: true, missed: [] });
   });
 
@@ -145,12 +154,12 @@ describe("computeDriveMin", () => {
       [6, "A1", ["ok", 4, 2], ["soft", 3, 2]],
       [7, "A1", ["soft", 3, 2], ["hard", 2, 2]],
       [8, "A2", ["hard", 2, 2], ["hard", 1, 1]], // par 3 drive counts for A2
-      [9, "A1", ["hard", 1, 1], ["ok", 0, 1]], // every hole has a drive: closed with A3 at 0
+      [9, "A1", ["hard", 1, 1], ["impossible", 0, 1]], // every hole has a drive, A3 at 0: too late
     ]);
     const front = nine(f, "A", 1);
-    expect(front.closed).toBe(true);
-    expect(labels(f, front.missed)).toEqual(["A3"]);
+    expect(front).toMatchObject({ closed: false, missed: [] });
     f.teeOff("A", 10);
+    expect(nine(f, "A", 1).closed).toBe(true);
     expect(labels(f, nine(f, "A", 1).missed)).toEqual(["A3"]);
   });
 
@@ -191,14 +200,44 @@ describe("computeDriveMin", () => {
       f.teeOff("A", h);
       f.score("A", h, PAR[h], h <= 9 ? `A${(h % 3) + 1}` : "A1");
     }
-    // On 18 with a drive recorded, nine 2 is already closed (every hole has a drive).
-    expect(nine(f, "A", 2)).toMatchObject({ closed: true });
+    // On 18 with a drive recorded on every hole, the nine stays open until Round complete.
+    expect(nine(f, "A", 2)).toMatchObject({ closed: false, remaining: 0, level: "impossible" });
     f.complete("A");
     const s = drive(f, "A");
     expect(s.current_nine).toBe(2);
     expect(s.nines[0]).toMatchObject({ closed: true, remaining: 0, missed: [] });
     expect(s.nines[1]).toMatchObject({ closed: true, remaining: 0, level: "ok" });
     expect(labels(f, s.nines[1].missed)).toEqual(["A2", "A3"]);
+  });
+
+  it("a mis-tapped chip on the last hole of a nine stays fixable: impossible, not missed, until the team moves on", () => {
+    const f = makeTrip({ teams: [4] });
+    const shots = ["A1", "A2", "A3", "A1", "A2", "A3", "A1", "A2"];
+    shots.forEach((who, i) => f.teeOff("A", i + 1).score("A", i + 1, 4, who));
+    f.teeOff("A", 9);
+    expect(nine(f, "A", 1)).toMatchObject({ level: "hard", remaining: 1, needing: [f.player.A4] });
+    f.score("A", 9, 5, "A1"); // wrong chip
+    expect(nine(f, "A", 1)).toMatchObject({ level: "impossible", remaining: 0, closed: false, missed: [] });
+    f.score("A", 9, 5, "A4"); // fixed
+    expect(nine(f, "A", 1)).toMatchObject({ level: "ok", needing: [], closed: false, missed: [] });
+    f.teeOff("A", 10);
+    expect(nine(f, "A", 1)).toMatchObject({ closed: true, missed: [] });
+  });
+
+  it("a final trip closes every nine of a team that teed off (no Round complete tapped)", () => {
+    const f = makeTrip({ teams: [4, 3] });
+    for (let h = 1; h <= 18; h++) f.teeOff("A", h).score("A", h, 4, h <= 9 ? ["A1", "A2", "A3", "A4"][h % 4] : h < 18 ? "A1" : null);
+    expect(nine(f, "A", 2)).toMatchObject({ closed: false, level: "impossible", remaining: 1 });
+    f.state = { ...f.state, trip: { ...f.state.trip, status: "final" } };
+    const s = drive(f, "A");
+    expect(s.nines[0]).toMatchObject({ closed: true, missed: [], level: "ok" });
+    expect(s.nines[1]).toMatchObject({ closed: true, remaining: 0, level: "ok" });
+    expect(labels(f, s.nines[1].missed)).toEqual(["A2", "A3", "A4"]);
+    // Team B never teed off: nothing to close, nothing missed.
+    expect(drive(f, "B").nines.map((n) => [n.closed, n.missed.length])).toEqual([
+      [false, 0],
+      [false, 0],
+    ]);
   });
 
   it("completing early (holes missing) still closes the back nine", () => {

@@ -192,6 +192,11 @@ function drinkOp(f: TripFixture, team: string, player: string, hole: number, ext
   });
 }
 
+let photoSeq = 0;
+/** A valid photo path for this trip: trips/<trip_id>/<kind>/<uuid>.jpg. */
+const photoOf = (s: TripState, kind: "drinks" | "ld" | "ctp" | "posts") =>
+  `trips/${s.trip.id}/${kind}/00000000-0000-4000-8000-${String(++photoSeq).padStart(12, "0")}.jpg`;
+
 /** Remove a team's round state row (e.g. a team added after the round started). */
 function withoutRoundState(s: TripState, teamId: string): TripState {
   return { ...s, team_round_state: s.team_round_state.filter((r) => r.team_id !== teamId) };
@@ -249,6 +254,41 @@ describe("general rules", () => {
     }
     const r = ok(f.state, mk("score.set", { team_id: f.team.A, hole: 6, strokes: 5, as_commissioner: true }), commish());
     expect(scoreOf(r.state, f.team.A, 6)?.strokes).toBe(5);
+  });
+
+  it("late sync: play ops that happened before the finalize (+ 2 min clock grace) still land on a final trip", () => {
+    const f = live();
+    f.teeOff("A", 18).teeOff("B", 18);
+    const finalized = ok(f.state, mk("trip.finalize", { at: at(400) }), commish({ now: at(400) })).state;
+    expect(finalized.trip).toMatchObject({ status: "final", finalized_at: at(400) });
+    // A phone pocketed in a dead zone on 18 syncs at the bar: its drinks, score and round complete count.
+    const queued: Op[] = [
+      drinkOp(f, "B", "B2", 18, { drink_type: "shotgun", at: at(380) }),
+      mk("score.set", { team_id: f.team.B, hole: 18, strokes: 4, at: at(385), by: f.player.B2 }),
+      mk("round.complete", { team_id: f.team.B, at: at(390), by: f.player.B2 }),
+      submit(f, "B1", 4, "ld", 280, { at: at(200) }),
+      drinkOp(f, "A", "A3", 18, { at: at(401) }), // within the grace (phone clock a little slow)
+    ];
+    for (const o of queued) {
+      const r = run(finalized, o, server());
+      expect(r.ok, `${o.type}: ${r.ok ? "" : r.reason}`).toBe(true);
+    }
+    const s = applyOps(finalized, queued, server()).state;
+    expect(s.drinks.map((d) => d.player_id)).toEqual([f.player.B2, f.player.A3]);
+    expect(scoreOf(s, f.team.B, 18)!.strokes).toBe(4);
+    expect(rsOf(s, f.team.B)!.status).toBe("complete");
+    expect(s.trip.status).toBe("final");
+    // Fresh play after the final whistle: not_live.
+    expect(rejected(finalized, drinkOp(f, "B", "B3", 18, { at: at(403) }), "not_live")).toMatch(/final/);
+    rejected(finalized, mk("score.set", { team_id: f.team.B, hole: 18, strokes: 3, at: at(500) }), "not_live");
+    // A phone that already shows the round final can't dispatch play ops, whatever its clock says.
+    rejected(finalized, drinkOp(f, "B", "B3", 18, { at: at(380) }), "not_live", client());
+    // Reopened: no finalized_at, everything is live again.
+    const reopened = ok(finalized, mk("trip.reopen", {}), commish()).state;
+    ok(reopened, drinkOp(f, "B", "B3", 18, { at: at(500) }));
+    // A final trip without a finalized_at (legacy row) never takes late ops.
+    const noStamp = { ...finalized, trip: { ...finalized.trip, finalized_at: null } };
+    rejected(noStamp, queued[0], "not_live");
   });
 
   it("the play-op list matches the documented semantics", () => {
@@ -533,8 +573,9 @@ describe("score.set", () => {
     let s = ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: at(200) })).state;
     expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 5, strokes_at: at(200), edit_count: 0 });
 
-    // Offline phone syncs an edit made earlier: ignored.
-    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 7, at: at(150) }));
+    // Offline phone syncs an edit made earlier: it loses, and is told (unless it agrees).
+    expect(rejected(s, mk("score.set", { team_id: A, hole: 6, strokes: 7, at: at(150) }), "conflict")).toMatch(/Hole 6 already got a newer edit: 5/);
+    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: at(150) }));
 
     // Newer edit wins and counts as an edit.
     s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 4, at: at(210) })).state;
@@ -543,7 +584,7 @@ describe("score.set", () => {
     // Same value, newer time: bumps the LWW clock but isn't an edit.
     s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 4, at: at(220) })).state;
     expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 4, strokes_at: at(220), edit_count: 1 });
-    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 9, at: at(215) }));
+    rejected(s, mk("score.set", { team_id: A, hole: 6, strokes: 9, at: at(215) }), "conflict");
 
     // Equal timestamp: the later-arriving op applies.
     s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 6, at: at(220) })).state;
@@ -555,8 +596,9 @@ describe("score.set", () => {
     f.teeOff("A", 6);
     const A = f.team.A;
     const s = ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 9, at: "2027-01-01T00:00:00.000Z" })).state;
-    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: at(400) }));
-    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: at(400) }), commish());
+    rejected(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: at(400) }), "conflict");
+    // The cookie alone isn't an override.
+    rejected(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: at(400) }), "conflict", commish());
     const fixed = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: at(401), as_commissioner: true }), commish()).state;
     expect(scoreOf(fixed, A, 6)).toMatchObject({ strokes: 5, strokes_at: at(401), edit_count: 1 });
     // Normal edits work again afterwards.
@@ -564,7 +606,7 @@ describe("score.set", () => {
     expect(scoreOf(after, A, 6)!.strokes).toBe(4);
     // Same for the tee shot.
     const t = ok(f.state, mk("teeshot.set", { team_id: A, hole: 6, player_id: f.player.A1, at: "2027-01-01T00:00:00.000Z" })).state;
-    noop(t, mk("teeshot.set", { team_id: A, hole: 6, player_id: f.player.A2, at: at(400) }));
+    expect(rejected(t, mk("teeshot.set", { team_id: A, hole: 6, player_id: f.player.A2, at: at(400) }), "conflict")).toMatch(/Player A1/);
     const t2 = ok(t, mk("teeshot.set", { team_id: A, hole: 6, player_id: f.player.A2, at: at(401), as_commissioner: true }), commish()).state;
     expect(scoreOf(t2, A, 6)!.tee_shot_player_id).toBe(f.player.A2);
   });
@@ -575,7 +617,7 @@ describe("score.set", () => {
     const A = f.team.A;
     // "...:00Z" (no millis) sorts after "...:00.500Z" as a string but is earlier in time.
     const s = ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 5, at: "2026-10-24T18:00:00.500Z" })).state;
-    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 7, at: "2026-10-24T18:00:00Z" }));
+    rejected(s, mk("score.set", { team_id: A, hole: 6, strokes: 7, at: "2026-10-24T18:00:00Z" }), "conflict");
   });
 
   it("first strokes on a row created by a tee shot isn't an edit", () => {
@@ -654,7 +696,8 @@ describe("score.set", () => {
       f.teeOff("A", 4);
       const s = ok(f.state, mk("score.set", { team_id: f.team.A, hole: 5, strokes: 4, at: at(300) }), commish()).state;
       const back = ok(s, mk("round.set_state", { team_id: f.team.A, open_hole: 4, status: "playing" }), commish()).state;
-      noop(back, mk("score.set", { team_id: f.team.A, hole: 5, strokes: 6, at: at(250) }));
+      noop(back, mk("score.set", { team_id: f.team.A, hole: 5, strokes: 4, at: at(250) }));
+      rejected(back, mk("score.set", { team_id: f.team.A, hole: 5, strokes: 6, at: at(250) }), "conflict");
     });
   });
 });
@@ -696,12 +739,14 @@ describe("teeshot.set", () => {
     const A = f.team.A;
     let s = ok(f.state, mk("teeshot.set", { team_id: A, hole: 2, player_id: f.player.A1, at: at(300) })).state;
     s = ok(s, mk("score.set", { team_id: A, hole: 2, strokes: 4, at: at(400) })).state;
-    noop(s, mk("teeshot.set", { team_id: A, hole: 2, player_id: f.player.A2, at: at(250) }));
+    rejected(s, mk("teeshot.set", { team_id: A, hole: 2, player_id: f.player.A2, at: at(250) }), "conflict");
+    noop(s, mk("teeshot.set", { team_id: A, hole: 2, player_id: f.player.A1, at: at(250) }));
     // Older than strokes_at but newer than tee_shot_at: still applies.
     s = ok(s, mk("teeshot.set", { team_id: A, hole: 2, player_id: f.player.A2, at: at(350) })).state;
     expect(scoreOf(s, A, 2)).toMatchObject({ tee_shot_player_id: f.player.A2, strokes: 4, strokes_at: at(400) });
     // And a stale score doesn't lose the tee shot either.
-    noop(s, mk("score.set", { team_id: A, hole: 2, strokes: 6, at: at(360) }));
+    rejected(s, mk("score.set", { team_id: A, hole: 2, strokes: 6, at: at(360) }), "conflict");
+    expect(scoreOf(s, A, 2)!.tee_shot_player_id).toBe(f.player.A2);
   });
 
   it("player must be a current member of the team", () => {
@@ -734,7 +779,8 @@ describe("drink.log", () => {
   it("creates a complete drink row (server)", () => {
     const f = live();
     f.teeOff("B", 3);
-    const o = drinkOp(f, "B", "B2", 3, { drink_type: "shotgun", photo_path: "trips/x/drinks/1.jpg", by: f.player.B1 });
+    const photo = photoOf(f.state, "drinks");
+    const o = drinkOp(f, "B", "B2", 3, { drink_type: "shotgun", photo_path: photo, by: f.player.B1 });
     const r = ok(f.state, o);
     expect(drinkOf(r.state, o.drink_id)).toEqual({
       id: o.drink_id,
@@ -743,7 +789,7 @@ describe("drink.log", () => {
       player_id: f.player.B2,
       hole: 3,
       type: "shotgun",
-      photo_path: "trips/x/drinks/1.jpg",
+      photo_path: photo,
       logged_by: f.player.B1,
       logged_at: o.at,
       created_at: NOW,
@@ -770,12 +816,25 @@ describe("drink.log", () => {
 
   it("server trusts the client-stamped hole (offline phones never lose drinks)", () => {
     const f = live();
-    // Not started yet on the server, complete, or a different hole: all accepted as stamped.
+    // Not started yet on the server, or a different hole: accepted as stamped.
     const o1 = drinkOp(f, "A", "A2", 1);
     expect(drinkOf(ok(f.state, o1).state, o1.drink_id)!.hole).toBe(1);
-    f.teeOff("A", 18).complete("A");
-    const o2 = drinkOp(f, "A", "A3", 17);
+    // Logged before the team tapped Round complete (a teammate's phone synced it first): accepted.
+    f.teeOff("A", 18).complete("A", 300);
+    const o2 = drinkOp(f, "A", "A3", 17, { at: at(290) });
     expect(drinkOf(ok(f.state, o2).state, o2.drink_id)!.hole).toBe(17);
+  });
+
+  it("server: a drink logged after the team's Round complete (+ 2 min clock grace) has no window", () => {
+    const f = live();
+    f.teeOff("A", 18).complete("A", 300);
+    ok(f.state, drinkOp(f, "A", "A1", 18, { at: at(302) })); // within the grace
+    const late = drinkOp(f, "A", "A1", 18, { at: at(315) }); // 15 minutes later, at the bar
+    expect(rejected(f.state, late, "no_window")).toMatch(/over/i);
+    // The commissioner can still add it (and a reopened round has no completed_at).
+    ok(f.state, { ...late, as_commissioner: true }, commish());
+    const reopened = ok(f.state, mk("round.set_state", { team_id: f.team.A, open_hole: 18, status: "playing" }), commish()).state;
+    ok(reopened, late);
   });
 
   it("is idempotent by drink_id, even after the drink was deleted", () => {
@@ -783,7 +842,7 @@ describe("drink.log", () => {
     f.teeOff("A", 1);
     const o = drinkOp(f, "A", "A1", 1);
     let s = ok(f.state, o).state;
-    s = ok(s, mk("drink.delete", { drink_id: o.drink_id })).state;
+    s = ok(s, mk("drink.delete", { drink_id: o.drink_id, by: f.player.A1 })).state;
     noop(s, o);
     noop(s, o, client());
   });
@@ -799,6 +858,20 @@ describe("drink.log", () => {
     rejected(f.state, drinkOp(f, "A", "A1", 1, { drink_type: "wine" as never }), "invalid");
     rejected(f.state, drinkOp(f, "A", "A1", 1, { drink_id: "" }), "invalid");
     rejected(f.state, drinkOp(f, "A", "A1", 1, { photo_path: 42 as never }), "invalid");
+  });
+
+  it("photo_path must be one of this trip's photo paths (or null)", () => {
+    const f = live();
+    f.teeOff("A", 1);
+    const otherTrip = `trips/7c9e6679-7425-40de-944b-e07fc1f90ae7/drinks/e4eaaaf2-d142-11e1-b3e4-080027620cdd.jpg`;
+    for (const bad of ["https://attacker.example/pixel.jpg?who=A1", "data:image/svg+xml,<svg/>", otherTrip, `trips/${f.state.trip.id}/drinks/../x.jpg`, "x".repeat(1_000_000)]) {
+      expect(rejected(f.state, drinkOp(f, "A", "A1", 1, { photo_path: bad }), "invalid")).toMatch(/photo/i);
+    }
+    for (const none of [null, ""]) {
+      const o = drinkOp(f, "A", "A1", 1, { photo_path: none });
+      expect(drinkOf(ok(f.state, o).state, o.drink_id)!.photo_path).toBeNull();
+    }
+    for (const kind of ["drinks", "posts"] as const) ok(f.state, drinkOp(f, "A", "A1", 1, { photo_path: photoOf(f.state, kind) }));
   });
 
   it("drink_cap (per player) blocks the next drink; deleted drinks don't count; override bypasses", () => {
@@ -821,6 +894,22 @@ describe("drink.log", () => {
     const o = drinkOp(f, "A", "A1", 9, { as_commissioner: true });
     expect(drinkOf(ok(f.state, o, commish({ side: "client" })).state, o.drink_id)!.hole).toBe(9);
   });
+
+  it("Day-of fallback: the commissioner adds a missed drink on any hole for any team, window or not", () => {
+    const f = live();
+    f.teeOff("A", 18).complete("A", 30); // done; B hasn't teed off; C is mid-round
+    f.teeOff("C", 7);
+    const cases = [drinkOp(f, "A", "A2", 18), drinkOp(f, "A", "A2", 3), drinkOp(f, "B", "B1", 12), drinkOp(f, "C", "C3", 1)];
+    for (const o of cases) {
+      const fix = { ...o, by: null, as_commissioner: true };
+      for (const side of ["client", "server"] as const) {
+        expect(drinkOf(ok(f.state, fix, commish({ side })).state, o.drink_id)!.hole).toBe(o.hole);
+      }
+    }
+    // Players can't (no window on the phone; the server saw the round end long before).
+    rejected(f.state, cases[0], "no_window", client());
+    rejected(f.state, cases[0], "no_window");
+  });
 });
 
 describe("drink.delete", () => {
@@ -838,6 +927,19 @@ describe("drink.delete", () => {
     f.deleteDrink(id);
     noop(f.state, mk("drink.delete", { drink_id: id }));
     rejected(f.state, mk("drink.delete", { drink_id: "nope" }), "not_found");
+  });
+
+  it("only the drink's team can delete it; another team (or nobody) needs the commissioner", () => {
+    const f = live();
+    const id = f.drink("A", "A1", 1);
+    expect(rejected(f.state, mk("drink.delete", { drink_id: id, by: f.player.B1 }), "forbidden")).toMatch(/Team A/);
+    rejected(f.state, mk("drink.delete", { drink_id: id, by: null }), "forbidden");
+    rejected(f.state, mk("drink.delete", { drink_id: id, by: "not-a-player" }), "forbidden");
+    // The cookie alone isn't an override (cross-team deletes always post as overrides).
+    rejected(f.state, mk("drink.delete", { drink_id: id, by: f.player.B1 }), "forbidden", commish());
+    ok(f.state, mk("drink.delete", { drink_id: id, by: f.player.A3 }));
+    const r = ok(f.state, mk("drink.delete", { drink_id: id, by: f.player.B1, as_commissioner: true }), commish());
+    expect(drinkOf(r.state, id)).toMatchObject({ deleted_at: NOW, deleted_by: f.player.B1 });
   });
 });
 
@@ -918,7 +1020,7 @@ describe("mulligan.use", () => {
     const use = mulliganOp(f, "A", "earned");
     let s = ok(f.state, use).state;
     rejected(s, mulliganOp(f, "A", "earned"), "conflict");
-    s = ok(s, mk("mulligan.undo", { mulligan_id: use.mulligan_id })).state;
+    s = ok(s, mk("mulligan.undo", { mulligan_id: use.mulligan_id, by: f.player.A1 })).state;
     ok(s, mulliganOp(f, "A", "earned"));
   });
 
@@ -937,7 +1039,7 @@ describe("mulligan.use", () => {
     const f = live();
     const use = mulliganOp(f, "A", "groom");
     let s = ok(f.state, use).state;
-    s = ok(s, mk("mulligan.undo", { mulligan_id: use.mulligan_id })).state;
+    s = ok(s, mk("mulligan.undo", { mulligan_id: use.mulligan_id, by: f.player.A2 })).state;
     ok(s, mulliganOp(f, "A", "groom"));
     const noGroom = ok(f.state, mk("player.delete", { player_id: f.player.A1 }), commish()).state;
     rejected(noGroom, mulliganOp(f, "A", "groom"), "conflict");
@@ -957,16 +1059,44 @@ describe("mulligan.use", () => {
     rejected(f.state, mulliganOp(f, "A", "bogus" as never), "invalid");
     rejected(f.state, { ...mulliganOp(f, "A", "earned"), team_id: "nope" }, "not_found");
   });
+
+  it("unused mulligans expire when the team's round is complete (2 min clock grace on the server)", () => {
+    const f = live();
+    f.drink("A", "A1", 17, "shotgun");
+    f.teeOff("A", 18).complete("A", 300);
+    // The phone that shows the round over refuses it.
+    expect(rejected(f.state, mulliganOp(f, "A", "earned", 18, { at: at(305) }), "conflict", client())).toMatch(/expired/);
+    // Server: spent before the round ended (an offline teammate syncing late) still counts.
+    ok(f.state, mulliganOp(f, "A", "earned", 18, { at: at(290) }));
+    ok(f.state, mulliganOp(f, "A", "earned", 18, { at: at(301) }));
+    rejected(f.state, mulliganOp(f, "A", "earned", 18, { at: at(305) }), "conflict");
+    rejected(f.state, mulliganOp(f, "A", "groom", 18, { at: at(305) }), "conflict");
+    // The commissioner can still record one.
+    ok(f.state, mulliganOp(f, "A", "earned", 18, { at: at(305), as_commissioner: true }), commish());
+    ok(f.state, mulliganOp(f, "A", "groom", 18, { at: at(305), as_commissioner: true }), commish({ side: "client" }));
+    // Other teams still playing are unaffected.
+    f.drink("B", "B1", 2, "shot");
+    ok(f.state, mulliganOp(f, "B", "earned", 2, { at: at(305) }), client());
+  });
 });
 
 describe("mulligan.undo", () => {
   it("soft deletes; no-op when already undone; not_found when missing", () => {
     const f = live();
     const id = f.mulligan("A", 3, "groom");
-    const s = ok(f.state, mk("mulligan.undo", { mulligan_id: id })).state;
+    const s = ok(f.state, mk("mulligan.undo", { mulligan_id: id, by: f.player.A4 })).state;
     expect(s.mulligans.find((m) => m.id === id)!.deleted_at).toBe(NOW);
     noop(s, mk("mulligan.undo", { mulligan_id: id }));
     rejected(f.state, mk("mulligan.undo", { mulligan_id: "nope" }), "not_found");
+  });
+
+  it("only the mulligan's team can undo it; another team needs the commissioner", () => {
+    const f = live();
+    const id = f.mulligan("A", 3, "groom");
+    rejected(f.state, mk("mulligan.undo", { mulligan_id: id, by: f.player.C1 }), "forbidden");
+    rejected(f.state, mk("mulligan.undo", { mulligan_id: id, by: null }), "forbidden");
+    rejected(f.state, mk("mulligan.undo", { mulligan_id: id, by: f.player.C1 }), "forbidden", commish());
+    ok(f.state, mk("mulligan.undo", { mulligan_id: id, by: f.player.C1, as_commissioner: true }), commish());
   });
 });
 
@@ -974,6 +1104,7 @@ describe("mulligan.undo", () => {
 // Contests
 // ---------------------------------------------------------------------------
 
+/** The player enters their own distance (by = the player) unless `extra` says otherwise. */
 function submit(f: TripFixture, player: string, hole: number, type: "ctp" | "ld", distance: number, extra: Partial<Fields<"contest.submit">> = {}) {
   return mk("contest.submit", {
     entry_id: `entry-${++opSeq}`,
@@ -986,7 +1117,8 @@ function submit(f: TripFixture, player: string, hole: number, type: "ctp" | "ld"
     lng: type === "ld" ? -75.6712 : null,
     gps_accuracy_m: type === "ld" ? 4 : null,
     low_accuracy: false,
-    photo_path: "trips/t/contest/1.jpg",
+    photo_path: photoOf(f.state, type),
+    by: f.player[player],
     ...extra,
   });
 }
@@ -1012,7 +1144,7 @@ describe("contest.submit", () => {
       lng: null,
       gps_accuracy_m: null,
       low_accuracy: false,
-      photo_path: "trips/t/contest/1.jpg",
+      photo_path: o.photo_path,
       ai_estimate_ft: null,
       ai_confidence: null,
       ai_suspicious: null,
@@ -1040,31 +1172,40 @@ describe("contest.submit", () => {
     expect(entryOf(ok(f.state, o).state, o.entry_id)).toMatchObject({ unit: "yd", status: "ok", flag_reason: null, lat: 41.0951, gps_accuracy_m: 4 });
   });
 
-  it("long drive: weak GPS and out-of-range distances are flagged for the commissioner", () => {
+  it("long drive: weak GPS is flagged for the commissioner", () => {
     const f = live();
     const weak = submit(f, "C1", 4, "ld", 287, { low_accuracy: true, gps_accuracy_m: 25 });
     expect(entryOf(ok(f.state, weak).state, weak.entry_id)).toMatchObject({ status: "flagged", flag_reason: "GPS was weak", low_accuracy: true });
-    const short = submit(f, "C1", 4, "ld", 50);
-    expect(entryOf(ok(f.state, short).state, short.entry_id)).toMatchObject({ status: "flagged", flag_reason: "Out of range: 50 yd" });
-    const long = submit(f, "C1", 4, "ld", 412.4);
-    expect(entryOf(ok(f.state, long).state, long.entry_id)).toMatchObject({ status: "flagged", flag_reason: "Out of range: 412 yd" });
-    // Boundaries are inclusive.
-    for (const d of [100, 400]) {
-      const o = submit(f, "C1", 4, "ld", d);
-      expect(entryOf(ok(f.state, o).state, o.entry_id)!.status).toBe("ok");
-    }
-    // Weak GPS wins over the range message.
     const both = submit(f, "C1", 4, "ld", 20, { low_accuracy: true });
     expect(entryOf(ok(f.state, both).state, both.entry_id)!.flag_reason).toBe("GPS was weak");
     rejected(f.state, submit(f, "C1", 4, "ld", 701), "invalid");
   });
 
-  it("long drive: the sanity range comes from settings", () => {
+  it("long drive: the sanity range is derived, never stored (a tee-point fix or a wider range un-flags it)", () => {
     const f = live([4, 3, 3], { settings: { ld_min_yd: 150, ld_max_yd: 350 } });
-    const o = submit(f, "A2", 9, "ld", 360);
-    expect(entryOf(ok(f.state, o).state, o.entry_id)!.flag_reason).toBe("Out of range: 360 yd");
-    const o2 = submit(f, "A2", 9, "ld", 140);
-    expect(entryOf(ok(f.state, o2).state, o2.entry_id)!.status).toBe("flagged");
+    for (const d of [0, 50, 140, 360, 412.4, 700]) {
+      const o = submit(f, "A2", 9, "ld", d);
+      expect(entryOf(ok(f.state, o).state, o.entry_id)).toMatchObject({ status: "ok", flag_reason: null, distance_value: d });
+    }
+  });
+
+  it("long drive: a simulated GPS position is flagged, unless it's the commissioner's or a demo trip", () => {
+    const f = live();
+    const sim = submit(f, "C1", 4, "ld", 287, { simulated: true });
+    expect(entryOf(ok(f.state, sim).state, sim.entry_id)).toMatchObject({ status: "flagged", flag_reason: "Simulated GPS" });
+    // Simulated wins over weak GPS (the position is made up either way).
+    const both = submit(f, "C1", 4, "ld", 287, { simulated: true, low_accuracy: true });
+    expect(entryOf(ok(f.state, both).state, both.entry_id)!.flag_reason).toBe("Simulated GPS");
+    const commishSim = submit(f, "C1", 4, "ld", 287, { simulated: true, as_commissioner: true });
+    expect(entryOf(ok(f.state, commishSim, commish()).state, commishSim.entry_id)).toMatchObject({ status: "ok", flag_reason: null });
+    const demo = { ...f.state, trip: { ...f.state.trip, is_demo: true } };
+    const demoSim = submit(f, "C1", 4, "ld", 287, { simulated: true });
+    expect(entryOf(ok(demo, demoSim).state, demoSim.entry_id)).toMatchObject({ status: "ok", flag_reason: null });
+    // Only `true` counts; ctp ignores it.
+    const notSim = submit(f, "C1", 4, "ld", 287, { simulated: false });
+    expect(entryOf(ok(f.state, notSim).state, notSim.entry_id)!.status).toBe("ok");
+    const ctpSim = submit(f, "C1", 3, "ctp", 12, { simulated: true });
+    expect(entryOf(ok(f.state, ctpSim).state, ctpSim.entry_id)!.status).toBe("ok");
   });
 
   it("re-measuring replaces the player's earlier entry on that hole only", () => {
@@ -1098,6 +1239,34 @@ describe("contest.submit", () => {
     rejected(f.state, { ...submit(f, "A1", 3, "ctp", 10), player_id: "nope" }, "not_found");
   });
 
+  it("only the player or a teammate can enter (a submit replaces their entry); the commissioner can enter for anyone", () => {
+    const f = live();
+    const alice = f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 3 });
+    // A rival "re-measuring" A1 to 30 ft would delete A1's 3-footer.
+    expect(rejected(f.state, submit(f, "A1", 3, "ctp", 30, { by: f.player.C1 }), "forbidden")).toContain("Player A1");
+    rejected(f.state, submit(f, "A1", 3, "ctp", 30, { by: null }), "forbidden");
+    rejected(f.state, submit(f, "A1", 3, "ctp", 30, { by: f.player.C1 }), "forbidden", commish());
+    expect(entryOf(f.state, alice)!.deleted_at).toBeNull();
+    // A teammate measuring for A1 is fine.
+    ok(f.state, submit(f, "A1", 3, "ctp", 2.5, { by: f.player.A3 }));
+    // The commissioner enters a CTP for another team's player, even once final or after the
+    // group finished (Day-of fallback: paper scorecard, phone died).
+    const fix = submit(f, "B2", 8, "ctp", 6, { by: null, as_commissioner: true });
+    expect(entryOf(ok(f.state, fix, commish()).state, fix.entry_id)).toMatchObject({ player_id: f.player.B2, team_id: f.team.B, status: "ok" });
+    const done = makeTrip({ teams: [4, 3, 3], status: "final" });
+    done.teeOff("B", 18).complete("B");
+    const late = submit(done, "B2", 4, "ld", 280, { by: done.player.A1, as_commissioner: true });
+    expect(entryOf(ok(done.state, late, commish()).state, late.entry_id)!.team_id).toBe(done.team.B);
+  });
+
+  it("photo_path must be one of this trip's photo paths (or null)", () => {
+    const f = live();
+    ok(f.state, submit(f, "A1", 3, "ctp", 9, { photo_path: null }));
+    ok(f.state, submit(f, "A1", 3, "ctp", 9, { photo_path: "" }));
+    rejected(f.state, submit(f, "A1", 3, "ctp", 9, { photo_path: "https://evil.example/ctp.jpg" }), "invalid");
+    rejected(f.state, submit(f, "A1", 3, "ctp", 9, { photo_path: "trips/t/contest/1.jpg" }), "invalid");
+  });
+
   it("validates optional numbers", () => {
     const f = live();
     rejected(f.state, submit(f, "C1", 4, "ld", 250, { lat: 91 }), "invalid");
@@ -1114,16 +1283,71 @@ describe("contest.submit", () => {
     const s2 = ok(s, submit(f, "A1", 3, "ctp", 9)).state;
     noop(s2, o);
   });
+
+  describe("closest to pin edits keep the AI judge's read of the same photo", () => {
+    const judged = { ai_estimate_ft: 20, ai_confidence: "high" as const, ai_suspicious: true, ai_roast: "That's a 20-footer, liar." };
+
+    it("same photo: copies the AI estimate and re-judges the new claim (ratio from settings)", () => {
+      const f = live();
+      const photo = photoOf(f.state, "ctp");
+      const first = f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 2, photo_path: photo, ...judged });
+      // Still claiming 2 ft (just moved the marker): still suspicious.
+      const same = submit(f, "A1", 3, "ctp", 2.5, { photo_path: photo });
+      let r = ok(f.state, same);
+      expect(entryOf(r.state, first)!.deleted_at).toBe(NOW);
+      expect(entryOf(r.state, same.entry_id)).toMatchObject({ ...judged, ai_suspicious: true });
+      // Corrected to 15 ft: 15 >= 0.5 * 20, no longer suspicious, estimate and roast kept.
+      const honest = submit(f, "A1", 3, "ctp", 15, { photo_path: photo });
+      r = ok(f.state, honest);
+      expect(entryOf(r.state, honest.entry_id)).toMatchObject({ ai_estimate_ft: 20, ai_confidence: "high", ai_suspicious: false, ai_roast: judged.ai_roast });
+      // A stricter trip (ratio 0.9): 15 < 18 is suspicious.
+      const strict = { ...f.state, trip: { ...f.state.trip, settings: { ...f.state.trip.settings, judge_suspicious_ratio: 0.9 } } };
+      expect(entryOf(ok(strict, honest).state, honest.entry_id)!.ai_suspicious).toBe(true);
+    });
+
+    it("a low-confidence read is never suspicious; a different photo or no photo starts unjudged", () => {
+      const f = live();
+      const photo = photoOf(f.state, "ctp");
+      f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 2, photo_path: photo, ...judged, ai_confidence: "low", ai_suspicious: false });
+      const low = submit(f, "A1", 3, "ctp", 1, { photo_path: photo });
+      expect(entryOf(ok(f.state, low).state, low.entry_id)).toMatchObject({ ai_estimate_ft: 20, ai_confidence: "low", ai_suspicious: false });
+
+      const g = live();
+      const gPhoto = photoOf(g.state, "ctp");
+      g.entry({ hole: 3, player_id: g.player.A1, type: "ctp", distance_value: 2, photo_path: gPhoto, ...judged });
+      const unjudged = { ai_estimate_ft: null, ai_confidence: null, ai_suspicious: null, ai_roast: null };
+      for (const photo_path of [photoOf(g.state, "ctp"), null]) {
+        const o = submit(g, "A1", 3, "ctp", 2, { photo_path });
+        expect(entryOf(ok(g.state, o).state, o.entry_id)).toMatchObject(unjudged);
+      }
+      // Another player's judged entry with the same photo isn't theirs to inherit.
+      const o = submit(g, "A2", 3, "ctp", 2, { photo_path: gPhoto });
+      expect(entryOf(ok(g.state, o).state, o.entry_id)).toMatchObject(unjudged);
+    });
+  });
 });
 
 describe("contest.delete", () => {
   it("soft deletes; no-op twice; not_found when missing", () => {
     const f = live();
     const id = f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 20 });
-    const s = ok(f.state, mk("contest.delete", { entry_id: id })).state;
+    const s = ok(f.state, mk("contest.delete", { entry_id: id, by: f.player.A1 })).state;
     expect(entryOf(s, id)).toMatchObject({ deleted_at: NOW, updated_at: NOW });
     noop(s, mk("contest.delete", { entry_id: id }));
     rejected(f.state, mk("contest.delete", { entry_id: "nope" }), "not_found");
+  });
+
+  it("needs the entry's player or a teammate; anyone else needs the commissioner", () => {
+    const f = live();
+    const id = f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 3 });
+    expect(rejected(f.state, mk("contest.delete", { entry_id: id, by: f.player.B1 }), "forbidden")).toMatch(/another team/);
+    rejected(f.state, mk("contest.delete", { entry_id: id, by: null }), "forbidden");
+    rejected(f.state, mk("contest.delete", { entry_id: id, by: f.player.B1 }), "forbidden", commish());
+    ok(f.state, mk("contest.delete", { entry_id: id, by: f.player.A2 }));
+    ok(f.state, mk("contest.delete", { entry_id: id, by: f.player.B1, as_commissioner: true }), commish());
+    // The entrant can still pull their own entry after moving teams.
+    const moved = ok(f.state, mk("team.assign", { player_id: f.player.A1, team_id: f.team.C }), commish()).state;
+    ok(moved, mk("contest.delete", { entry_id: id, by: f.player.A1 }));
   });
 });
 
@@ -1179,8 +1403,23 @@ describe("post.create", () => {
 
   it("a photo alone is enough; blank text becomes null", () => {
     const f = live();
-    const r = ok(f.state, mk("post.create", { event_id: "post-2", text: "   ", photo_path: "trips/t/posts/x.jpg", by: f.player.A1 }));
-    expect(r.state.feed_events[0]).toMatchObject({ text: null, photo_path: "trips/t/posts/x.jpg" });
+    const photo = photoOf(f.state, "posts");
+    const r = ok(f.state, mk("post.create", { event_id: "post-2", text: "   ", photo_path: photo, by: f.player.A1 }));
+    expect(r.state.feed_events[0]).toMatchObject({ text: null, photo_path: photo });
+  });
+
+  it("photo_path must be one of this trip's photo paths: no URLs, data: URIs, other trips or megabyte strings", () => {
+    const f = live();
+    const bad = [
+      "https://attacker.example/pixel.jpg?who=everyone",
+      "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>",
+      "trips/7c9e6679-7425-40de-944b-e07fc1f90ae7/posts/e4eaaaf2-d142-11e1-b3e4-080027620cdd.jpg",
+      `trips/${f.state.trip.id}/posts/${"a".repeat(900_000)}.jpg`,
+      42,
+    ];
+    for (const photo_path of bad) {
+      rejected(f.state, mk("post.create", { event_id: `p-${++opSeq}`, text: "look", photo_path: photo_path as string }), "invalid");
+    }
   });
 
   it("needs text or a photo; max 1000 chars", () => {
@@ -1758,11 +1997,15 @@ describe("spec: drink windows", () => {
     const last = drinkOp(f, "A", "A4", 18, { drink_type: "shotgun" });
     s = ok(s, last, client()).state;
     expect(drinkOf(s, last.drink_id)!.hole).toBe(18);
+    // Meanwhile an offline teammate logs one on 18.
+    const offline = drinkOp(f, "A", "A3", 18);
     s = ok(s, mk("round.complete", { team_id: A }), client()).state;
     expect(openWindowHole(rsOf(s, A))).toBeNull();
     rejected(s, drinkOp(f, "A", "A4", 18), "no_window", client());
-    // Server still trusts a drink stamped while 18 was open on an offline phone.
-    ok(s, drinkOp(f, "A", "A4", 18), server());
+    // Server still trusts a drink stamped while 18 was open on an offline phone...
+    ok(s, offline, server());
+    // ...but not one logged at the bar 10 minutes after Round complete.
+    rejected(s, drinkOp(f, "A", "A4", 18, { at: at(clockMin + 10) }), "no_window", server());
   });
 });
 

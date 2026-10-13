@@ -5,10 +5,11 @@
 // 1. Photo with the ball and the flagstick in frame (strongly encouraged; "no photo" allowed with
 //    a warning that the AI judge can't verify it). 2. Distance in feet + inches. 3. Drag your ball
 //    around the pin to show which side you're on (radius comes from the distance). Submit.
-// Edits are allowed: a new submission replaces the player's entry.
+// Edits are allowed: a new submission replaces the player's entry and keeps its photo unless a new
+// one is taken (so the AI judge's verdict follows the edit).
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { UUID } from "@/lib/types";
-import { useClientState } from "@/lib/client/react";
+import { useClientState, useTripStore } from "@/lib/client/react";
 import { formatFeetInches } from "@/lib/engine/format";
 import { BottomSheet, Button, Card, Chip, EmptyState, Stepper, displayName } from "@/components/ui";
 import {
@@ -19,6 +20,7 @@ import {
   ctpCanAdvance,
   ctpDistance,
   ctpNextStep,
+  ctpPhotoPath,
   ctpPrevStep,
   ctpSubmitInput,
   defaultEntrant,
@@ -29,7 +31,7 @@ import {
 import { feetToFeetInches, normalizeAngle, sideOfPin } from "./geometry";
 import { GreenPlot } from "./GreenPlot";
 import { entryOf, formatContestDistance, plotEntries } from "./model";
-import { CameraButton, EntrantPicker, PhotoPreview, StepDots, usePhotoDraft } from "./parts";
+import { CameraButton, EntrantPicker, KeptPhoto, PhotoPreview, StepDots, usePhotoDraft } from "./parts";
 import { useSubmitEntry } from "./useSubmitEntry";
 
 export interface ClosestToPinSheetProps {
@@ -53,6 +55,7 @@ export function ClosestToPinSheet(props: ClosestToPinSheetProps) {
 function ClosestToPinFlow({ onClose, hole }: ClosestToPinSheetProps) {
   const derived = useClientState((s) => s.derived);
   const meId = useClientState((s) => s.meId);
+  const store = useTripStore();
   const submitEntry = useSubmitEntry();
   const summary = derived?.contests.find((c) => c.hole === hole);
 
@@ -106,7 +109,9 @@ function ClosestToPinFlow({ onClose, hole }: ClosestToPinSheetProps) {
   const entrant = entrantId ? derived.playerById[entrantId] : undefined;
   const entrantName = entrant ? displayName(entrant) : "you";
   const existing = entryOf(summary, entrantId);
-  const draft = { step, hasPhoto: photo !== null, noPhoto, feet, inches, angle };
+  // Editing an entry with a photo: it stays unless a new one is taken.
+  const keptPhoto = photo ? null : (existing?.entry.photo_path ?? null);
+  const draft = { step, hasPhoto: photo !== null || keptPhoto !== null, noPhoto, feet, inches, angle };
   const distance = ctpDistance(draft);
   const preview = previewRank(summary, entrantId, distance);
   const stepIndex = CTP_STEPS.indexOf(step);
@@ -139,7 +144,8 @@ function ClosestToPinFlow({ onClose, hole }: ClosestToPinSheetProps) {
       playerId: entrantId,
       photo: photo?.file ?? null,
       previous: existing?.entry ?? null,
-      build: (entryId, photoPath) => ctpSubmitInput({ entryId, hole, playerId: entrantId, feet, inches, angle, photoPath }),
+      build: (entryId, photoPath) =>
+        ctpSubmitInput({ entryId, hole, playerId: entrantId, feet, inches, angle, photoPath: ctpPhotoPath(photoPath, existing?.entry) }),
     });
     if (!alive.current) return;
     setBusy(false);
@@ -150,9 +156,9 @@ function ClosestToPinFlow({ onClose, hole }: ClosestToPinSheetProps) {
   if (step === "photo") {
     footer = (
       <div className="space-y-1">
-        {photo ? (
+        {photo || keptPhoto ? (
           <Button variant="primary" size="xl" full disabled={!entrantId} onClick={goNext} data-testid="ctp-next">
-            Next: distance
+            {photo ? "Next: distance" : "Keep the photo: distance"}
           </Button>
         ) : (
           <CameraButton
@@ -164,7 +170,7 @@ function ClosestToPinFlow({ onClose, hole }: ClosestToPinSheetProps) {
             testId="ctp-photo"
           />
         )}
-        {!photo && (
+        {!photo && !keptPhoto && (
           <Button
             variant="ghost"
             full
@@ -230,7 +236,7 @@ function ClosestToPinFlow({ onClose, hole }: ClosestToPinSheetProps) {
                 the flag (~7 ft) and the cup (4.25&quot;).
               </p>
             </Card>
-            {photo && (
+            {photo ? (
               <PhotoPreview
                 photo={photo}
                 onFile={(f) => {
@@ -239,6 +245,17 @@ function ClosestToPinFlow({ onClose, hole }: ClosestToPinSheetProps) {
                 }}
                 testId="ctp-photo"
               />
+            ) : (
+              keptPhoto && (
+                <KeptPhoto
+                  url={store.photoUrl(keptPhoto)}
+                  onFile={(f) => {
+                    setPhotoFile(f);
+                    setNoPhoto(false);
+                  }}
+                  testId="ctp-photo"
+                />
+              )
             )}
           </>
         )}

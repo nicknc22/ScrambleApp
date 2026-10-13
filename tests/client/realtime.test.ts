@@ -67,7 +67,7 @@ function setup() {
 }
 
 describe("live updates", () => {
-  it("polls every 3 s without Realtime, every 20 s with it", async () => {
+  it("polls every 3 s without Realtime, every 20 s once the channel is subscribed", async () => {
     const t = setup();
     expect(t.timers.delays()).toEqual([3000]);
     t.timers.fire(3000);
@@ -78,9 +78,54 @@ describe("live updates", () => {
     t.live.setConfig(CFG);
     await Promise.resolve();
     expect(t.connects).toHaveLength(1);
+    // Configured but not subscribed yet: still the fast fallback.
+    expect(t.timers.delays()).toEqual([3000]);
+    t.connects[0].onStatus?.("SUBSCRIBED");
+    t.timers.fire(0); // the catch-up refresh
     expect(t.timers.delays()).toEqual([20_000]);
     t.timers.fire(20_000);
-    expect(t.refreshes()).toBe(2);
+    expect(t.refreshes()).toBe(3);
+    t.live.stop();
+  });
+
+  for (const status of ["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"]) {
+    it(`falls back to the 3 s poll on ${status} and back to 20 s once re-subscribed`, async () => {
+      const t = setup();
+      t.live.setConfig(CFG);
+      await Promise.resolve();
+      const c = t.connects[0];
+      c.onStatus?.("SUBSCRIBED");
+      t.timers.fire(0);
+      expect(t.timers.delays()).toEqual([20_000]);
+      c.onStatus?.(status);
+      expect(t.live.connected).toBe(false);
+      expect(t.timers.delays()).toEqual([3000]);
+      t.timers.fire(3000);
+      expect(t.timers.delays()).toEqual([3000]);
+      c.onStatus?.("SUBSCRIBED");
+      expect(t.live.connected).toBe(true);
+      t.timers.fire(0);
+      expect(t.timers.delays()).toEqual([20_000]);
+      t.live.stop();
+    });
+  }
+
+  it("a new channel (config change) polls fast until it is subscribed", async () => {
+    const t = setup();
+    t.live.setConfig(CFG);
+    await Promise.resolve();
+    t.connects[0].onStatus?.("SUBSCRIBED");
+    t.timers.fire(0);
+    expect(t.timers.delays()).toEqual([20_000]);
+    t.live.setConfig({ ...CFG, topic: "trip:other" });
+    await Promise.resolve();
+    expect(t.live.connected).toBe(false);
+    expect(t.timers.delays()).toEqual([3000]);
+    // A late status from the old channel is ignored.
+    t.connects[0].onStatus?.("SUBSCRIBED");
+    expect(t.timers.delays()).toEqual([3000]);
+    t.live.setConfig(null);
+    expect(t.timers.delays()).toEqual([3000]);
     t.live.stop();
   });
 
@@ -92,7 +137,7 @@ describe("live updates", () => {
     c.onChanged();
     c.onChanged();
     c.onChanged();
-    expect(t.timers.delays()).toEqual([400, 20_000]);
+    expect(t.timers.delays()).toEqual([400, 3000]);
     t.timers.fire(400);
     expect(t.refreshes()).toBe(1);
     c.onStatus?.("SUBSCRIBED");
@@ -170,7 +215,8 @@ describe("live updates", () => {
     live.setConfig(CFG);
     await new Promise((r) => setTimeout(r, 5));
     expect(live.connected).toBe(false);
-    expect(timers.delays()).toEqual([20_000]);
+    // No live channel: polling stays at the fast fallback.
+    expect(timers.delays()).toEqual([3000]);
     live.stop();
     expect(timers.q.size).toBe(0);
     expect(win.count() + doc.count()).toBe(0);

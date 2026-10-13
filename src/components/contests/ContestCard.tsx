@@ -16,6 +16,7 @@ import {
   leaderLine,
   plotEntries,
   potInfo,
+  potWinnerLine,
 } from "./model";
 import type { EntryAccess } from "./flow";
 
@@ -46,6 +47,7 @@ export function ContestCard({
   const ctp = summary.type === "ctp";
   const pot = potInfo(pots, summary.hole);
   const leader = leaderLine(summary, derived);
+  const potWinner = potWinnerLine(summary, pots, derived);
   const hasEntries = summary.entries.length > 0;
   const enterLabel = ctp ? (myEntry ? "Edit my closest to pin" : "Enter closest to pin") : myEntry ? "Re-measure my drive" : "Measure drive";
 
@@ -118,6 +120,13 @@ export function ContestCard({
         ) : (
           <p className="text-[15px] font-bold text-muted" data-testid="contest-leader">
             <span aria-hidden="true">🦗 </span>No entries yet. The pot&apos;s just sitting there.
+          </p>
+        )}
+
+        {potWinner && (
+          <p className="rounded-xl border-2 border-ink bg-fairway-soft px-3 py-2 text-[15px] leading-snug font-black" data-testid="contest-pot-winner">
+            <span aria-hidden="true">💰 </span>
+            {potWinner}
           </p>
         )}
 

@@ -50,6 +50,7 @@ function LongDriveFlow({ onClose, hole }: LongDriveSheetProps) {
   const settings = useClientState((s) => s.view?.trip.settings ?? null);
   const meId = useClientState((s) => s.meId);
   const isCommissioner = useClientState((s) => s.isCommissioner);
+  const isDemo = useClientState((s) => s.view?.trip.is_demo ?? false);
   const nav = useShellNav();
   const submitEntry = useSubmitEntry();
 
@@ -116,7 +117,8 @@ function LongDriveFlow({ onClose, hole }: LongDriveSheetProps) {
   };
 
   const yards = gps.phase === "fixed" && gps.fix ? ldDistanceYards(holeRow, gps.fix) : null;
-  const verdict = yards !== null ? ldVerdict(yards, gps.lowAccuracy, settings) : null;
+  // A simulated position goes out tagged (ldSubmitInput) and lands with the commissioner on a real trip.
+  const verdict = yards !== null ? ldVerdict(yards, gps.lowAccuracy, settings, gps.fix?.simulated === true && !isDemo) : null;
   const preview = yards !== null && verdict && !verdict.review && !verdict.blocked ? previewRank(summary, entrantId, yards) : null;
   const leader = summary?.entries.find((v) => v.valid && v.player_id !== entrantId) ?? null;
 
@@ -242,7 +244,7 @@ function LongDriveFlow({ onClose, hole }: LongDriveSheetProps) {
         ) : gps.phase === "measuring" ? (
           <MeasuringCard attempt={gps.attempts} accuracy={gps.live?.accuracy ?? null} />
         ) : gps.phase === "weak" ? (
-          <WeakCard accuracy={gps.live?.accuracy ?? gps.best?.accuracy ?? null} limitM={limitM} triesLeft={triesLeft(gps)} canReview={canAcceptWeak(gps)} />
+          <WeakCard accuracy={gps.live?.accuracy ?? gps.last?.accuracy ?? null} limitM={limitM} triesLeft={triesLeft(gps)} canReview={canAcceptWeak(gps)} />
         ) : gps.phase === "error" ? (
           <ErrorCard code={gps.error ?? "unavailable"} canReview={canAcceptWeak(gps)} />
         ) : (

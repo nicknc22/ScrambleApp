@@ -7,10 +7,13 @@ import {
   canEditPlay,
   clampHole,
   clampStrokes,
+  drinkBurstCopy,
   drinkFeedback,
+  drinkUndoneCopy,
   drinksForRound,
   drinksOnHole,
   driveView,
+  hasUnsavedDraft,
   isEditingOtherHole,
   joinNames,
   mulliganOptions,
@@ -20,6 +23,7 @@ import {
   nineOf,
   nineTotals,
   noWindowMessage,
+  pinAfterTeamMove,
   resolvePlayTeam,
   roundSummary,
   savedScoreLine,
@@ -27,6 +31,7 @@ import {
   scoreName,
   scoreTone,
   stripCells,
+  teamMoveNotice,
   teeCtaHole,
   unscoredHoles,
   viewingHole,
@@ -96,6 +101,37 @@ describe("viewing hole and advancing", () => {
     expect(teeCtaHole(rs(18, "complete"), 18)).toBeNull();
     // A commissioner rewound the window: the hole was already started once.
     expect(teeCtaHole(rs(3, "playing", [1, 2, 3, 4]), 4)).toBeNull();
+  });
+
+  it("a teammate's tee-off keeps a phone with an unsaved score on its hole (finding: second phone jumps mid-entry)", () => {
+    const lines = [{ strokes: 4 }, { strokes: null }, { strokes: null }];
+    // Phone B typed 5 on hole 1 (saved 4) and hasn't saved; phone A tees off hole 2.
+    const unsaved = hasUnsavedDraft({ 1: 5 }, lines, 1);
+    expect(unsaved).toBe(true);
+    expect(pinAfterTeamMove({ from: 1, to: 2, pin: null, wasSummary: false, finished: false, unsavedOnFrom: unsaved })).toBe(1);
+    // A stepper moved back to the saved value, or no draft at all: follow the team.
+    expect(hasUnsavedDraft({ 1: 4 }, lines, 1)).toBe(false);
+    expect(hasUnsavedDraft({}, lines, 2)).toBe(false);
+    expect(hasUnsavedDraft({ 2: 4 }, lines, 2)).toBe(true);
+    expect(pinAfterTeamMove({ from: 1, to: 2, pin: null, wasSummary: false, finished: false, unsavedOnFrom: false })).toBeNull();
+    // The round finished on another phone while hole 18 had an unsaved score: stay on 18.
+    expect(pinAfterTeamMove({ from: 18, to: 18, pin: null, wasSummary: false, finished: true, unsavedOnFrom: true })).toBe(18);
+    // Nothing to protect behind the summary.
+    expect(pinAfterTeamMove({ from: 18, to: 18, pin: null, wasSummary: true, finished: true, unsavedOnFrom: true })).toBeNull();
+    // A hole opened from the strip stays pinned until the team reaches it.
+    expect(pinAfterTeamMove({ from: 5, to: 6, pin: 3, wasSummary: false, finished: false, unsavedOnFrom: false })).toBe(3);
+    expect(pinAfterTeamMove({ from: 5, to: 6, pin: 6, wasSummary: false, finished: false, unsavedOnFrom: false })).toBeNull();
+    expect(pinAfterTeamMove({ from: 18, to: 18, pin: 18, wasSummary: false, finished: true, unsavedOnFrom: true })).toBe(18);
+  });
+
+  it("tells the user when another phone moved the team", () => {
+    expect(teamMoveNotice({ to: 2, finished: false, keptHole: 1, keptValue: 5 })).toMatchObject({
+      title: "Hole 2 teed off on another phone",
+      message: expect.stringContaining("Your 5 on hole 1 isn't saved yet"),
+    });
+    expect(teamMoveNotice({ to: 2, finished: false, keptHole: null, keptValue: null })).toMatchObject({ title: "On the tee: hole 2" });
+    expect(teamMoveNotice({ to: 18, finished: true, keptHole: 18, keptValue: 6 })?.title).toBe("Round finished on another phone");
+    expect(teamMoveNotice({ to: 18, finished: true, keptHole: null, keptValue: null })).toBeNull();
   });
 
   it("next action: tee off N+1, Round complete on 18, nothing before tee off / after finishing", () => {
@@ -221,6 +257,16 @@ describe("drinks", () => {
     expect(drinkFeedback("shot", undefined, "Al", 3)).toMatchObject({ mulligan: true, ghost: false });
   });
 
+  it("a burst of drink logs shares one undo toast: count + latest, Undo pops the latest (finding: undo toasts cover drink buttons)", () => {
+    const d = (name: string, value = 1, type: "drink" | "shotgun" | "shot" = "drink") => ({ opId: `op-${name}`, drinkId: `d-${name}`, name, type, value, hole: 6 });
+    expect(drinkBurstCopy([d("Nick")])).toMatchObject({ title: "Drink logged", message: "Nick · hole 6 · −1 stroke" });
+    expect(drinkBurstCopy([d("Nick"), d("Dave"), d("Mike")])).toMatchObject({ title: "3 drinks logged", message: "Last: Mike 🍺 −1" });
+    expect(drinkBurstCopy([d("Tom"), d("Jimmy"), d("Rob", 2)])).toMatchObject({ emoji: "👻", title: "3 drinks logged", message: "Last: Rob 👻 −2" });
+    expect(drinkBurstCopy([d("Tom"), d("Rob", 1, "shotgun")]).message).toBe("Last: Rob 🔫 −1");
+    expect(drinkUndoneCopy([d("Tom"), d("Jimmy")])).toMatchObject({ title: "Drink undone", message: "2 still logged · last: Jimmy" });
+    expect(drinkUndoneCopy([])).toMatchObject({ title: "Drink undone", message: "Pretend it never happened." });
+  });
+
   it("no-window roasts", () => {
     expect(noWindowMessage("complete", "x")).toMatch(/Round's over/);
     expect(noWindowMessage("not_started", "x").length).toBeGreaterThan(10);
@@ -297,14 +343,28 @@ describe("advance confirm", () => {
     expect(c.body).toContain("net 2");
   });
 
-  it("warns when the hole has no score", () => {
-    const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(null, undefined, 4), credit: 0 });
-    expect(c).toMatchObject({ saveFirst: null, tone: "hazard", title: "No score on hole 5!", confirmLabel: "Tee off 6 anyway" });
+  it("an untouched par default is what gets saved; skipping is the secondary action (finding: par default not saved)", () => {
+    const c = advanceConfirm({ fromHole: 3, to: 4, draft: scoreDraft(null, undefined, 4), credit: 1 });
+    expect(c).toMatchObject({
+      saveFirst: 4,
+      tone: "primary",
+      title: "Par 4 on hole 3?",
+      confirmLabel: "Save 4 & tee off hole 4",
+      skipLabel: "Tee off without a score",
+    });
+    expect(c.body).toContain("net 3");
+    // Finishing on 18 with the par default.
+    const f = advanceConfirm({ fromHole: 18, to: "complete", draft: scoreDraft(null, undefined, 5), credit: 0, otherMissing: [7, 18] });
+    expect(f).toMatchObject({ saveFirst: 5, tone: "danger", confirmLabel: "Save 5 & finish", skipLabel: "Finish without a score" });
+    expect(f.body).toContain("Still no score on hole 7.");
+    // A touched draft on an unscored hole can also be skipped; a change to a saved score can't.
+    expect(advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(null, 3, 4), credit: 0 }).skipLabel).toBe("Tee off without a score");
+    expect(advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(5, 3, 4), credit: 0 }).skipLabel).toBeNull();
   });
 
   it("plain confirm when saved", () => {
     const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(4, undefined, 4), credit: 2 });
-    expect(c).toMatchObject({ saveFirst: null, tone: "primary", title: "On the tee: hole 6?", confirmLabel: "Tee off 6" });
+    expect(c).toMatchObject({ saveFirst: null, skipLabel: null, tone: "primary", title: "On the tee: hole 6?", confirmLabel: "Tee off 6" });
     expect(c.body).toContain("net 2");
   });
 

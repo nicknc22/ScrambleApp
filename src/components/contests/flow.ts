@@ -2,7 +2,7 @@
 // tests/ui/contests-flow.test.ts.
 //
 // Long drive: a small GPS state machine (measure -> weak/error -> retry -> after 3 failed tries
-// the best weak reading may go to the commissioner), then distance/rank/photo/submit.
+// the latest weak reading may go to the commissioner), then distance/rank/photo/submit.
 // Closest to pin: a 3-step wizard (photo -> distance -> marker), then submit.
 import type { ContestEntry, Hole, Player, TeamRoundState, TripSettings, TripStatus, UUID } from "@/lib/types";
 import type { ContestHoleSummary, Derived, RankPreview } from "@/lib/engine/types";
@@ -27,8 +27,13 @@ export interface GpsFlow {
   attempts: number;
   /** Attempts that ended weak, or with no fix at all (permission problems don't count). */
   failures: number;
-  /** Most accurate reading across every attempt. */
-  best: GeoReading | null;
+  /**
+   * Reading the latest attempt ended with (kept through a later attempt that got none). This is
+   * what "Submit for commissioner review" sends: the player may have moved between attempts, so
+   * an older, more accurate reading can be from the wrong spot. "Measure again" after a fix
+   * starts over (new spot).
+   */
+  last: GeoReading | null;
   /** Best reading of the attempt in progress (live "±8 m" display). */
   live: GeoReading | null;
   error: GeoErrorCode | null;
@@ -50,7 +55,7 @@ export const GPS_INITIAL: GpsFlow = {
   phase: "idle",
   attempts: 0,
   failures: 0,
-  best: null,
+  last: null,
   live: null,
   error: null,
   fix: null,
@@ -70,19 +75,21 @@ export function isAccurate(reading: Pick<GeoReading, "accuracy">, limitM: number
 
 export function gpsReducer(s: GpsFlow, ev: GpsEvent): GpsFlow {
   switch (ev.type) {
-    case "start":
+    case "start": {
       if (s.phase === "measuring") return s;
-      return { ...s, phase: "measuring", attempts: s.attempts + 1, live: null, error: null, fix: null, lowAccuracy: false };
+      // "Not at your ball yet? Measure again": a new spot, so earlier readings and tries don't count.
+      const fresh = s.phase === "fixed" ? { last: null, failures: 0 } : {};
+      return { ...s, ...fresh, phase: "measuring", attempts: s.attempts + 1, live: null, error: null, fix: null, lowAccuracy: false };
+    }
     case "progress":
       if (s.phase !== "measuring") return s;
       return { ...s, live: moreAccurate(s.live, ev.reading) };
     case "result": {
       if (s.phase !== "measuring") return s;
-      const best = moreAccurate(s.best, ev.reading);
       if (isAccurate(ev.reading, ev.limitM)) {
-        return { ...s, phase: "fixed", best, live: ev.reading, fix: ev.reading, lowAccuracy: false, error: null };
+        return { ...s, phase: "fixed", last: ev.reading, live: ev.reading, fix: ev.reading, lowAccuracy: false, error: null };
       }
-      return { ...s, phase: "weak", best, live: ev.reading, failures: s.failures + 1, error: null };
+      return { ...s, phase: "weak", last: ev.reading, live: ev.reading, failures: s.failures + 1, error: null };
     }
     case "error":
       if (s.phase !== "measuring") return s;
@@ -96,15 +103,15 @@ export function gpsReducer(s: GpsFlow, ev: GpsEvent): GpsFlow {
       };
     case "accept_weak":
       if (!canAcceptWeak(s)) return s;
-      return { ...s, phase: "fixed", fix: s.best, lowAccuracy: true };
+      return { ...s, phase: "fixed", fix: s.last, lowAccuracy: true };
     case "reset":
       return GPS_INITIAL;
   }
 }
 
-/** After MAX_GPS_TRIES failed tries with at least one reading, offer "Submit for commissioner review". */
+/** After MAX_GPS_TRIES failed tries with a reading to send, offer "Submit for commissioner review". */
 export function canAcceptWeak(s: GpsFlow): boolean {
-  return (s.phase === "weak" || s.phase === "error") && s.failures >= MAX_GPS_TRIES && s.best !== null && s.error !== "permission_denied";
+  return (s.phase === "weak" || s.phase === "error") && s.failures >= MAX_GPS_TRIES && s.last !== null && s.error !== "permission_denied";
 }
 
 /** Tries left before the review fallback shows up. */
@@ -150,13 +157,22 @@ export interface LdVerdict {
   reason: string | null;
 }
 
-export function ldVerdict(yards: number, lowAccuracy: boolean, settings: Pick<TripSettings, "ld_min_yd" | "ld_max_yd">): LdVerdict {
+export function ldVerdict(
+  yards: number,
+  lowAccuracy: boolean,
+  settings: Pick<TripSettings, "ld_min_yd" | "ld_max_yd">,
+  /** Measured from the dev GPS simulator on a real trip (the reducer flags it for review). */
+  simulated = false,
+): LdVerdict {
   if (!Number.isFinite(yards) || yards > LD_HARD_MAX_YD) {
     return {
       blocked: true,
       review: false,
       reason: `${Number.isFinite(yards) ? yards : "That"} yd? You're on the wrong hole (or the wrong planet). Check the tee point or move closer to your ball.`,
     };
+  }
+  if (simulated) {
+    return { blocked: false, review: true, reason: "Simulated GPS (dev tool): this one goes to the commissioner. Turn the simulator off for real drives." };
   }
   const range = ldRange(yards, settings);
   if (range !== "ok") {
@@ -306,7 +322,7 @@ export interface LdSubmitArgs {
   hole: number;
   playerId: UUID;
   yards: number;
-  fix: Pick<GeoReading, "lat" | "lng" | "accuracy">;
+  fix: Pick<GeoReading, "lat" | "lng" | "accuracy" | "simulated">;
   lowAccuracy: boolean;
   photoPath: string;
 }
@@ -325,6 +341,8 @@ export function ldSubmitInput(a: LdSubmitArgs): OpInput {
     gps_accuracy_m: Number.isFinite(a.fix.accuracy) ? Math.round(a.fix.accuracy * 10) / 10 : null,
     low_accuracy: a.lowAccuracy,
     photo_path: a.photoPath,
+    // The position came from the dev GPS simulator: the server sends it to the commissioner.
+    ...(a.fix.simulated === true ? { simulated: true } : {}),
   };
 }
 
@@ -336,6 +354,15 @@ export interface CtpSubmitArgs {
   inches: number;
   angle: number;
   photoPath: string | null;
+}
+
+/**
+ * Photo for a closest-to-pin (re-)entry: a newly taken photo, else the entry's current one. An
+ * edit without a new photo keeps the photo, so the AI judge's verdict (and its red flag) carries
+ * over or gets re-run against the new distance instead of vanishing.
+ */
+export function ctpPhotoPath(uploaded: string | null, previous: Pick<ContestEntry, "photo_path"> | null | undefined): string | null {
+  return uploaded ?? previous?.photo_path ?? null;
 }
 
 export function ctpSubmitInput(a: CtpSubmitArgs): OpInput {

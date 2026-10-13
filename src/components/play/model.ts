@@ -74,6 +74,59 @@ export function isEditingOtherHole(currentHole: number, pinnedHole: number | nul
   return pinnedHole !== null && pinnedHole !== currentHole;
 }
 
+/** The user changed the stepper on `hole` and hasn't saved that value (the strip's ✎). */
+export function hasUnsavedDraft(drafts: Readonly<Record<number, number>>, lines: readonly Pick<TeamHoleLine, "strokes">[], hole: number): boolean {
+  const draft = drafts[hole];
+  const line = lines[hole - 1];
+  return draft !== undefined && line !== undefined && line.strokes !== draft;
+}
+
+/**
+ * The pinned hole after the team's current hole (or round status) changed, usually because a
+ * teammate's phone teed off the next hole. Reaching the pinned hole un-pins (follow again). A phone
+ * following the team with an unsaved stepper change on the hole it was showing stays on that hole,
+ * so its Save never lands on a hole nobody has played yet.
+ */
+export function pinAfterTeamMove(opts: {
+  /** Team's current hole before / after the change. */
+  from: number;
+  to: number;
+  pin: number | null;
+  /** The round summary was on screen before the change (nothing to protect). */
+  wasSummary: boolean;
+  finished: boolean;
+  /** hasUnsavedDraft(..., from). */
+  unsavedOnFrom: boolean;
+}): number | null {
+  const { from, to, pin, finished } = opts;
+  if (pin !== null) return pin === to && !finished ? null : pin;
+  if (!opts.wasSummary && opts.unsavedOnFrom && (from !== to || finished)) return from;
+  return null;
+}
+
+/** Toast copy when the team's hole moved without this phone doing it (another phone teed off / finished). */
+export function teamMoveNotice(opts: {
+  to: number;
+  finished: boolean;
+  /** Hole this phone stays on with an unsaved stepper value, if any. */
+  keptHole: number | null;
+  keptValue: number | null;
+}): { emoji: string; title: string; message: string } | null {
+  const { to, finished, keptHole, keptValue } = opts;
+  if (keptHole !== null && keptValue !== null) {
+    return {
+      emoji: "✋",
+      title: finished ? "Round finished on another phone" : `Hole ${to} teed off on another phone`,
+      message: `Your ${keptValue} on hole ${keptHole} isn't saved yet. Save it or drop it, then head on.`,
+    };
+  }
+  if (finished) return null;
+  return { emoji: "⛳", title: `On the tee: hole ${to}`, message: `Teed off on another phone. Drinks now count on hole ${to}.` };
+}
+
+/** After the screen changed holes under the user's thumb, Save ignores taps for this long. */
+export const HOLE_MOVE_GUARD_MS = 1500;
+
 /** Hole the big "On the tee" CTA opens while viewing `viewing`, or null when there is nothing to tee off. */
 export function teeCtaHole(rs: RoundLike | null | undefined, viewing: number): number | null {
   if (rs?.status === "complete") return null;
@@ -309,6 +362,42 @@ export function drinkFeedback(type: DrinkType, value: number | undefined, player
   return { ghost, mulligan, emoji: ghost ? "👻" : DRINK_EMOJI[type], title, message };
 }
 
+/** One drink in a team's logging burst (the drinks the merged undo toast covers, newest last). */
+export interface BurstDrink {
+  opId: UUID;
+  drinkId: UUID;
+  name: string;
+  type: DrinkType;
+  /** Derived value right after logging (2 = ghost beer). */
+  value: number | undefined;
+  hole: number;
+}
+
+export interface ToastCopy {
+  emoji: string;
+  title: string;
+  message: string;
+}
+
+/**
+ * Copy for the single, compact undo toast a burst of drink logs shares: the count plus the latest
+ * drink ("3 drinks logged" / "Last: Rob 👻 −2"). Its Undo removes the latest drink.
+ */
+export function drinkBurstCopy(burst: readonly BurstDrink[]): ToastCopy {
+  const last = burst[burst.length - 1];
+  if (!last) return { emoji: "🍺", title: "Drinks logged", message: "" };
+  const fb = drinkFeedback(last.type, last.value, last.name, last.hole);
+  if (burst.length === 1) return { emoji: fb.emoji, title: fb.title, message: fb.message };
+  return { emoji: fb.emoji, title: `${burst.length} drinks logged`, message: `Last: ${last.name} ${fb.ghost ? "👻" : DRINK_EMOJI[last.type]} −${last.value ?? 1}` };
+}
+
+/** Copy after Undo removed the latest drink of a burst; `remaining` are the burst's other drinks. */
+export function drinkUndoneCopy(remaining: readonly BurstDrink[]): ToastCopy {
+  const last = remaining[remaining.length - 1];
+  if (!last) return { emoji: "↩️", title: "Drink undone", message: "Pretend it never happened." };
+  return { emoji: "↩️", title: "Drink undone", message: `${remaining.length} still logged · last: ${last.name}` };
+}
+
 export function ghostFanfareCopy(playerName: string, value: number): { title: string; subtitle: string } {
   return {
     title: "Ghost beer",
@@ -474,13 +563,17 @@ export interface AdvanceConfirm {
   emoji: string;
   confirmLabel: string;
   tone: "primary" | "hazard" | "danger";
-  /** Save the stepper value on `fromHole` before advancing. */
+  /** Save the stepper value on `fromHole` before advancing (the primary button). */
   saveFirst: number | null;
+  /** Secondary button: advance without a score (only while the hole has none). null = not offered. */
+  skipLabel: string | null;
 }
 
 /**
  * Copy for the advance confirm. `draft` is the scoreDraft of the hole being left (the team's
- * current hole). A touched unsaved stepper is saved first; an unscored, untouched hole gets a warning.
+ * current hole). Whatever the stepper shows is what the primary button saves, including the
+ * untouched par default ("Par 4 on hole 3?" -> "Save 4 & tee off hole 4"); a hole with no score
+ * also offers "Tee off without a score".
  */
 export function advanceConfirm(opts: {
   fromHole: number;
@@ -501,7 +594,9 @@ export function advanceConfirm(opts: {
     ? " Hole 18's drink window closes. Drinks after this are just for fun."
     : ` Drinks start counting on hole ${to}.`;
 
-  if (draft.touched && draft.dirty) {
+  const skipLabel = draft.saved === null ? (finishing ? "Finish without a score" : "Tee off without a score") : null;
+
+  if (draft.dirty && draft.touched) {
     return {
       title: `Save ${draft.value} on hole ${fromHole} and ${target}?`,
       body: `Hole ${fromHole}: ${draft.value} strokes, net ${draft.value - credit}.${closeNote}${missingNote}`,
@@ -509,25 +604,29 @@ export function advanceConfirm(opts: {
       confirmLabel: finishing ? `Save ${draft.value} & finish` : `Save ${draft.value} & tee off ${to}`,
       tone: finishing ? "danger" : "primary",
       saveFirst: draft.value,
+      skipLabel,
     };
   }
-  if (draft.saved === null) {
+  if (draft.dirty) {
+    // Untouched stepper on an unscored hole: it shows par, and par is what gets saved.
     return {
-      title: `No score on hole ${fromHole}!`,
-      body: `${finishing ? "Finish the round" : `Tee off hole ${to}`} anyway? You can fix hole ${fromHole} from the scorecard later.${missingNote}`,
-      emoji: "😬",
-      confirmLabel: finishing ? "Finish anyway" : `Tee off ${to} anyway`,
-      tone: "hazard",
-      saveFirst: null,
+      title: `Par ${draft.value} on hole ${fromHole}?`,
+      body: `Nobody touched the score, so it's ${draft.value} (net ${draft.value - credit}).${closeNote}${missingNote}`,
+      emoji: finishing ? "🏁" : "⛳",
+      confirmLabel: finishing ? `Save ${draft.value} & finish` : `Save ${draft.value} & tee off hole ${to}`,
+      tone: finishing ? "danger" : "primary",
+      saveFirst: draft.value,
+      skipLabel,
     };
   }
   return {
     title: finishing ? "Round complete?" : `${go}?`,
-    body: `Hole ${fromHole} is locked in at ${draft.saved} (net ${draft.saved - credit}).${closeNote}${missingNote}`,
+    body: `Hole ${fromHole} is locked in at ${draft.value} (net ${draft.value - credit}).${closeNote}${missingNote}`,
     emoji: finishing ? "🏁" : "⛳",
     confirmLabel: finishing ? "Round complete" : `Tee off ${to}`,
     tone: finishing ? "danger" : "primary",
     saveFirst: null,
+    skipLabel: null,
   };
 }
 

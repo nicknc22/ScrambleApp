@@ -1,15 +1,16 @@
 "use client";
-// The outbox sync worker. One flush pass:
-//   a) send pending ops in seq order (batches of <= 100) up to the first op that references a
-//      photo still waiting to upload (later ops may depend on it: a drink's undo, a mulligan
-//      earned by a shotgun, ...), so scores never queue behind a slow upload,
-//   b) upload pending photo blobs one by one (POST /api/t/<code>/upload?path=...),
-//   c) send the ops that were waiting on those photos — the photo always lands first, unless
-//      it failed to upload PHOTO_BLOCK_MAX_FAILURES times (then the op goes without it),
-//   applied/duplicate -> dropped from the outbox; rejected -> dropped and surfaced;
-//   network error / 5xx / timeout -> keep everything, mark offline, exponential backoff;
-//   on success adopt the response snapshot (the store re-applies whatever is still pending).
-// The worker is single-flight: a flush requested while one is running re-runs right after it.
+// The outbox sync workers. Two independent lanes, each a single-flight SyncWorker with its own
+// backoff, so a slow photo never holds up a score:
+//   ops (flushOutbox): send every pending op in seq order (batches of <= 100). Ops never wait for
+//      photos: an op referencing a photo carries its deterministic storage path and the image
+//      backfills (other phones show "Uploading…" until it lands).
+//      applied/duplicate -> dropped from the outbox; rejected -> dropped and surfaced;
+//      network error / 5xx / timeout -> keep everything, mark offline, exponential backoff;
+//      on success adopt the response snapshot (the store re-applies whatever is still pending).
+//   photos (uploadPhotos): upload pending blobs one by one (POST /api/t/<code>/upload?path=...).
+//      A failed or timed-out upload is retried with backoff but never marks the phone offline:
+//      "online" only reflects op sync and state fetches.
+// A flush requested while a pass is running re-runs right after it.
 // It never drops an op on an ambiguous failure: only an explicit per-op server rejection or a
 // 400/422 JSON answer for that single op (a poison op) removes it.
 import type { Snapshot, UUID } from "../types";
@@ -18,8 +19,6 @@ import type { Op, OpResult, RejectCode, SyncResponse } from "../ops";
 export const SYNC_TIMEOUT_MS = 15_000;
 export const UPLOAD_TIMEOUT_MS = 60_000;
 export const MAX_BATCH = 100;
-/** An op stops waiting for its photo after this many failed upload attempts (photos never block scores for long). */
-export const PHOTO_BLOCK_MAX_FAILURES = 3;
 /** A photo the server permanently refuses (400/413/415/422) is dropped after this many attempts. */
 export const PHOTO_MAX_PERMANENT_FAILURES = 3;
 /** keepalive requests must stay under 64 KiB. */
@@ -163,21 +162,20 @@ function reasonFrom(res: Extract<HttpResult, { kind: "http" }>): string {
 
 // ---------------------------------------------------------------- one flush pass
 
-/** What the sync worker needs from the store. */
-export interface SyncHost {
+interface HostBase {
   readonly code: string;
   fetch: FetchLike;
   timers: Timers;
-  syncTimeoutMs?: number;
-  uploadTimeoutMs?: number;
   /** Resolves once the outbox has been restored from IndexedDB (or gave up waiting). */
   ready(): Promise<void>;
-  pendingBlobs(): PendingBlob[];
+  hasPending(): boolean;
+}
+
+/** What the op sync lane needs from the store. */
+export interface SyncHost extends HostBase {
+  syncTimeoutMs?: number;
   /** In seq order. */
   pendingOps(): PendingOp[];
-  hasPending(): boolean;
-  onUploaded(path: string): void;
-  onUploadFailed(path: string, permanent: boolean, message: string): void;
   onSending(ids: UUID[]): void;
   onSendFailed(ids: UUID[], message: string): void;
   /** Server answered: drop acked ops, surface rejections, adopt the snapshot (if fresher). */
@@ -189,10 +187,17 @@ export interface SyncHost {
   setSyncing(on: boolean): void;
 }
 
+/** What the photo upload lane needs from the store. */
+export interface UploadHost extends HostBase {
+  uploadTimeoutMs?: number;
+  pendingBlobs(): PendingBlob[];
+  onUploaded(path: string): void;
+  onUploadFailed(path: string, permanent: boolean, message: string): void;
+}
+
 export interface FlushOptions {
-  /** Use fetch keepalive (page is being hidden); skips photo uploads. */
+  /** Use fetch keepalive (page is being hidden). */
   keepalive?: boolean;
-  skipUploads?: boolean;
 }
 
 export interface FlushResult {
@@ -212,26 +217,6 @@ function uploadUrl(code: string, path: string): string {
 
 function syncUrl(code: string): string {
   return `/api/t/${encodeURIComponent(code)}/sync`;
-}
-
-/**
- * The ops that may be sent now: the seq-ordered prefix before the first op still waiting for a
- * photo. `strict` (before this pass tried the uploads): any pending photo blocks. Otherwise a
- * photo stops blocking after PHOTO_BLOCK_MAX_FAILURES failed upload attempts, so a photo that
- * won't upload can delay its op (and the ops after it) but never strand them.
- */
-export function sendablePrefix(ops: PendingOp[], blobs: PendingBlob[], strict = false): PendingOp[] {
-  const waiting = new Map(blobs.map((b) => [b.path, b]));
-  const out: PendingOp[] = [];
-  for (const p of ops) {
-    const blocked = p.photo_paths.some((path) => {
-      const b = waiting.get(path);
-      return !!b && (strict || b.failures < PHOTO_BLOCK_MAX_FAILURES);
-    });
-    if (blocked) break;
-    out.push(p);
-  }
-  return out;
 }
 
 type BatchOutcome = { kind: "ok"; acked: number } | { kind: "failed"; error: string };
@@ -308,12 +293,7 @@ async function sendOps(host: SyncHost, ops: PendingOp[], keepalive: boolean, res
   return true;
 }
 
-/**
- * One flush pass. Never throws.
- *   a) ops that don't wait on any photo (scores never queue behind a slow upload),
- *   b) photo uploads, one by one,
- *   c) the ops that were waiting on those photos (seq order is preserved throughout).
- */
+/** One op sync pass: every pending op, in seq order. Never throws. */
 export async function flushOutbox(host: SyncHost, opts: FlushOptions = {}): Promise<FlushResult> {
   const result: FlushResult = { failed: false, uploaded: 0, acked: 0, error: null };
   try {
@@ -321,14 +301,29 @@ export async function flushOutbox(host: SyncHost, opts: FlushOptions = {}): Prom
   } catch {
     /* proceed with what we have */
   }
-  const keepalive = !!opts.keepalive;
+  // Ops dispatched while a request was out go in the same pass (each op at most once per pass;
+  // one the server didn't answer stays pending for the next).
+  const tried = new Set<UUID>();
+  for (let round = 0; round < 10; round++) {
+    const ops = host.pendingOps().filter((p) => !tried.has(p.id));
+    if (ops.length === 0) break;
+    for (const p of ops) tried.add(p.id);
+    if (!(await sendOps(host, ops, !!opts.keepalive, result))) break;
+  }
+  return result;
+}
 
-  // a) Everything before the first op referencing a not-yet-uploaded photo.
-  const early = sendablePrefix(host.pendingOps(), host.pendingBlobs(), true);
-  if (early.length > 0 && !(await sendOps(host, early, keepalive, result))) return result;
-  if (opts.skipUploads || keepalive) return result;
-
-  // b) Photos, one at a time.
+/**
+ * One photo upload pass: pending blobs one at a time. Never throws and never reports the
+ * network as down (a weak uplink that can't push a photo can still sync scores).
+ */
+export async function uploadPhotos(host: UploadHost): Promise<FlushResult> {
+  const result: FlushResult = { failed: false, uploaded: 0, acked: 0, error: null };
+  try {
+    await host.ready();
+  } catch {
+    /* proceed with what we have */
+  }
   for (const b of host.pendingBlobs()) {
     const res = await httpRequest(
       host.fetch,
@@ -342,28 +337,21 @@ export async function flushOutbox(host: SyncHost, opts: FlushOptions = {}): Prom
       host.timers,
     );
     if (res.kind === "http" && res.ok) {
-      host.onNetwork(true);
       host.onUploaded(b.path);
       result.uploaded++;
       continue;
     }
     if (res.kind === "http" && PERMANENT_UPLOAD_STATUSES.has(res.status)) {
-      host.onNetwork(true);
       host.onUploadFailed(b.path, true, reasonFrom(res));
       continue;
     }
     const error = res.kind === "network" ? res.error : `HTTP ${res.status}`;
     host.onUploadFailed(b.path, false, error);
-    host.onNetwork(false, error);
     result.failed = true;
     result.error = error;
     // The rest would most likely fail too.
     break;
   }
-
-  // c) Ops whose photos are up now (or that stopped waiting for a stuck photo).
-  const late = sendablePrefix(host.pendingOps(), host.pendingBlobs(), false);
-  if (late.length > 0) await sendOps(host, late, keepalive, result);
   return result;
 }
 
@@ -378,7 +366,17 @@ export interface DocumentLike extends EventTargetLike {
   readonly visibilityState?: string;
 }
 
+/** What a SyncWorker needs to schedule passes. */
+export interface WorkerHost {
+  hasPending(): boolean;
+  setSyncing?(on: boolean): void;
+}
+
 export interface SyncWorkerOptions {
+  /** One pass (flushOutbox for ops, uploadPhotos for photos). */
+  run: (opts: FlushOptions) => Promise<FlushResult>;
+  /** When the page is hidden, push what's pending with fetch keepalive (op sync only). */
+  keepaliveOnHide?: boolean;
   timers?: Timers;
   random?: () => number;
   win?: EventTargetLike | null;
@@ -390,10 +388,10 @@ export interface SyncWorkerOptions {
 }
 
 /**
- * Schedules flushes: on dispatch (debounced), window "online", page becoming visible, a 15 s
+ * Schedules passes: on dispatch (debounced), window "online", page becoming visible, a 15 s
  * interval while anything is pending, backoff retries after failures, and manual flush().
- * When the page is hidden it fires a keepalive flush so ops logged right before locking the
- * phone still reach the server.
+ * With keepaliveOnHide, hiding the page fires a keepalive pass so ops logged right before
+ * locking the phone still reach the server.
  */
 export class SyncWorker {
   private readonly timers: Timers;
@@ -413,8 +411,8 @@ export class SyncWorker {
   lastResult: FlushResult | null = null;
 
   constructor(
-    private readonly host: SyncHost,
-    private readonly opts: SyncWorkerOptions = {},
+    private readonly host: WorkerHost,
+    private readonly opts: SyncWorkerOptions,
   ) {
     this.timers = opts.timers ?? realTimers;
     this.random = opts.random ?? Math.random;
@@ -437,8 +435,8 @@ export class SyncWorker {
   private readonly onVisibility = () => {
     const state = this.doc?.visibilityState;
     if (state === "hidden") {
-      // Last chance before iOS freezes the page: push ready ops with keepalive (no photos).
-      if (!this.inflight && this.host.pendingOps().length > 0) void this.flush({ keepalive: true });
+      // Last chance before iOS freezes the page: push pending ops with keepalive.
+      if (this.opts.keepaliveOnHide && !this.inflight && this.host.hasPending()) void this.flush({ keepalive: true });
     } else if (state === "visible") {
       void this.flush();
     }
@@ -497,14 +495,14 @@ export class SyncWorker {
   private async loop(first: FlushOptions): Promise<FlushResult> {
     let opts = first;
     let last: FlushResult = { failed: false, uploaded: 0, acked: 0, error: null };
-    this.host.setSyncing(true);
+    this.host.setSyncing?.(true);
     try {
       let rounds = 0;
       do {
         this.rerun = false;
         if (!this.host.hasPending()) break;
         try {
-          last = await flushOutbox(this.host, opts);
+          last = await this.opts.run(opts);
         } catch (e) {
           last = { failed: true, uploaded: 0, acked: 0, error: errorMessage(e) };
         }
@@ -512,7 +510,7 @@ export class SyncWorker {
         if (last.failed) break;
       } while (this.rerun && ++rounds < 25);
     } finally {
-      this.host.setSyncing(false);
+      this.host.setSyncing?.(false);
     }
     this.afterPass(last);
     return last;
