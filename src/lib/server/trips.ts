@@ -4,10 +4,11 @@ import { deriveId, newId, newTripCode } from "@/lib/ids";
 import { DEFAULT_SETTINGS, type Hole, type Snapshot, type SnapshotMeta, type Trip, type UUID } from "@/lib/types";
 import type { Write } from "@/lib/reducer";
 import { pgErrorCode, UNIQUE_VIOLATION, type Db } from "./db";
-import { aiEnabled, pushEnabled, vapidPublicKey } from "./env";
+import { aiEnabled } from "./env";
 import { findTripByCode, insertTrip, persistWrites, readTripState } from "./repo";
 import { realtimeMeta } from "./realtime";
 import { photoBaseUrl } from "./storage";
+import { getVapidKeys } from "./vapid";
 
 export const DEFAULT_TRIP_NAME = "Jack Frost Scramble";
 export const DEFAULT_APP_NAME = "Scramble";
@@ -114,15 +115,36 @@ export async function createTrip(db: Db, input: CreateTripInput): Promise<Trip> 
   }
 }
 
-/** Runtime config sent with every snapshot. */
-export function snapshotMeta(tripId: UUID, serverTime: string = new Date().toISOString()): SnapshotMeta {
+/**
+ * The VAPID public key phones subscribe with; null = push off (PUSH_DISABLED=1). A key-store
+ * failure turns push off for this one response instead of failing the read. Only the public half
+ * of the pair ever goes into a snapshot. Call with the root db (not inside a transaction).
+ */
+let lastPushKeyErrorLog = 0;
+
+export async function pushPublicKey(db: Db): Promise<string | null> {
+  try {
+    return (await getVapidKeys(db))?.publicKey ?? null;
+  } catch (e) {
+    // Every poll would hit this: log the full error at most once a minute.
+    const now = Date.now();
+    if (now - lastPushKeyErrorLog > 60_000) {
+      lastPushKeyErrorLog = now;
+      console.error("[push] couldn't load the VAPID keys; push is off for these responses", e);
+    }
+    return null;
+  }
+}
+
+/** Runtime config sent with every snapshot. `vapidPublicKey` comes from pushPublicKey. */
+export function snapshotMeta(tripId: UUID, vapidPublicKey: string | null, serverTime: string = new Date().toISOString()): SnapshotMeta {
   return {
     server_time: serverTime,
     photo_base_url: photoBaseUrl(),
     realtime: realtimeMeta(tripId),
-    vapid_public_key: pushEnabled() ? (vapidPublicKey() ?? null) : null,
+    vapid_public_key: vapidPublicKey,
     ai_enabled: aiEnabled(),
-    push_enabled: pushEnabled(),
+    push_enabled: vapidPublicKey !== null,
   };
 }
 
@@ -132,9 +154,10 @@ export function snapshotMeta(tripId: UUID, serverTime: string = new Date().toISO
  * (clients keep the snapshot with the latest server_time).
  */
 export async function buildSnapshot(db: Db, trip: Pick<Trip, "id">): Promise<Snapshot> {
+  const vapidPublicKey = await pushPublicKey(db);
   const serverTime = new Date().toISOString();
   const state = await readTripState(db, trip.id);
-  return { state, meta: snapshotMeta(trip.id, serverTime) };
+  return { state, meta: snapshotMeta(trip.id, vapidPublicKey, serverTime) };
 }
 
 /** Snapshot by join code; null when there's no such trip. */

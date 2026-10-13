@@ -44,16 +44,16 @@ function SettingsBody({ onSwitchPlayer }: { onSwitchPlayer: () => void }) {
   const [pushBusy, setPushBusy] = useState(false);
   const [pushNote, setPushNote] = useState<string | null>(null);
   const [subscribed, setSubscribed] = useState(false);
+  const vapidKey = s.snapshot?.meta.vapid_public_key ?? null;
   useEffect(() => {
     let alive = true;
-    void hasPushSubscription().then((v) => {
+    void hasPushSubscription(vapidKey).then((v) => {
       if (alive) setSubscribed(v);
     });
     return () => {
       alive = false;
     };
-  }, []);
-  const vapidKey = s.snapshot?.meta.vapid_public_key ?? null;
+  }, [vapidKey]);
   const pushOnServer = s.snapshot?.meta.push_enabled ?? false;
   const supported = pushSupported();
   const permission = pushPermission();

@@ -157,11 +157,18 @@ export async function disablePush(opts?: { code?: string; playerId?: string }): 
 }
 
 /** Whether this device currently has a push subscription. */
-export async function hasPushSubscription(): Promise<boolean> {
+/**
+ * This phone has a push subscription — for the server's CURRENT key when one is given. A
+ * subscription made with an old key (the server's keys changed) gets nothing, so it counts as
+ * "not subscribed" and Settings offers Enable again (enablePush re-subscribes with the new key).
+ */
+export async function hasPushSubscription(vapidPublicKey?: string | null): Promise<boolean> {
   if (!pushSupported()) return false;
   try {
     const reg = await navigator.serviceWorker.getRegistration();
-    return !!(await reg?.pushManager.getSubscription());
+    const sub = await reg?.pushManager.getSubscription();
+    if (!sub) return false;
+    return vapidPublicKey ? sameKey(sub, urlBase64ToUint8Array(vapidPublicKey)) : true;
   } catch {
     return false;
   }

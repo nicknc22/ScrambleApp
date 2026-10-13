@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanString, createTestDb, getDb, normalizeRow, normalizeValue, setDbForTests, type DbConnection } from "@/lib/server/db";
-import { ABUSE_LIMITS_SQL, embeddedMigrations, FEED_EVENT_TYPES_SQL, INIT_SQL, loadMigrations, migrationsDir, runMigrations } from "@/lib/server/migrate";
+import { ABUSE_LIMITS_SQL, embeddedMigrations, FEED_EVENT_TYPES_SQL, INIT_SQL, loadMigrations, migrationsDir, runMigrations, SERVER_CONFIG_SQL } from "@/lib/server/migrate";
 import { ROW_SPECS, TRIP_SPEC, type ColDef } from "@/lib/server/repo";
 import { ROW_TABLES } from "@/lib/types";
 
@@ -30,10 +30,11 @@ const ALL_TABLES = [
   "pin_failures",
   "photo_uploads",
   "demo_creations",
+  "server_config",
 ];
 /** Server-wide bookkeeping that outlives any one trip (no trips FK). */
-const GLOBAL_TABLES = ["schema_migrations", "trips", "demo_creations"];
-const VERSIONS = ["001_init", "002_abuse_limits", "003_photo_sha256", "004_feed_event_types"];
+const GLOBAL_TABLES = ["schema_migrations", "trips", "demo_creations", "server_config"];
+const VERSIONS = ["001_init", "002_abuse_limits", "003_photo_sha256", "004_feed_event_types", "005_server_config"];
 
 describe("migrations", () => {
   it("embedded SQL is byte-identical to db/migrations/*.sql, and every file is embedded", () => {
@@ -74,6 +75,7 @@ describe("migrations", () => {
     await db.exec(INIT_SQL); // pasting it into the SQL editor again must not break anything
     await db.exec(ABUSE_LIMITS_SQL);
     await db.exec(FEED_EVENT_TYPES_SQL);
+    await db.exec(SERVER_CONFIG_SQL);
     const versions = await db.query("select version from schema_migrations");
     expect(versions).toHaveLength(VERSIONS.length);
   });

@@ -25,7 +25,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000 and tap **Try the demo**. With no configuration the app uses an embedded Postgres (PGlite) in `.data/pglite` and stores photos in `.data/uploads`, so it runs with zero setup. AI, push and Realtime are simply off until you add their keys.
+Open http://localhost:3000 and tap **Try the demo**. With no configuration the app uses an embedded Postgres (PGlite) in `.data/pglite` and stores photos in `.data/uploads`, so it runs with zero setup. AI and Realtime are simply off until you add their keys; push notifications need no keys (the server makes its own).
 
 The demo is a fake trip: you are its commissioner (PIN `0000`), and **Menu → Settings → Demo mode** can reset it, replay it as a finished round, or put it back in setup. From a terminal: `npm run demo` (round in progress), `npm run demo -- --mode full` (finished and finalized), `npm run demo -- --mode setup`.
 
@@ -47,12 +47,14 @@ Budget about 30 minutes. Both free tiers are plenty.
 ### 2. Secrets you generate on your laptop
 
 ```bash
-npm run hash-pin -- 246813      # your commissioner PIN (4-12 digits; use 6+) -> COMMISSIONER_PIN_HASH
-npm run vapid-keys              # Web Push keys -> VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY
 openssl rand -base64 32         # optional APP_SECRET (signs the commissioner cookie)
 ```
 
-`hash-pin` prints one line like `scrypt:<salt>:<hash>`. Paste it as is (it has no `$`, so nothing needs escaping). Pick at least 6 digits: wrong PINs are throttled (8 per phone per 10 minutes and 30 a day; everyone together gets 30 per 10 minutes, then one try every 10 minutes after 100 in a day), but someone rotating phones can keep guessing for days, and a 4-digit PIN only has 10,000 options. The same PIN is the starting PIN of every trip you create, and trip creation (which needs no link) is throttled the same way. Whatever you pick, the unlock pad takes up to 12 digits.
+**Commissioner PIN:** nothing to run. Pick 4 to 12 digits and type them into Vercel as `COMMISSIONER_PIN` (step 3), digits only. Use at least 6: wrong PINs are throttled (8 per phone per 10 minutes and 30 a day; everyone together gets 30 per 10 minutes, then one try every 10 minutes after 100 in a day), but someone rotating phones can keep guessing for days, and a 4-digit PIN only has 10,000 options. The same PIN is the starting PIN of every trip you create (the trip keeps only a one-way hash of it, and you can change a trip's PIN in Setup → Settings), and trip creation (which needs no link) is throttled the same way. Whatever you pick, the unlock pad takes up to 12 digits.
+
+Rather not keep the PIN itself in Vercel? `npm run hash-pin -- <pin>` prints one line like `scrypt:<salt>:<hash>`: set that as `COMMISSIONER_PIN_HASH` instead of `COMMISSIONER_PIN`. Paste it as is (it has no `$`, so nothing needs escaping). If both are set, the hash wins.
+
+**Push notifications:** nothing to run either. Leave the VAPID keys out and the app makes its own the first time it needs them, saves them in your database and reuses them forever.
 
 For AI roasts, team names and the closest-to-pin judge, create an API key at [console.anthropic.com](https://console.anthropic.com) (`ANTHROPIC_API_KEY`). Expect a few dollars for the round: the judge is capped at 60 photo checks per trip (3 per player per hole) and never looks at the same photo twice, and roasts have their own cap in Settings. Everything works without it.
 
@@ -69,12 +71,14 @@ For AI roasts, team names and the closest-to-pin judge, create an API key at [co
 | `NEXT_PUBLIC_SUPABASE_URL` | yes | `https://<project>.supabase.co` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | Supabase publishable key (`sb_publishable_...`) or legacy anon key. Phones use it only to listen for "something changed" broadcasts. |
 | `SUPABASE_SERVICE_ROLE_KEY` | yes | Supabase secret key (`sb_secret_...`) or legacy service_role key. Server only: photo uploads and Realtime broadcasts. Without it, photo uploads on Vercel fail with "Server misconfigured: photo storage needs ..." (scores and drinks still sync), and phones poll every few seconds instead of getting live pushes. |
-| `COMMISSIONER_PIN_HASH` | yes | From `npm run hash-pin -- <pin>`. Required to create a trip in production; also the starting PIN of each new trip. |
+| `COMMISSIONER_PIN` | yes (or the hash below) | Your commissioner PIN, 4 to 12 digits (use 6+), typed as is. Required to create a trip in production; also the starting PIN of each new trip. Anything but 4-12 digits blocks trip creation until you fix it. |
+| `COMMISSIONER_PIN_HASH` | no | Instead of `COMMISSIONER_PIN`, if you'd rather not store the PIN itself: the `scrypt:...` line from `npm run hash-pin -- <pin>`. Wins when both are set. |
 | `ANTHROPIC_API_KEY` | no | AI judge, roasts and team names. Unset = AI silently off. |
 | `AI_JUDGE_MODEL` | no | Model for the closest-to-pin judge (needs image input). Default `claude-sonnet-5-5`. |
 | `AI_FAST_MODEL` | no | Model for roasts and team names. Default `claude-haiku-5-5`. |
 | `DEMO_AI` | no | `1` lets demo trips use the AI. Off by default, so "Try the demo" (open to anyone with the URL) can't spend your API credit; that's why the demo never shows AI roasts or judge posts. |
-| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | no | From `npm run vapid-keys`. Unset = push notifications off. |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | no | Web Push keys. Leave them out and the app makes its own (generated once, stored in the database, reused forever). Only to bring your own pair: set both, from `npm run vapid-keys`. Adding or changing them after phones turned notifications on means everyone has to turn them on again. |
+| `PUSH_DISABLED` | no | `1` turns push notifications off entirely. |
 | `VAPID_SUBJECT` | no | A `mailto:you@yourdomain.com` contact for push services. Set a real address: the `example.com` default can get pushes rejected. |
 | `APP_SECRET` | no | Cookie-signing secret. Falls back to a hash of the service key. |
 | `NEXT_PUBLIC_APP_VERSION` | no | Version shown in Settings (default `0.1.0`). Vercel's commit SHA is shown next to it automatically. |
@@ -82,7 +86,7 @@ For AI roasts, team names and the closest-to-pin judge, create an API key at [co
 
 ### 4. Create the real trip
 
-1. Open your Vercel URL on your phone → **Commissioner → Create the trip**. Name it, enter your PIN. You land in **Setup**.
+1. Open your Vercel URL on your phone → **Commissioner → Create the trip**. Name it, enter your PIN (the `COMMISSIONER_PIN` you set in Vercel). You land in **Setup**.
 2. Fill in the roster (nickname, Venmo handle, groom flag), drag players into teams, set tee times and set the pots.
 3. **Course:** Jack Frost National is mapped in OpenStreetMap, so in **Setup → Course** tap **Try OpenStreetMap import**: it fills in the tee and green points for you. Then check the four par 5 tee points on the satellite map (holes 4, 9, 12 and 18): long drive measures from them, so drag any that sit off the actual tee box. (From a terminal, `DATABASE_URL=... npm run osm-import -- --code <code>` does the same import.)
 4. Send `https://<your-app>/t/<code>` to the group chat. Everyone taps their name and adds it to their Home Screen from that page. Each trip gets its own Home Screen icon, and on iPhone the icon keeps its own storage: open it once, tap your name again, and (commissioner) unlock with the PIN there too.
@@ -153,8 +157,9 @@ All of the game settings live in the trip's Setup and change without a redeploy.
 
 ## Troubleshooting
 
-- **"Trip creation is locked: the server has no COMMISSIONER_PIN_HASH set."** Add `COMMISSIONER_PIN_HASH` in Vercel and redeploy.
-- **"The server's COMMISSIONER_PIN_HASH is mangled."** An old `scrypt$...` hash got eaten by a `.env` file. Run `npm run hash-pin -- <pin>` again and paste the new `scrypt:...` value.
+- **"Trip creation is locked: the server has no COMMISSIONER_PIN set."** Add `COMMISSIONER_PIN` (your PIN, digits only) in Vercel and redeploy.
+- **"The server's COMMISSIONER_PIN must be 4 to 12 digits."** The value in Vercel has something besides 4 to 12 digits (a space in the middle, quotes, letters). Fix it and redeploy. Until then nobody can create a trip, not even with the right PIN.
+- **"The server's COMMISSIONER_PIN_HASH is mangled."** An old `scrypt$...` hash got eaten by a `.env` file. Run `npm run hash-pin -- <pin>` again and paste the new `scrypt:...` value, or delete `COMMISSIONER_PIN_HASH` and set `COMMISSIONER_PIN` instead (the hash wins while it's set).
 - **The right PIN is refused, or "Easy, tiger. Try again in N minutes."** Too many wrong PINs: 8 from one phone in 10 minutes (30 a day), or 30 in 10 minutes from everyone on the trip together (after 100 in a day, one try every 10 minutes). Other people's guesses only ever cost you a few minutes. The phone you created the trip on, and any phone where you've unlocked before (Lock keeps it), is a trusted device: other people's wrong guesses never slow it down. The Home Screen app counts as a new device until you unlock there once. You can change a trip's PIN in Setup → Settings; that also signs out every other phone that had commissioner powers.
 - **"Server misconfigured: DATABASE_URL is not set."** Add `DATABASE_URL` in Vercel and redeploy. (The local PGlite fallback can't run on Vercel.)
 - **"Server misconfigured: photo storage needs ..."** Add `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in Vercel and redeploy.
@@ -162,7 +167,7 @@ All of the game settings live in the trip's Setup and change without a redeploy.
 - **Server errors on every request / can't connect to the database.** Use the transaction pooler URL on port 6543, check the password (URL-encode special characters), and make sure the Supabase project isn't paused (free projects pause after a week of no use: open the dashboard to wake it).
 - **Live updates take ~20 seconds.** Phones are connected to Realtime but the server's broadcasts fail. Check that `SUPABASE_SERVICE_ROLE_KEY` and `NEXT_PUBLIC_SUPABASE_URL` belong to the same project (a key from another project, or a rotated key, is the usual cause) and look for `realtime: broadcast ... failed` in the Vercel function logs. If Realtime can't connect at all (public channels disallowed in **Project Settings → Realtime**, wrong publishable/anon key), phones poll every 3 seconds instead, so it feels live but costs more requests. Scores sync either way.
 - **Photos show as broken.** Check that `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are both set (without them Vercel refuses uploads, see above) and that the `photos` bucket in Supabase Storage is public. Redeploy after fixing; photos still queued on the phones upload on their next try.
-- **No push notifications.** The phone must use the Home Screen app (iOS 16.4+), have notifications allowed in iOS Settings, and not be muted in the app's Settings. Both VAPID keys must be set.
+- **No push notifications.** The phone must use the Home Screen app (iOS 16.4+), have notifications allowed in iOS Settings, and not be muted in the app's Settings. `PUSH_DISABLED` must not be set, and if you set your own VAPID keys, set both.
 - **No roasts or AI judge.** `ANTHROPIC_API_KEY` is missing, roasts are off in Setup → Settings, or the 40-roast cap is used up. AI failures are silent by design: check the Vercel function logs.
 - **The app looks out of date after a deploy.** The service worker serves the cached shell first. Close the app completely and reopen it.
 - **Local scripts hang or say the database is busy.** PGlite can only be opened by one process: stop `npm run dev` before `npm run demo`, `create-trip` or `osm-import`.

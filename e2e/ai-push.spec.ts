@@ -1,6 +1,7 @@
 // AI team names and Web Push subscription endpoints against the real server. The e2e server runs
-// without ANTHROPIC_API_KEY / VAPID keys, so team names come from the built-in list (ai: false)
-// and AI judge / roasts stay silent; the assertions also hold with AI on.
+// without ANTHROPIC_API_KEY, so team names come from the built-in list (ai: false) and AI judge /
+// roasts stay silent; it has no VAPID env keys either, so it generates and stores its own pair and
+// push is on. The assertions also hold with AI on.
 import { randomUUID } from "node:crypto";
 import { expect, test, type APIRequestContext } from "@playwright/test";
 

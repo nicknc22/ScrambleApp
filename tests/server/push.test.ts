@@ -27,6 +27,7 @@ import type { Op, OpType } from "@/lib/ops";
 import type { Trip } from "@/lib/types";
 import type { PushTrigger } from "@/lib/events/derive";
 import { DELETE as unsubscribeRoute, POST as subscribeRoute } from "@/app/api/t/[code]/push/route";
+import { getVapidKeys } from "@/lib/server/vapid";
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -125,7 +126,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"]) {
+  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT", "PUSH_DISABLED"]) {
     vi.stubEnv(k, "");
   }
   sent = [];
@@ -267,17 +268,22 @@ describe("sendToPlayers", () => {
     expect(sent[0].options.topic).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
-  it("is off without VAPID keys or a sender, and uses VAPID_SUBJECT when set", async () => {
+  it("is on without VAPID env vars (signs with the generated pair), off with PUSH_DISABLED=1, and uses VAPID_SUBJECT when set", async () => {
     const s = await setup();
     await subscribe(s, "A1");
-    setPushSenderForTests(null);
-    expect(pushAvailable()).toBe(false);
-    const report = await sendToPlayers(s.trip, [s.player.A1], { title: "x", body: "y" });
-    expect(report.sent).toEqual([]);
-    expect(sent).toHaveLength(0);
-    vi.stubEnv("VAPID_PUBLIC_KEY", "pub");
-    vi.stubEnv("VAPID_PRIVATE_KEY", "priv");
     expect(pushAvailable()).toBe(true);
+    const generated = await getVapidKeys(db);
+    expect(generated).not.toBeNull();
+    const t0 = Date.now();
+    expect((await sendToPlayers(s.trip, [s.player.A1], { title: "x", body: "y" }, { now: new Date(t0) })).sent).toEqual([s.player.A1]);
+    expect(sent[0].options.vapidDetails).toEqual({ subject: "mailto:scramble@example.com", publicKey: generated!.publicKey, privateKey: generated!.privateKey });
+
+    vi.stubEnv("PUSH_DISABLED", "1");
+    expect(pushAvailable()).toBe(false);
+    const report = await sendToPlayers(s.trip, [s.player.A1], { title: "x", body: "y" }, { now: new Date(t0 + 3600_000) });
+    expect(report.sent).toEqual([]);
+    expect(sent).toHaveLength(1);
+    vi.stubEnv("PUSH_DISABLED", "");
     vi.stubEnv("VAPID_SUBJECT", "mailto:nick@example.org");
     expect(vapidSubject()).toBe("mailto:nick@example.org");
   });

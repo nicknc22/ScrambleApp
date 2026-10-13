@@ -1,8 +1,10 @@
 // Web Push (server side). Spec "Push notifications": lead changes, contest lead changes, the
 // Groom's Mulligan, AI judge flags, roasts aimed at your team and final results.
 //
-//   - VAPID_PUBLIC_KEY + VAPID_PRIVATE_KEY (+ VAPID_SUBJECT, default mailto:scramble@example.com).
-//     Unset → push is off and everything here is a no-op. Tests inject a fake sender.
+//   - VAPID keys: VAPID_PUBLIC_KEY + VAPID_PRIVATE_KEY, or (unset) a pair the server generates
+//     once and keeps in the database (vapid.ts). VAPID_SUBJECT defaults to
+//     mailto:scramble@example.com. PUSH_DISABLED=1 → push is off and everything here is a no-op.
+//     Tests inject a fake sender.
 //   - Subscriptions: push_subscriptions, one row per endpoint (upsert), scoped to a trip + player.
 //   - sendToPlayers honors players.muted_push, throttles to one push per player per
 //     settings.push_throttle_sec (push_log), collapses duplicates by collapse key (same key to the
@@ -15,9 +17,10 @@ import crypto from "node:crypto";
 import { DEFAULT_SETTINGS, type Trip, type TripState, type UUID } from "@/lib/types";
 import type { PushTrigger } from "@/lib/events/derive";
 import { getDb, type Db } from "./db";
-import { vapidPrivateKey, vapidPublicKey } from "./env";
+import { pushEnabled } from "./env";
 import type { PostCommitContext } from "./hooks";
 import { isUuid, readTripState } from "./repo";
+import { getVapidKeys } from "./vapid";
 
 /** Same collapse key to the same player within this window is a duplicate. */
 export const COLLAPSE_WINDOW_SEC = 5 * 60;
@@ -68,7 +71,7 @@ export type PushSender = (sub: PushSubscriptionLike, payload: string, options: P
 
 const G = globalThis as typeof globalThis & { __scramblePushSender?: PushSender | null };
 
-/** Tests: deliver through `fn` (push counts as enabled while set). null restores web-push. */
+/** Tests: deliver through `fn` instead of web-push. null restores web-push. */
 export function setPushSenderForTests(fn: PushSender | null): void {
   G.__scramblePushSender = fn;
 }
@@ -80,9 +83,9 @@ const webPushSender: PushSender = async (sub, payload, options) => {
   return { statusCode: res.statusCode };
 };
 
-/** Push can be sent (VAPID keys configured, or a test sender injected). */
+/** Push can be sent: not switched off with PUSH_DISABLED=1 (the VAPID keys come from vapid.ts). */
 export function pushAvailable(): boolean {
-  return !!G.__scramblePushSender || (!!vapidPublicKey() && !!vapidPrivateKey());
+  return pushEnabled();
 }
 
 function currentSender(): PushSender {
@@ -234,6 +237,8 @@ export async function sendToPlayers(
     const ids = [...new Set(playerIds.filter((id) => isUuid(id)))];
     if (ids.length === 0) return report;
     const db = deps.db ?? getDb();
+    const keys = await getVapidKeys(db);
+    if (!keys) return report;
     const now = deps.now ?? new Date();
     const throttleSec = Math.max(0, Number(trip.settings?.push_throttle_sec ?? DEFAULT_SETTINGS.push_throttle_sec) || 0);
     const collapseKey = msg.tag ? String(msg.tag).slice(0, 200) : null;
@@ -295,8 +300,6 @@ export async function sendToPlayers(
     });
     if (subs.length === 0) return report;
 
-    const publicKey = vapidPublicKey() ?? "";
-    const privateKey = vapidPrivateKey() ?? "";
     const payload = JSON.stringify({
       title: clip(msg.title, MAX_TITLE) || "Scramble",
       body: clip(msg.body, MAX_BODY),
@@ -308,7 +311,7 @@ export async function sendToPlayers(
       urgency: "high",
       ...(collapseKey ? { topic: topicFor(collapseKey) } : {}),
       timeout: PUSH_SEND_TIMEOUT_MS,
-      vapidDetails: { subject: vapidSubject(), publicKey, privateKey },
+      vapidDetails: { subject: vapidSubject(), publicKey: keys.publicKey, privateKey: keys.privateKey },
     };
     const send = currentSender();
     const gone: string[] = [];

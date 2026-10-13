@@ -3,7 +3,7 @@
 // process that applies ops. Registration is by name (re-importing, e.g. after dev HMR, replaces
 // the previous registration instead of adding a second one).
 //
-// Each hook bails out immediately when its feature is off (no ANTHROPIC_API_KEY / no VAPID keys)
+// Each hook bails out immediately when its feature is off (no ANTHROPIC_API_KEY / PUSH_DISABLED=1)
 // or the batch has nothing for it, never throws, and runs after the sync response was sent.
 import { registerPostCommitHook } from "./hooks";
 import { judgeHook } from "./judge";

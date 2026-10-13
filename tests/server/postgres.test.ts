@@ -32,6 +32,7 @@ import {
   type ColDef,
 } from "@/lib/server/repo";
 import { createTrip } from "@/lib/server/trips";
+import { loadOrCreateVapidKeys } from "@/lib/server/vapid";
 import type { Write } from "@/lib/reducer";
 import { newId } from "@/lib/ids";
 import { DEFAULT_SETTINGS, ROW_TABLES, type AnyRow, type RowTable, type Trip, type TripState } from "@/lib/types";
@@ -248,7 +249,7 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
       `select c.relname, c.relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace
        where n.nspname = 'public' and c.relkind = 'r'`,
     );
-    expect(rls.length).toBe(21);
+    expect(rls.length).toBe(22);
     expect(rls.every((r) => r.relrowsecurity)).toBe(true);
     // Same columns as PGlite (catalog parity).
     const colsSql = `select table_name, column_name, data_type, is_nullable, column_default from information_schema.columns
@@ -399,6 +400,14 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
     release();
     await Promise.all([first, second]);
     expect(events).toEqual(["first locked", "first done", "second locked"]);
+  });
+
+  it("concurrent cold starts agree on ONE generated VAPID key pair (across pool connections)", async () => {
+    await pg.query("delete from server_config where key = 'vapid'");
+    const pairs = await Promise.all(Array.from({ length: 8 }, () => loadOrCreateVapidKeys(pg)));
+    for (const p of pairs) expect(p).toEqual(pairs[0]);
+    const rows = await pg.query<{ value: unknown }>("select value from server_config where key = 'vapid'");
+    expect(rows).toEqual([{ value: pairs[0] }]);
   });
 
   it("getDb() uses DATABASE_URL (postgres driver) and migrates on first use", async () => {

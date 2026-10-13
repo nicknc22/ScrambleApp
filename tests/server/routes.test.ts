@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, openDb, setDbForTests, type DbConnection } from "@/lib/server/db";
-import { hashPin, resetPinThrottle } from "@/lib/server/auth";
+import { hashPin, isWellFormedPinHash, resetPinThrottle, verifyPin } from "@/lib/server/auth";
 import { createTrip } from "@/lib/server/trips";
 import { broadcastTripChanged, isJwtKey, realtimeMeta } from "@/lib/server/realtime";
 import { MAX_PHOTO_BYTES, PHOTO_QUOTA, photoBaseUrl, putPhoto, readLocalPhoto } from "@/lib/server/storage";
@@ -70,6 +70,7 @@ beforeEach(async () => {
   }
   vi.stubEnv("UPLOADS_DIR", uploads);
   vi.stubEnv("COMMISSIONER_PIN_HASH", "");
+  vi.stubEnv("COMMISSIONER_PIN", "");
   await resetPinThrottle();
 });
 
@@ -148,11 +149,94 @@ describe("POST /api/trips", () => {
     expect((await commUnlock(jsonReq(`/api/t/${code}/commissioner`, "POST", { pin: "2468" }), params({ code }))).status).toBe(401);
   });
 
-  it("without COMMISSIONER_PIN_HASH in production: refuses", async () => {
+  it("without COMMISSIONER_PIN or COMMISSIONER_PIN_HASH in production: refuses", async () => {
     vi.stubEnv("NODE_ENV", "production");
     const res = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "2468" }));
     expect(res.status).toBe(403);
-    expect((await res.json()).error).toMatch(/COMMISSIONER_PIN_HASH/);
+    const body = await res.json();
+    expect(body.code).toBe("not_configured");
+    expect(body.error).toMatch(/COMMISSIONER_PIN/);
+  });
+
+  /** The trip's stored commissioner_pin_hash (server-only column). */
+  async function storedPinHash(code: string): Promise<string> {
+    const rows = await db.query<{ h: string }>("select commissioner_pin_hash as h from trips where code = $1", [code]);
+    return rows[0].h;
+  }
+
+  it("with a plain COMMISSIONER_PIN (production): wrong PIN → 401, right PIN → 201; the trip stores a hash, not the PIN", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("COMMISSIONER_PIN", "246813");
+    const bad = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "2468" }));
+    expect(bad.status).toBe(401);
+    expect((await bad.json()).code).toBe("bad_pin");
+
+    const res = await createTripRoute(jsonReq("/api/trips", "POST", { pin: " 246813 ", name: "Plain PIN Trip" }));
+    expect(res.status).toBe(201);
+    const { code } = await res.json();
+    const cookie = cookiePair(res);
+    const check = await commCheck(jsonReq(`/api/t/${code}/commissioner`, "GET", undefined, { cookie }), params({ code }));
+    expect(await check.json()).toEqual({ is_commissioner: true });
+
+    const stored = await storedPinHash(code);
+    expect(isWellFormedPinHash(stored)).toBe(true);
+    expect(stored).not.toContain("246813");
+    expect(await verifyPin("246813", stored)).toBe(true);
+    expect(await verifyPin("2468", stored)).toBe(false);
+    expect((await commUnlock(jsonReq(`/api/t/${code}/commissioner`, "POST", { pin: "246813" }), params({ code }))).status).toBe(200);
+
+    // A second trip gets its own salt.
+    const again = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "246813" }));
+    expect(again.status).toBe(201);
+    expect(await storedPinHash((await again.json()).code)).not.toBe(stored);
+  });
+
+  it("with a plain COMMISSIONER_PIN: wrong PINs are throttled exactly like the hash", async () => {
+    vi.stubEnv("COMMISSIONER_PIN", "246813");
+    for (let i = 0; i < 8; i++) {
+      expect((await createTripRoute(jsonReq("/api/trips", "POST", { pin: "0000" }))).status).toBe(401);
+    }
+    const res = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "246813" }));
+    expect(res.status).toBe(429);
+    expect((await res.json()).code).toBe("throttled");
+    const rows = await db.query<{ n: number }>("select count(*)::int as n from pin_failures where trip_id is null");
+    expect(rows[0].n).toBe(8);
+  });
+
+  it("a COMMISSIONER_PIN that isn't 4-12 digits is a configuration error, never an open door", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const prod of [false, true]) {
+      vi.stubEnv("NODE_ENV", prod ? "production" : "test");
+      for (const bad of ["123", "24 68", "2468x", '"2468"']) {
+        vi.stubEnv("COMMISSIONER_PIN", bad);
+        // Neither the near-miss PIN nor any other valid PIN gets in (dev's "any PIN" fallback stays off).
+        for (const pin of ["2468", "9753", bad]) {
+          const res = await createTripRoute(jsonReq("/api/trips", "POST", { pin }));
+          expect(res.status).toBe(500);
+          const body = await res.json();
+          expect(body.code).toBe("not_configured");
+          expect(body.error).toMatch(/COMMISSIONER_PIN must be 4 to 12 digits/);
+          expect(body.error).not.toContain(bad);
+        }
+      }
+    }
+    err.mockRestore();
+  });
+
+  it("COMMISSIONER_PIN_HASH takes precedence over COMMISSIONER_PIN", async () => {
+    vi.stubEnv("COMMISSIONER_PIN_HASH", pinHash); // 2468
+    vi.stubEnv("COMMISSIONER_PIN", "135791");
+    expect((await createTripRoute(jsonReq("/api/trips", "POST", { pin: "135791" }))).status).toBe(401);
+    const res = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "2468" }));
+    expect(res.status).toBe(201);
+    expect(await storedPinHash((await res.json()).code)).toBe(pinHash);
+    // ...including a mangled hash: an error, not a fallback to the plain PIN.
+    vi.stubEnv("COMMISSIONER_PIN_HASH", "scrypt");
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mangled = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "135791" }));
+    expect(mangled.status).toBe(500);
+    expect((await mangled.json()).error).toMatch(/COMMISSIONER_PIN_HASH is mangled/);
+    err.mockRestore();
   });
 
   it("rejects non-JSON bodies", async () => {
@@ -181,9 +265,10 @@ describe("GET /api/t/[code]/state", () => {
       server_time: expect.stringMatching(/Z$/),
       photo_base_url: "/api/photos/",
       realtime: null,
-      vapid_public_key: null,
+      // No VAPID env vars: the server generated its own pair (vapid.test.ts).
+      vapid_public_key: expect.stringMatching(/^[A-Za-z0-9_-]{87}$/),
       ai_enabled: false,
-      push_enabled: false,
+      push_enabled: true,
     });
   });
 

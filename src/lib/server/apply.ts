@@ -54,7 +54,7 @@ import {
   type ColDef,
   type PersistResult,
 } from "./repo";
-import { buildSnapshot, snapshotMeta } from "./trips";
+import { buildSnapshot, pushPublicKey, snapshotMeta } from "./trips";
 
 /** Max ops per sync request (the phone sends ≤ 100 per batch). */
 export const MAX_OPS_PER_SYNC = 200;
@@ -96,6 +96,12 @@ export class TooManyOpsError extends Error {
     super(`Too many ops in one sync: ${count} (max ${MAX_OPS_PER_SYNC})`);
     this.name = "TooManyOpsError";
   }
+}
+
+/** ApplyOpsArgs plus what applyOpsToTrip resolves once per request, outside the transactions. */
+interface SegmentArgs extends ApplyOpsArgs {
+  /** Snapshot meta's push key (pushPublicKey). */
+  vapidPublicKey: string | null;
 }
 
 const NO_EVENTS: DeriveEventsResult = { feed: [], roast_triggers: [], push_triggers: [] };
@@ -464,7 +470,7 @@ async function begin(t: Db, args: ApplyOpsArgs, ops: readonly unknown[]) {
  * Apply `ops` in ONE transaction. Throws (rolling everything back) on any failure; `withFeed`
  * false skips deriving feed events (last resort for an op whose events can't be saved).
  */
-function applySegment(args: ApplyOpsArgs, ops: readonly unknown[], withFeed: boolean): Promise<Segment> {
+function applySegment(args: SegmentArgs, ops: readonly unknown[], withFeed: boolean): Promise<Segment> {
   const tripId = args.trip.id;
   return args.db.tx(async (t) => {
     const { now, prior } = await begin(t, args, ops);
@@ -486,7 +492,7 @@ function applySegment(args: ApplyOpsArgs, ops: readonly unknown[], withFeed: boo
     // in the state (they held the lock before us), and so is this batch.
     const serverTime = new Date().toISOString();
     const state = sortLikeDb(mergeFeed(run.state, events.feed));
-    return { results: run.results, events, applied: run.applied, snapshot: { state, meta: snapshotMeta(tripId, serverTime) } };
+    return { results: run.results, events, applied: run.applied, snapshot: { state, meta: snapshotMeta(tripId, args.vapidPublicKey, serverTime) } };
   });
 }
 
@@ -509,7 +515,7 @@ function rejectSegment(args: ApplyOpsArgs, raw: unknown, cause: unknown): Promis
 }
 
 /** applySegment, isolating ops whose data the database refuses (see the header comment). */
-async function applyIsolating(args: ApplyOpsArgs, ops: readonly unknown[]): Promise<Segment[]> {
+async function applyIsolating(args: SegmentArgs, ops: readonly unknown[]): Promise<Segment[]> {
   let failure: unknown;
   try {
     return [await applySegment(args, ops, true)];
@@ -556,7 +562,7 @@ export async function applyOpsToTrip(args: ApplyOpsArgs): Promise<ApplyOpsResult
     return { results: [], snapshot: await buildSnapshot(db, trip), events: NO_EVENTS, applied: [] };
   }
 
-  const segments = await applyIsolating(args, ops);
+  const segments = await applyIsolating({ ...args, vapidPublicKey: await pushPublicKey(db) }, ops);
   let snapshot: Snapshot | null = null;
   for (const s of segments) if (s.snapshot) snapshot = s.snapshot;
   return {

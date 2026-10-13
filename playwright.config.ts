@@ -19,7 +19,7 @@ export default defineConfig({
   },
   webServer: {
     // Production build against a throwaway local PGlite database.
-    command: `rm -rf .data/e2e && npm run build && PGLITE_DIR=.data/e2e UPLOADS_DIR=.data/e2e-uploads COMMISSIONER_PIN_HASH=$(npx tsx scripts/hash-pin.ts 2468) npx next start -p ${PORT}`,
+    command: `rm -rf .data/e2e && npm run build && PGLITE_DIR=.data/e2e UPLOADS_DIR=.data/e2e-uploads COMMISSIONER_PIN=2468 npx next start -p ${PORT}`,
     url: `http://localhost:${PORT}`,
     timeout: 300_000,
     reuseExistingServer: !process.env.CI,

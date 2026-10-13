@@ -18,9 +18,9 @@
 //   (trip-wide and per IP), so friends mashing the pad can't lock the real commissioner out. The
 //   device still needs the PIN and has its own per-device bucket.
 import crypto from "node:crypto";
-import { isValidPin, PIN_RE } from "@/lib/pin";
+import { isValidPin, PIN_MAX_LENGTH, PIN_MIN_LENGTH, PIN_RE } from "@/lib/pin";
 import { getDb, type Db } from "./db";
-import { appSecret, commissionerPinHash, isProduction, supabaseServiceRoleKey } from "./env";
+import { appSecret, commissionerPin, commissionerPinHash, isProduction, supabaseServiceRoleKey } from "./env";
 
 export { isValidPin, PIN_RE };
 
@@ -76,19 +76,66 @@ export async function verifyPin(pin: unknown, stored: string | null | undefined)
 }
 
 // ---------------------------------------------------------------------------
+// The server's commissioner PIN (guards trip creation, seeds each new trip's PIN)
+// ---------------------------------------------------------------------------
+
+/**
+ * COMMISSIONER_PIN_HASH when set (a scrypt hash), else the plain COMMISSIONER_PIN (4-12 digits,
+ * typed straight into the host's dashboard). Set but unusable is "invalid", with a message naming
+ * the variable (never its value): callers refuse instead of letting any PIN in.
+ */
+export type ServerPin =
+  | { kind: "none" }
+  | { kind: "invalid"; message: string }
+  | { kind: "hash"; hash: string }
+  | { kind: "plain"; pin: string };
+
+export function serverPin(): ServerPin {
+  const hash = commissionerPinHash();
+  if (hash) {
+    if (isWellFormedPinHash(hash)) return { kind: "hash", hash };
+    return { kind: "invalid", message: "The server's COMMISSIONER_PIN_HASH is mangled. In .env files, write every $ as \\$." };
+  }
+  const pin = commissionerPin();
+  if (pin) {
+    if (isValidPin(pin)) return { kind: "plain", pin };
+    return {
+      kind: "invalid",
+      message: `The server's COMMISSIONER_PIN must be ${PIN_MIN_LENGTH} to ${PIN_MAX_LENGTH} digits and nothing else. Fix it in the hosting settings and redeploy.`,
+    };
+  }
+  return { kind: "none" };
+}
+
+/** Does `pin` match the server's PIN? scrypt for a hash; constant time for a plain PIN. */
+export async function verifyServerPin(pin: unknown, server: ServerPin): Promise<boolean> {
+  if (server.kind === "hash") return verifyPin(pin, server.hash);
+  if (server.kind !== "plain" || typeof pin !== "string" || pin.length === 0 || pin.length > 64) return false;
+  // Equal-length digests: timingSafeEqual needs them, and neither content nor length leaks.
+  const digest = (s: string) => crypto.createHash("sha256").update(s, "utf8").digest();
+  return crypto.timingSafeEqual(digest(pin), digest(server.pin));
+}
+
+// ---------------------------------------------------------------------------
 // Signed tokens
 // ---------------------------------------------------------------------------
 
 let warnedDevSecret = false;
 
-/** APP_SECRET, else a hash of the service key / env PIN hash, else a fixed dev secret. */
+/**
+ * APP_SECRET, else a hash of the service key / env PIN hash / env plain PIN, else a fixed dev
+ * secret. The plain PIN only ever goes in hashed (with a label); a short PIN still can't be
+ * brute-forced from a cookie, because every signature also covers the trip's PIN fingerprint,
+ * which comes from its salted hash and never leaves the server.
+ */
 export function signingSecret(): Buffer {
   const explicit = appSecret();
   if (explicit) return Buffer.from(explicit, "utf8");
-  const material = supabaseServiceRoleKey() || commissionerPinHash();
+  const plainPin = commissionerPin();
+  const material = supabaseServiceRoleKey() || commissionerPinHash() || (plainPin && `commissioner-pin:${plainPin}`);
   if (!material && isProduction() && !warnedDevSecret) {
     warnedDevSecret = true;
-    console.warn("auth: no APP_SECRET, SUPABASE_SERVICE_ROLE_KEY or COMMISSIONER_PIN_HASH; using the dev cookie secret");
+    console.warn("auth: no APP_SECRET, SUPABASE_SERVICE_ROLE_KEY, COMMISSIONER_PIN_HASH or COMMISSIONER_PIN; using the dev cookie secret");
   }
   return crypto.createHash("sha256").update(material || "scramble-dev-secret").digest();
 }
@@ -310,7 +357,7 @@ export function commissionerSessionHeaders(request: Request, tripId: string, pin
 //                         at most for a guesser rotating IPs), so strangers can't lock the
 //                         commissioner out of a new device for more than ~10 minutes at a time.
 // A trusted device (see above) skips the shared bucket: only its own per-device bucket applies.
-// tripId null = trip creation, checked against the server's COMMISSIONER_PIN_HASH (same buckets).
+// tripId null = trip creation, checked against the server's PIN (serverPin above; same buckets).
 
 export const PIN_WINDOW_MS = 10 * 60 * 1000;
 export const PIN_DAY_MS = 24 * 60 * 60 * 1000;

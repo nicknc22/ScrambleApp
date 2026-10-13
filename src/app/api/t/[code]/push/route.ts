@@ -1,13 +1,15 @@
 // Web Push subscriptions for a trip (the client side is src/lib/client/push.ts).
 //   POST   {player_id, subscription: PushSubscription.toJSON()}  → 200 {ok, push_enabled}
+//          push_enabled: the server can send (VAPID keys from env or generated; not PUSH_DISABLED).
 //          Upserts by endpoint (a device that re-subscribes, or moves to another player/trip,
 //          updates its row). 400 when the player isn't an active player of this trip or the
 //          subscription is malformed / not a known browser push service.
 //   DELETE {player_id?, endpoint}                                → 200 {ok, removed}
 // 404 for an unknown trip code. Never cached.
 import { badRequest, json, loadTripOr404, readJsonObject, withErrors } from "@/lib/server/http";
-import { pushAvailable, parsePushSubscription, removePushSubscription, savePushSubscription } from "@/lib/server/push";
+import { parsePushSubscription, removePushSubscription, savePushSubscription } from "@/lib/server/push";
 import { isUuid } from "@/lib/server/repo";
+import { pushPublicKey } from "@/lib/server/trips";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +29,7 @@ export const POST = withErrors(async (request: Request, ctx: { params: Promise<{
 
   const saved = await savePushSubscription(t.db, t.trip.id, body.player_id, sub);
   if (!saved) return badRequest("You're not on this trip's roster. Ask the commissioner.", "unknown_player");
-  return json({ ok: true, push_enabled: pushAvailable() });
+  return json({ ok: true, push_enabled: (await pushPublicKey(t.db)) !== null });
 });
 
 export const DELETE = withErrors(async (request: Request, ctx: { params: Promise<{ code: string }> }) => {

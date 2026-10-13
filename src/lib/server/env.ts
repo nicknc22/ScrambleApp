@@ -55,9 +55,17 @@ export function vapidSubject(): string {
   return read("VAPID_SUBJECT") ?? "mailto:scramble@example.com";
 }
 
-/** Default commissioner PIN hash (scrypt:...). Required to create trips in production. */
+/**
+ * Default commissioner PIN hash (scrypt:...). This or COMMISSIONER_PIN is required to create trips
+ * in production; it wins when both are set. Use auth.serverPin(), which validates both.
+ */
 export function commissionerPinHash(): string | undefined {
   return read("COMMISSIONER_PIN_HASH");
+}
+
+/** Plain default commissioner PIN (4-12 digits), the type-it-into-Vercel alternative to the hash. */
+export function commissionerPin(): string | undefined {
+  return read("COMMISSIONER_PIN");
 }
 
 /** Optional explicit cookie-signing secret. */
@@ -103,8 +111,12 @@ export function aiEnabled(): boolean {
   return !!anthropicApiKey();
 }
 
+/**
+ * Web Push is on unless PUSH_DISABLED=1. The VAPID keys come from VAPID_PUBLIC_KEY +
+ * VAPID_PRIVATE_KEY when both are set, else the server makes and keeps its own (vapid.ts).
+ */
 export function pushEnabled(): boolean {
-  return !!vapidPublicKey() && !!vapidPrivateKey();
+  return !/^(1|true|yes)$/i.test(read("PUSH_DISABLED") ?? "");
 }
 
 /** AI features on public demo trips ("Try the demo" is open to anyone): off unless DEMO_AI=1. */

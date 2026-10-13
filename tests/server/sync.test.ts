@@ -242,9 +242,10 @@ describe("POST /api/t/[code]/sync: request handling", () => {
       server_time: expect.stringMatching(/Z$/),
       photo_base_url: "/api/photos/",
       realtime: null,
-      vapid_public_key: null,
+      // No VAPID env vars: the server generated its own pair (vapid.test.ts).
+      vapid_public_key: expect.stringMatching(/^[A-Za-z0-9_-]{87}$/),
       ai_enabled: false,
-      push_enabled: false,
+      push_enabled: true,
     });
     // The snapshot already carries the new events.
     expect(feedOf(out, "tee_off")).toHaveLength(1);

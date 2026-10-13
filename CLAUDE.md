@@ -40,9 +40,11 @@ phones <── GET /api/t/<code>/state (full snapshot) <── on broadcast / po
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Realtime broadcast subscription; storage public URLs. Unset → polling. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server: storage uploads, realtime broadcast. Unset → local uploads, no broadcast. |
 | `ANTHROPIC_API_KEY` | AI judge (`claude-sonnet-5-5`), roasts and team names (`claude-haiku-5-5`). Unset → AI silently off. |
-| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push. Unset → push off. |
-| `COMMISSIONER_PIN_HASH` | Required to create a real trip; default PIN for new trips (each trip stores its own hash, changeable in Settings). Format `scrypt:<salt>:<hash>` from `npm run hash-pin -- <pin>` (no `$`, so `.env` files don't mangle it). |
-| `APP_SECRET` | Optional cookie-signing secret (falls back to a hash of the service key / PIN hash). |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push. Optional: without both keys the server generates a pair once, stores it in `server_config` (migration 005) and reuses it forever (`src/lib/server/vapid.ts`; changing keys breaks every phone's subscription). Only the public key reaches clients (snapshot meta). `VAPID_SUBJECT` defaults to `mailto:scramble@example.com`. |
+| `PUSH_DISABLED` | `1` turns Web Push off entirely (snapshot `push_enabled: false`, nothing sent). |
+| `COMMISSIONER_PIN` | Plain 4-12 digit PIN, typed straight into Vercel (the recommended simple option). This or `COMMISSIONER_PIN_HASH` is required to create a real trip; it's the default PIN for new trips (each trip stores its own scrypt hash, never the PIN; changeable in Settings). Set but not 4-12 digits → trip creation refuses with `not_configured`. Read via `auth.serverPin()`. |
+| `COMMISSIONER_PIN_HASH` | Optional alternative that keeps the PIN out of the env; wins when both are set. Format `scrypt:<salt>:<hash>` from `npm run hash-pin -- <pin>` (no `$`, so `.env` files don't mangle it). |
+| `APP_SECRET` | Optional cookie-signing secret (falls back to a hash of the service key / PIN hash / plain PIN). |
 | `AI_JUDGE_MODEL`, `AI_FAST_MODEL` | Optional model overrides (defaults `claude-sonnet-5-5`, `claude-haiku-5-5`). |
 | `DEMO_AI` | `1` lets public demo trips use the AI (off by default so "Try the demo" can't spend API credit). |
 

@@ -1,5 +1,6 @@
 // Commissioner auth: PIN hashing, signed tokens (bound to the PIN), cookies, the DB throttle.
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   clearCommissionerCookie,
@@ -25,12 +26,15 @@ import {
   recordPinSuccess,
   resetPinThrottle,
   retryAfterText,
+  serverPin,
+  signingSecret,
   trustedDeviceCookie,
   trustedDeviceCookieName,
   trustedDeviceId,
   TRUSTED_DEVICE_TTL_MS,
   verifyCommissionerToken,
   verifyPin,
+  verifyServerPin,
   verifyTrustedDeviceToken,
 } from "@/lib/server/auth";
 import { createTestDb, type DbConnection } from "@/lib/server/db";
@@ -105,6 +109,45 @@ describe("PIN hashing", () => {
   });
 });
 
+describe("server PIN (COMMISSIONER_PIN_HASH, else plain COMMISSIONER_PIN)", () => {
+  it("prefers the hash, falls back to the plain PIN, and is none when neither is set", async () => {
+    const hash = await hashPin("2468");
+    vi.stubEnv("COMMISSIONER_PIN_HASH", "");
+    vi.stubEnv("COMMISSIONER_PIN", "");
+    expect(serverPin()).toEqual({ kind: "none" });
+    vi.stubEnv("COMMISSIONER_PIN", " 135791\n"); // pasted with whitespace: trimmed like every env var
+    expect(serverPin()).toEqual({ kind: "plain", pin: "135791" });
+    vi.stubEnv("COMMISSIONER_PIN_HASH", hash);
+    expect(serverPin()).toEqual({ kind: "hash", hash });
+    // A mangled hash is an error even with a usable plain PIN next to it (the hash wins).
+    vi.stubEnv("COMMISSIONER_PIN_HASH", "scrypt");
+    expect(serverPin()).toMatchObject({ kind: "invalid", message: expect.stringMatching(/COMMISSIONER_PIN_HASH is mangled/) });
+  });
+
+  it("a plain PIN that isn't 4-12 digits is invalid, and the message never echoes it", () => {
+    for (const bad of ["123", "1234567890123", "24 68", "12a4", '"2468"', "2468;"]) {
+      vi.stubEnv("COMMISSIONER_PIN", bad);
+      const s = serverPin();
+      expect(s.kind).toBe("invalid");
+      expect(s.kind === "invalid" && s.message).toMatch(/COMMISSIONER_PIN must be 4 to 12 digits/);
+      expect(s.kind === "invalid" && s.message).not.toContain(bad);
+    }
+  });
+
+  it("verifies against either form; nothing verifies when none or invalid", async () => {
+    const plain = { kind: "plain", pin: "246813" } as const;
+    expect(await verifyServerPin("246813", plain)).toBe(true);
+    for (const wrong of ["24681", "2468130", "246814", " 246813", "", null, 246813, undefined]) {
+      expect(await verifyServerPin(wrong, plain)).toBe(false);
+    }
+    const hashed = { kind: "hash", hash: await hashPin("2468") } as const;
+    expect(await verifyServerPin("2468", hashed)).toBe(true);
+    expect(await verifyServerPin("2469", hashed)).toBe(false);
+    expect(await verifyServerPin("2468", { kind: "none" })).toBe(false);
+    expect(await verifyServerPin("2468", { kind: "invalid", message: "x" })).toBe(false);
+  });
+});
+
 describe("commissioner token", () => {
   const now = Date.parse("2026-10-24T12:00:00Z");
 
@@ -170,6 +213,27 @@ describe("commissioner token", () => {
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "");
     vi.stubEnv("COMMISSIONER_PIN_HASH", "scrypt$x$y");
     expect(verifyCommissionerToken(t2, TRIP, PIN_HASH, now)).toBe(false);
+  });
+
+  it("with only a plain COMMISSIONER_PIN, signs with a hash of it (never the PIN itself)", () => {
+    for (const k of ["APP_SECRET", "SUPABASE_SERVICE_ROLE_KEY", "COMMISSIONER_PIN_HASH"]) vi.stubEnv(k, "");
+    vi.stubEnv("COMMISSIONER_PIN", "");
+    const devSecret = signingSecret();
+    vi.stubEnv("COMMISSIONER_PIN", "246813");
+    const secret = signingSecret();
+    expect(secret.equals(devSecret)).toBe(false);
+    expect(secret.includes(Buffer.from("246813"))).toBe(false);
+    expect(secret.equals(crypto.createHash("sha256").update("246813").digest())).toBe(false);
+    const token = makeCommissionerToken(TRIP, PIN_HASH, now);
+    expect(verifyCommissionerToken(token, TRIP, PIN_HASH, now)).toBe(true);
+    // Changing the PIN rotates the secret (like changing the hash does).
+    vi.stubEnv("COMMISSIONER_PIN", "135791");
+    expect(verifyCommissionerToken(token, TRIP, PIN_HASH, now)).toBe(false);
+    // The hash still wins when both are set.
+    vi.stubEnv("COMMISSIONER_PIN_HASH", PIN_HASH);
+    const hashSecret = signingSecret();
+    vi.stubEnv("COMMISSIONER_PIN", "246813");
+    expect(signingSecret().equals(hashSecret)).toBe(true);
   });
 });
 

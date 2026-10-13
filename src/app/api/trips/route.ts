@@ -1,9 +1,11 @@
 // POST /api/trips {pin, name?, app_name?} → 201 {code, trip_id, url} + commissioner cookie (and
 // this device trusted for the new trip, see auth.ts).
-// With COMMISSIONER_PIN_HASH set, the PIN must match it and the new trip uses that hash. Wrong
-// PINs share the database throttle (bucket: trip_id null; per IP, plus a slow global cap whose
-// waits stay short, so strangers can't keep the commissioner from creating the trip).
-// Without it, only outside production (dev convenience): the trip's PIN becomes `pin`.
+// With a server PIN set (COMMISSIONER_PIN_HASH, else the plain COMMISSIONER_PIN), the PIN must
+// match it. The new trip stores that hash, or a fresh scrypt hash of the plain PIN (never the PIN
+// itself). Wrong PINs share the database throttle (bucket: trip_id null; per IP, plus a slow
+// global cap whose waits stay short, so strangers can't keep the commissioner from creating the
+// trip). A server PIN that is set but malformed refuses every attempt (not_configured).
+// Without one, only outside production (dev convenience): the trip's PIN becomes `pin`.
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
 import {
   attemptPin,
@@ -11,12 +13,12 @@ import {
   commissionerSessionHeaders,
   hashPin,
   isValidPin,
-  isWellFormedPinHash,
   retryAfterText,
-  verifyPin,
+  serverPin,
+  verifyServerPin,
 } from "@/lib/server/auth";
 import { getDb } from "@/lib/server/db";
-import { commissionerPinHash, isProduction } from "@/lib/server/env";
+import { isProduction } from "@/lib/server/env";
 import { badRequest, errorJson, json, readJsonObject, withErrors } from "@/lib/server/http";
 import { createTrip, DEFAULT_APP_NAME, DEFAULT_TRIP_NAME, TripInputError } from "@/lib/server/trips";
 
@@ -32,15 +34,13 @@ export const POST = withErrors(async (request: Request) => {
   const db = getDb();
 
   let pinHash: string;
-  const envHash = commissionerPinHash();
-  if (envHash) {
-    if (!isWellFormedPinHash(envHash)) {
-      console.error("COMMISSIONER_PIN_HASH is malformed (in .env files, write every $ as \\$)");
-      return errorJson(500, "The server's COMMISSIONER_PIN_HASH is mangled. In .env files, write every $ as \\$.", {
-        code: "not_configured",
-      });
-    }
-    const attempt = await attemptPin(db, null, clientKey(request), () => verifyPin(pin, envHash));
+  const server = serverPin();
+  if (server.kind === "invalid") {
+    console.error(server.message);
+    return errorJson(500, server.message, { code: "not_configured" });
+  }
+  if (server.kind !== "none") {
+    const attempt = await attemptPin(db, null, clientKey(request), () => verifyServerPin(pin, server));
     if (attempt.status === "throttled") {
       return errorJson(429, `Easy, tiger. Too many wrong PINs. Try again in ${retryAfterText(attempt.retryAfter)}.`, {
         code: "throttled",
@@ -48,10 +48,10 @@ export const POST = withErrors(async (request: Request) => {
       });
     }
     if (attempt.status === "wrong") return errorJson(401, "Wrong PIN. Only the commissioner gets to start a trip.", { code: "bad_pin" });
-    pinHash = envHash;
+    pinHash = server.kind === "hash" ? server.hash : await hashPin(pin);
   } else {
     if (isProduction()) {
-      return errorJson(403, "Trip creation is locked: the server has no COMMISSIONER_PIN_HASH set.", {
+      return errorJson(403, "Trip creation is locked: the server has no COMMISSIONER_PIN set.", {
         code: "not_configured",
       });
     }
