@@ -30,7 +30,7 @@ export function DrinksPanel() {
       title: "Delete this drink?",
       body: (
         <>
-          <PlayerName player={r.player} />&apos;s {DRINK_LABEL[r.drink.type].toLowerCase()} on hole {r.drink.hole}. Every ghost beer and net
+          <PlayerName player={r.player} />&apos;s {DRINK_LABEL[r.drink.type].toLowerCase()} on hole {r.hole}. Every ghost beer and net
           for {r.team?.name ?? "the team"} recomputes{r.drink.type !== "drink" ? ", and its mulligan goes with it" : ""}.
         </>
       ),
@@ -45,7 +45,7 @@ export function DrinksPanel() {
   };
 
   const move = (r: DrinkRow, to: number) => {
-    const from = r.drink.hole;
+    const from = r.hole; // where it counts now (moving to its stamped hole pins it there)
     setMoving(null);
     if (to === from) return;
     if (dispatch({ type: "drink.move", drink_id: r.drink.id, hole: to })) {
@@ -112,8 +112,9 @@ export function DrinksPanel() {
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-bold text-muted">
                       <TeamPill team={r.team} size="sm" />
-                      <span className="text-ink">Hole {r.drink.hole}</span>
-                      {r.drink.moved_from_hole !== null && r.drink.moved_from_hole !== r.drink.hole && <span>(was {r.drink.moved_from_hole})</span>}
+                      <span className="text-ink">Hole {r.hole}</span>
+                      {r.drink.moved_from_hole !== null && r.drink.moved_from_hole !== r.hole && <span>(was {r.drink.moved_from_hole})</span>}
+                      {r.drink.moved_from_hole === null && r.drink.hole !== r.hole && <span>(phone said {r.drink.hole})</span>}
                       <span>{timeOf(r.drink.logged_at)}</span>
                       {r.loggedBy && r.loggedBy.id !== r.drink.player_id && (
                         <span>
@@ -124,10 +125,10 @@ export function DrinksPanel() {
                   </div>
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2">
-                  <Button variant="secondary" onClick={() => setMoving(r)} aria-label={`Move drink on hole ${r.drink.hole}`}>
+                  <Button variant="secondary" onClick={() => setMoving(r)} aria-label={`Move drink on hole ${r.hole}`}>
                     Move hole
                   </Button>
-                  <Button variant="danger" onClick={() => void del(r)} aria-label={`Delete drink on hole ${r.drink.hole}`}>
+                  <Button variant="danger" onClick={() => void del(r)} aria-label={`Delete drink on hole ${r.hole}`}>
                     Delete
                   </Button>
                 </div>
@@ -272,7 +273,7 @@ function MoveSheet({ row, onClose, onMove }: { row: DrinkRow; onClose: () => voi
       <div className="space-y-3 pb-2">
         <p className="text-base font-bold">
           <PlayerName player={row.player} />
-          &apos;s {DRINK_LABEL[row.drink.type].toLowerCase()} is on hole {row.drink.hole}. The credit moves with it and every ghost beer
+          &apos;s {DRINK_LABEL[row.drink.type].toLowerCase()} counts on hole {row.hole}. The credit moves with it and every ghost beer
           recomputes.
         </p>
         <div className="grid grid-cols-6 gap-2" role="group" aria-label="Holes">
@@ -280,12 +281,12 @@ function MoveSheet({ row, onClose, onMove }: { row: DrinkRow; onClose: () => voi
             <button
               key={n}
               type="button"
-              disabled={n === row.drink.hole}
+              disabled={n === row.hole}
               onClick={() => onMove(n)}
               aria-label={`Hole ${n}`}
               className={cx(
                 "num min-h-12 rounded-xl border-2 text-xl font-black active:scale-[0.95]",
-                n === row.drink.hole ? "border-ink bg-ink text-white opacity-60" : "border-ink bg-paper text-ink",
+                n === row.hole ? "border-ink bg-ink text-white opacity-60" : "border-ink bg-paper text-ink",
               )}
             >
               {n}

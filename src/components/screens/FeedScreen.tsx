@@ -45,6 +45,8 @@ export function FeedScreen() {
   const isCommissioner = useClientState((s) => s.isCommissioner);
   const serverTime = useClientState((s) => s.snapshot?.meta.server_time ?? null);
   const confirmedFeed = useClientState((s) => s.snapshot?.state.feed_events ?? null);
+  // Re-render when a queued photo finishes uploading (its "Uploading" badge goes away).
+  useClientState((s) => s.pendingCount);
   const nav = useShellNav();
   const toast = useToast();
   const confirm = useConfirm();
@@ -171,6 +173,7 @@ export function FeedScreen() {
                   nowMs={nowMs}
                   photoSrc={ev.photo_path ? store.photoUrl(ev.photo_path) : null}
                   pending={!confirmedIds.has(ev.id)}
+                  photoPending={store.isPhotoPending(ev.photo_path)}
                   reactions={reactions.get(ev.id) ?? EMPTY_SUMMARY}
                   meId={me ? meId : null}
                   canDelete={canDeleteEvent(ev, meId, isCommissioner)}

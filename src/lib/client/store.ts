@@ -689,6 +689,11 @@ export class TripStore {
     return path;
   }
 
+  /** The photo is still queued on this phone (not uploaded yet). Re-render on pendingCount changes. */
+  isPhotoPending(path: string | null | undefined): boolean {
+    return !!path && this.blobs.has(path);
+  }
+
   /** URL to display a stored photo: local object URL while pending, else meta.photo_base_url + path. */
   photoUrl(path: string | null | undefined): string | null {
     if (!path) return null;

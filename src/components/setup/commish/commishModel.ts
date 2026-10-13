@@ -121,6 +121,8 @@ export interface DrinkRow {
   player: Player | null;
   team: Team | null;
   loggedBy: Player | null;
+  /** Hole the drink counts on (engine's effective hole; can differ from the phone-stamped drink.hole). */
+  hole: number;
   /** Derived credit for this drink (2 for a ghost beer). */
   value: number;
   ghost: boolean;
@@ -137,7 +139,7 @@ export function drinkRows(state: Pick<TripState, "drinks" | "players" | "teams">
   const teams = new Map(state.teams.map((t) => [t.id, t]));
   return state.drinks
     .filter((x) => x.deleted_at === null)
-    .filter((x) => (filter.teamId === null || x.team_id === filter.teamId) && (filter.hole === null || x.hole === filter.hole))
+    .filter((x) => (filter.teamId === null || x.team_id === filter.teamId) && (filter.hole === null || (d.drinkValues[x.id]?.hole ?? x.hole) === filter.hole))
     .sort((a, b) => b.logged_at.localeCompare(a.logged_at) || b.id.localeCompare(a.id))
     .map((drink) => {
       const dv = d.drinkValues[drink.id];
@@ -146,6 +148,7 @@ export function drinkRows(state: Pick<TripState, "drinks" | "players" | "teams">
         player: players.get(drink.player_id) ?? null,
         team: teams.get(drink.team_id) ?? null,
         loggedBy: drink.logged_by ? (players.get(drink.logged_by) ?? null) : null,
+        hole: dv?.hole ?? drink.hole,
         value: dv?.value ?? 1,
         ghost: dv?.ghost ?? false,
       };

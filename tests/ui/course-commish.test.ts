@@ -102,6 +102,20 @@ describe("drinkRows", () => {
     expect(teamB.map((r) => r.drink.id).sort()).toEqual([b1, all.find((r) => r.player?.id === f.player.B2)!.drink.id].sort());
     expect(drinkRows(f.state, d, { teamId: f.team.A, hole: 2 })).toEqual([]);
   });
+
+  it("shows and filters by the hole a drink counts on, not the stale hole its phone stamped", () => {
+    const f = makeTrip({ teams: [4, 3], status: "live" });
+    f.teeOff("A", 1, 10).teeOff("A", 2, 20);
+    // A stale phone still showed hole 1 at minute 25, after hole 2 was teed off at minute 20.
+    const stale = f.drink("A", "A2", 1, "drink", { min: 25 });
+    const d = derive(f.state);
+    const [row] = drinkRows(f.state, d, { teamId: f.team.A, hole: null });
+    expect(row.drink.id).toBe(stale);
+    expect(row.drink.hole).toBe(1);
+    expect(row.hole).toBe(2);
+    expect(drinkRows(f.state, d, { teamId: f.team.A, hole: 2 }).map((r) => r.drink.id)).toEqual([stale]);
+    expect(drinkRows(f.state, d, { teamId: f.team.A, hole: 1 })).toEqual([]);
+  });
 });
 
 describe("driveFlags", () => {

@@ -1,5 +1,6 @@
 // Commissioner Setup: pure helpers (no React, no I/O). Unit-tested in tests/ui/setup-model.test.ts.
 // Everything here works on raw TripState rows so Setup keeps working even if derive() hiccups.
+import { PIN_MAX_LENGTH, PIN_MIN_LENGTH, PIN_RE } from "@/lib/pin";
 import type { Hole, Player, PotKey, Team, TeeSet, Trip, TripSettings, TripState } from "@/lib/types";
 import type { TripUpdateOp } from "@/lib/ops";
 import { normalizeVenmoHandle } from "@/lib/venmo";
@@ -693,8 +694,8 @@ export function sameDraft(a: SettingsDraft, b: SettingsDraft): boolean {
 // ---------------------------------------------------------------------------
 
 export function pinChangeError(current: string, next: string, confirm: string): string | null {
-  if (!/^\d{4,12}$/.test(current)) return "Enter the current PIN (4 to 12 digits).";
-  if (!/^\d{4,12}$/.test(next)) return "The new PIN has to be 4 to 12 digits.";
+  if (!PIN_RE.test(current)) return `Enter the current PIN (${PIN_MIN_LENGTH} to ${PIN_MAX_LENGTH} digits).`;
+  if (!PIN_RE.test(next)) return `The new PIN has to be ${PIN_MIN_LENGTH} to ${PIN_MAX_LENGTH} digits.`;
   if (next !== confirm) return "The new PINs don't match. Sober up and retype.";
   if (next === current) return "That's the same PIN. Living dangerously, huh?";
   return null;

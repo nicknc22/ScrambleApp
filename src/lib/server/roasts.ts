@@ -147,7 +147,7 @@ export function buildRoastContext(state: TripState, d: Derived, ev: FeedEvent, t
     const row = d.standings.find((s) => s.team_id === team.id);
     if (row && row.thru > 0) {
       lines.push(
-        `Their round: position ${row.pos_label} of ${d.standings.length}, ${formatToPar(row.net_to_par)} net to par (${formatToPar(row.gross_to_par)} gross) thru ${row.thru}, ${row.drinks} drinks logged, ${row.ghost_beers} ghost beers.`,
+        `Their round: position ${row.pos_label} of ${d.standings.length}, ${formatToPar(row.net_to_par)} net to par (${formatToPar(row.gross_to_par)} gross) thru ${row.thru}, ${row.drinks + row.pending_drinks} drinks logged, ${row.ghost_beers} ghost beers.`,
       );
     }
     const scored = (d.teamHoles[team.id] ?? []).filter((h) => h.strokes !== null).slice(-3);

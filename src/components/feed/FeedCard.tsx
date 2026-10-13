@@ -35,6 +35,8 @@ export interface FeedCardProps {
   photoSrc: string | null;
   /** Created on this phone and not yet confirmed by the server. */
   pending: boolean;
+  /** Its photo is still uploading from this phone (the post itself may already be synced). */
+  photoPending?: boolean;
   reactions: ReactionSummary;
   meId: string | null;
   canDelete: boolean;
@@ -53,6 +55,7 @@ export const FeedCard = memo(function FeedCard({
   nowMs,
   photoSrc,
   pending,
+  photoPending = false,
   reactions,
   meId,
   canDelete,
@@ -168,7 +171,7 @@ export const FeedCard = memo(function FeedCard({
 
       {ev.photo_path && (
         <div className="relative mt-3">
-          <FeedPhoto src={photoSrc} alt={caption} pending={pending} big={big} onOpen={(src) => onOpenPhoto(src, caption)} />
+          <FeedPhoto src={photoSrc} alt={caption} pending={pending || photoPending} big={big} onOpen={(src) => onOpenPhoto(src, caption)} />
         </div>
       )}
 

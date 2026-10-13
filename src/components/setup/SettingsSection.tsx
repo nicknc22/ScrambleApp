@@ -2,6 +2,7 @@
 // Trip settings: names, tees, ghost beer base size, roasts, long drive GPS limits, AI judge,
 // push throttle, drink cap. Edited as a draft and saved in one trip.update (only changed fields).
 // The commissioner PIN change goes through PUT /api/t/<code>/commissioner (needs signal).
+import { PIN_MAX_LENGTH } from "@/lib/pin";
 import { useState, type FormEvent } from "react";
 import { useClientState } from "@/lib/client/react";
 import type { TeeSet } from "@/lib/types";
@@ -221,7 +222,7 @@ function PinChange() {
   const [again, setAgain] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const digits = (v: string) => v.replace(/\D/g, "").slice(0, 12);
+  const digits = (v: string) => v.replace(/\D/g, "").slice(0, PIN_MAX_LENGTH);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
