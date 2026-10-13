@@ -1,22 +1,25 @@
 "use client";
 // Every Play-tab write goes through here: store.dispatch (never the sync API), plus the toast /
 // undo / fanfare that goes with it. Reads fresh state from the store inside each action so a
-// callback created on an older render never stamps a stale hole. Drink logs show no toast: their
-// 10-second Undo is the inline chip in the drinks panel (drinkUndo.ts), so nothing actionable ever
-// floats over Save / On the tee or the tab bar.
+// callback created on an older render never stamps a stale hole. Drink logs and mulligans show no
+// toast: their 10-second Undo is an inline chip (drinkUndo.ts, mulliganUndo.ts), so nothing
+// actionable ever floats over the stepper, Save / On the tee or the tab bar. The informational
+// toasts left (saved, on the tee, errors, roasts) show at the top on Play (TeamHoleScreen).
 import { useMemo } from "react";
 import type { DrinkType, MulliganSource, UUID } from "@/lib/types";
-import type { DispatchResult } from "@/lib/client/store";
+import type { DispatchOptions, DispatchResult } from "@/lib/client/store";
 import type { OpInput } from "@/lib/ops";
 import { useTripStore } from "@/lib/client/react";
 import { newId } from "@/lib/ids";
 import { formatToPar } from "@/lib/engine/format";
 import { displayName, useFanfare, useToast } from "@/components/ui";
-import { drinkBursts } from "./drinkUndo";
+import { drinkBursts, drinkPhotosSaving } from "./drinkUndo";
+import { mulliganUndos } from "./mulliganUndo";
 import {
   GROOM_FANFARE,
   burstAfterLog,
   burstAfterUndo,
+  canUndoMulligan,
   drinkFeedback,
   ghostFanfareCopy,
   noWindowMessage,
@@ -36,6 +39,8 @@ export interface PlayActions {
   /** The drinks panel's Undo chip: take back the newest drink of this phone's burst. */
   undoLastDrink(): Promise<void>;
   spendMulligan(source: MulliganSource, hole: number): boolean;
+  /** The Mulligans card's Undo chip: put the mulligan this phone just used back in the bank. */
+  undoMulligan(): Promise<void>;
   completeRound(): boolean;
 }
 
@@ -48,7 +53,7 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
 
   return useMemo<PlayActions>(() => {
     const extra = override ? { as_commissioner: true } : {};
-    const dispatch = (input: OpInput) => store.dispatch({ ...input, ...extra } as OpInput);
+    const dispatch = (input: OpInput, opts?: DispatchOptions) => store.dispatch({ ...input, ...extra } as OpInput, opts);
     const fail = (r: FailResult) => {
       toast.error(r.reason || "That didn't work.", { title: "That didn't save", id: `play-fail-${r.code}` });
     };
@@ -76,18 +81,22 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
       }
     };
 
-    const undoMulligan = async (opId: UUID, mulliganId: UUID) => {
+    /** Undo the mulligan this phone just used (cancel it if it never left the phone, else undo it). */
+    const undoMulligan = async () => {
+      const used = mulliganUndos.get(teamId);
+      const now = Date.now();
+      if (!canUndoMulligan(used, now)) return;
+      mulliganUndos.set(teamId, { ...used, undoneAt: now });
       let cancelled = false;
       try {
-        cancelled = await store.cancelPending(opId);
+        cancelled = await store.cancelPending(used.opId);
       } catch {
         cancelled = false;
       }
       if (!cancelled) {
-        const r = dispatch({ type: "mulligan.undo", mulligan_id: mulliganId });
-        if (!r.ok) return fail(r);
+        const r = dispatch({ type: "mulligan.undo", mulligan_id: used.mulliganId });
+        if (!r.ok) fail(r);
       }
-      toast.info("Mulligan put back in the bank.", { emoji: "↩️", id: `undo-${mulliganId}`, duration: 3000 });
     };
 
     return {
@@ -129,27 +138,31 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
       },
 
       async logDrink(playerId, type, photo) {
-        // The window is checked at tap time and again after the (async) photo compression.
-        if ((store.getState().derived?.openWindow[teamId] ?? null) === null) {
-          roastNoWindow(playerId);
-          return false;
-        }
-        let photoPath: string | null = null;
-        if (photo) {
-          try {
-            photoPath = await store.addPhoto(photo, "drinks");
-          } catch (e) {
-            console.warn("[play] drink photo failed", e);
-            toast.error("The photo didn't take, so the drink is logged without it.", { title: "Photo fail", emoji: "📷" });
-          }
-        }
+        // The tap decides the hole and the time. Compressing a photo takes a moment, and a tee-off
+        // or Round complete tapped meanwhile must neither move the drink to the next hole nor drop it.
         const hole = store.getState().derived?.openWindow[teamId] ?? null;
         if (hole === null) {
           roastNoWindow(playerId);
           return false;
         }
+        const tappedAt = store.serverNow();
+        let photoPath: string | null = null;
+        if (photo) {
+          drinkPhotosSaving.add(teamId, playerId); // "Saving photo…" on the player's row
+          try {
+            photoPath = await store.addPhoto(photo, "drinks");
+          } catch (e) {
+            console.warn("[play] drink photo failed", e);
+            toast.error("The photo didn't take, so the drink is logged without it.", { title: "Photo fail", emoji: "📷" });
+          } finally {
+            drinkPhotosSaving.remove(teamId, playerId);
+          }
+        }
         const drinkId = newId();
-        const r = dispatch({ type: "drink.log", drink_id: drinkId, team_id: teamId, player_id: playerId, hole, drink_type: type, photo_path: photoPath });
+        const r = dispatch(
+          { type: "drink.log", drink_id: drinkId, team_id: teamId, player_id: playerId, hole, drink_type: type, photo_path: photoPath },
+          photo ? { at: tappedAt } : undefined,
+        );
         if (!r.ok) {
           if (r.code === "no_window") roastNoWindow(playerId);
           else fail(r);
@@ -176,19 +189,13 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
           fail(r);
           return false;
         }
-        const groom = source === "groom";
-        if (groom) fanfare.show({ tone: "groom", ...GROOM_FANFARE, key: `groom-${mulliganId}` });
-        const opId = r.op.id;
-        toast.show({
-          id: `mulligan-${mulliganId}`,
-          tone: "success",
-          emoji: groom ? "👑" : "♻️",
-          title: groom ? "Groom's Mulligan used" : "Mulligan used",
-          message: `Hole ${hole}. Hit it again. The first one never happened.`,
-          action: { label: "Undo", onAction: () => void undoMulligan(opId, mulliganId) },
-        });
+        if (source === "groom") fanfare.show({ tone: "groom", ...GROOM_FANFARE, key: `groom-${mulliganId}` });
+        // No toast: the 10-second Undo is the chip in the Mulligans card.
+        mulliganUndos.set(teamId, { opId: r.op.id, mulliganId, source, hole, at: Date.now(), undoneAt: null });
         return true;
       },
+
+      undoMulligan,
 
       completeRound() {
         const r = dispatch({ type: "round.complete", team_id: teamId });

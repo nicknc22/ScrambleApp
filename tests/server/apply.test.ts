@@ -9,6 +9,7 @@ import { connectPostgres, createTestDb, type Db, type DbConnection } from "@/lib
 import { runMigrations } from "@/lib/server/migrate";
 import {
   applyOpsToTrip,
+  DEMO_MAX_APPLIED_OPS,
   MAX_CLOCK_SKEW_MS,
   MAX_OPS_PER_SYNC,
   sortLikeDb,
@@ -58,8 +59,8 @@ interface LiveTrip {
 }
 
 /** A trip set up entirely through commissioner ops (and started unless start: false). */
-async function liveTrip(db: Db, teams: number[], opts: { start?: boolean; groom?: string } = {}): Promise<LiveTrip> {
-  const trip = await createTrip(db, { name: "Sync Trip", app_name: "Scramble", pin_hash: PIN_HASH, now: srv(-7200) });
+async function liveTrip(db: Db, teams: number[], opts: { start?: boolean; groom?: string; demo?: boolean } = {}): Promise<LiveTrip> {
+  const trip = await createTrip(db, { name: "Sync Trip", app_name: "Scramble", pin_hash: PIN_HASH, now: srv(-7200), is_demo: opts.demo });
   const team: Record<string, string> = {};
   const player: Record<string, string> = {};
   const ops: Op[] = [];
@@ -354,7 +355,8 @@ describe("last write wins (by client time)", () => {
         type: "score_edit",
         team_id: A,
         actor_id: A1,
-        dedupe_key: `overruled:${stale.id}`,
+        // Keyed by the dispute (team, hole, losing value, winning value), not the op.
+        dedupe_key: `overruled:${A}:1:6:4`,
         payload: { kind: "overruled", hole: 1, from: 6, to: 4, par: 4, edit_count: 1, overruled_by: A2 },
       }),
     ]);
@@ -390,6 +392,67 @@ describe("last write wins (by client time)", () => {
       expect(p.kind, order).toBe(order === "later first" ? "overruled" : undefined);
       await expectMatchesDb(lt, out);
     }
+  });
+
+  it("rules/money/walkthrough/offline review repro: an untouched par default never beats a teammate's real score, in either sync order", async () => {
+    const results: Record<string, unknown> = {};
+    for (const order of ["real first", "default first"] as const) {
+      const lt = await liveTrip(db, [3, 3]);
+      const B = lt.team.B;
+      const { B1, B2 } = lt.player;
+      const opens: Op[] = [];
+      for (let hole = 1; hole <= 7; hole++) opens.push(mk("tee.open", { team_id: B, hole, at: cli(hole * 600), by: B1 }));
+      await sync(lt, opens, { now: 4300 });
+      // B2 types the real 6 on hole 7 (par 4) at 4700 with no signal: queued.
+      const real = mk("score.set", { team_id: B, hole: 7, strokes: 6, at: cli(4700), by: B2 });
+      // B1 never touches the stepper and taps "Save 4 & tee off hole 8" at 4730.
+      const def = mk("score.set", { team_id: B, hole: 7, strokes: 4, if_empty: true, at: cli(4730), by: B1 });
+      const tee8 = mk("tee.open", { team_id: B, hole: 8, at: cli(4730.5), by: B1 });
+      const feedBefore = await count(db, "feed_events", lt.trip.id);
+      let last: ApplyOpsResult;
+      if (order === "real first") {
+        expect(statuses(await sync(lt, [real], { now: 4750 })), order).toEqual(["applied"]);
+        last = await sync(lt, [def, tee8], { now: 4760 });
+        expect(statuses(last), order).toEqual(["applied", "applied"]);
+      } else {
+        expect(statuses(await sync(lt, [def, tee8], { now: 4735 })), order).toEqual(["applied", "applied"]);
+        last = await sync(lt, [real], { now: 4800 });
+        expect(last.results, order).toEqual([{ id: real.id, status: "applied" }]);
+      }
+      const row = last.snapshot.state.hole_scores.find((h) => h.team_id === B && h.hole === 7)!;
+      expect(row, order).toMatchObject({ strokes: 6, strokes_at: cli(4700), edit_count: 0, updated_by: B2 });
+      // Replacing a default is neither an edit nor a dispute: no score_edit of any kind.
+      const feed = await loadTripState(db, lt.trip.id).then((s) => s.feed_events.filter((e) => e.type === "score_edit"));
+      expect(feed, order).toEqual([]);
+      expect(last.events.push_triggers, order).toEqual([]);
+      const b = derive(last.snapshot.state).standings.find((r) => r.team_id === B)!;
+      results[order] = { gross: b.gross, net_to_par: b.net_to_par, feedAdded: (await count(db, "feed_events", lt.trip.id)) - feedBefore > 0 };
+      await expectMatchesDb(lt, last);
+    }
+    // Same scorecard and standings whichever phone found signal first.
+    expect(results["default first"]).toEqual({ ...(results["real first"] as object) });
+    expect(results["real first"]).toMatchObject({ net_to_par: 2 });
+  });
+
+  it("security review repro: a flood of stale score.set ops posts ONE overruled card per dispute (team, hole, losing and winning value)", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    const A = lt.team.A;
+    const { A1, A2 } = lt.player;
+    await sync(lt, [mk("tee.open", { team_id: A, hole: 1, at: cli(10), by: A1 }), mk("score.set", { team_id: A, hole: 1, strokes: 4, at: cli(3600), by: A2 })], { now: 3600 });
+    const before = await count(db, "feed_events", lt.trip.id);
+    // 3 syncs of 200 stale ops each (strokes 5..9, an hour old): all rejected.
+    for (let batch = 0; batch < 3; batch++) {
+      const ops = Array.from({ length: 200 }, (_, i) => mk("score.set", { team_id: A, hole: 1, strokes: 5 + (i % 5), at: cli(60 + i), by: A1 }));
+      const out = await sync(lt, ops, { now: 3700 + batch });
+      expect(out.results.every((r) => r.status === "rejected" && r.code === "conflict")).toBe(true);
+    }
+    const overruled = (await loadTripState(db, lt.trip.id)).feed_events.filter((e) => e.payload.kind === "overruled");
+    expect(overruled.map((e) => e.payload.from).sort()).toEqual([5, 6, 7, 8, 9]);
+    expect(await count(db, "feed_events", lt.trip.id)).toBe(before + 5);
+    // A different winning value is a different dispute.
+    await sync(lt, [mk("score.set", { team_id: A, hole: 1, strokes: 3, at: cli(3650), by: A2 })], { now: 3800 });
+    const again = await sync(lt, [mk("score.set", { team_id: A, hole: 1, strokes: 5, at: cli(70), by: A1 })], { now: 3900 });
+    expect(again.events.feed.map((e) => [e.payload.kind, e.payload.from, e.payload.to])).toEqual([["overruled", 5, 3]]);
   });
 
   it("orders by client time within one batch too (the later edit wins regardless of position)", async () => {
@@ -929,6 +992,51 @@ describe("offline phones vs the end of the round", () => {
     const honest = ctp(14, photo);
     const r2 = await sync(lt, [honest], { now: 30 });
     expect(r2.snapshot.state.contest_entries.find((e) => e.id === honest.entry_id)).toMatchObject({ ai_estimate_ft: 20, ai_suspicious: false });
+  });
+});
+
+describe("demo write budget", () => {
+  /** Pretend `n` more ops were already processed for the trip (fast: straight into applied_ops). */
+  async function fill(lt: LiveTrip, n: number): Promise<void> {
+    await db.query(
+      `insert into applied_ops (id, trip_id, op_type, status)
+       select gen_random_uuid(), $1, 'drink.log', 'applied' from generate_series(1, $2::int)`,
+      [lt.trip.id, n],
+    );
+  }
+
+  it("security review repro: a demo trip stops taking ops at the budget (rejected 'conflict', nothing recorded); a real trip doesn't", async () => {
+    const demo = await liveTrip(db, [2, 2], { demo: true });
+    await sync(demo, [mk("tee.open", { team_id: demo.team.A, hole: 1, by: demo.player.A1 })], { now: 10 });
+    const used = await count(db, "applied_ops", demo.trip.id);
+    await fill(demo, DEMO_MAX_APPLIED_OPS - used - 3);
+    const drinks = Array.from({ length: 8 }, () => drinkOp(demo, "A", "A1", 1));
+    const out = await sync(demo, drinks, { now: 20 });
+    expect(statuses(out)).toEqual(["applied", "applied", "applied", "rejected", "rejected", "rejected", "rejected", "rejected"]);
+    expect(out.results[3]).toEqual({ id: drinks[3].id, status: "rejected", code: "conflict", reason: "Demo's full. Hit Reset demo." });
+    expect(await count(db, "applied_ops", demo.trip.id)).toBe(DEMO_MAX_APPLIED_OPS);
+    expect(await count(db, "drinks", demo.trip.id)).toBe(3);
+    // Garbage and stale edits can't grow anything either (no applied_ops rows, no overruled posts).
+    const feed = await count(db, "feed_events", demo.trip.id);
+    const junk = [
+      mk("reaction.set", { feed_event_id: newId(), player_id: demo.player.A1, kind: "fire", on: true }),
+      mk("score.set", { team_id: demo.team.A, hole: 1, strokes: 9, at: cli(-99_999) }),
+    ];
+    const r = await sync(demo, junk, { now: 30 });
+    expect(r.results.map((x) => x.status === "rejected" && x.code)).toEqual(["conflict", "conflict"]);
+    expect(await count(db, "applied_ops", demo.trip.id)).toBe(DEMO_MAX_APPLIED_OPS);
+    expect(await count(db, "feed_events", demo.trip.id)).toBe(feed);
+    // Resends of ops processed before the budget ran out still answer as before.
+    expect(statuses(await sync(demo, drinks.slice(0, 3), { now: 40 }))).toEqual(["duplicate", "duplicate", "duplicate"]);
+    // Not stuck on the earlier answer: once there's room (Reset demo wipes the trip), they apply.
+    await db.query("delete from applied_ops where id in (select id from applied_ops where trip_id = $1 and op_type = 'drink.log' and status = 'applied' limit 10)", [demo.trip.id]);
+    expect(statuses(await sync(demo, drinks.slice(3, 5), { now: 50 }))).toEqual(["applied", "applied"]);
+
+    // A real trip has no such budget.
+    const real = await liveTrip(db, [2, 2]);
+    await sync(real, [mk("tee.open", { team_id: real.team.A, hole: 1, by: real.player.A1 })], { now: 10 });
+    await fill(real, DEMO_MAX_APPLIED_OPS);
+    expect(statuses(await sync(real, [drinkOp(real, "A", "A1", 1)], { now: 20 }))).toEqual(["applied"]);
   });
 });
 

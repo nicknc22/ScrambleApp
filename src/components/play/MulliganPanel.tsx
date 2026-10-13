@@ -1,10 +1,13 @@
 "use client";
 // Team mulligan bank, "Use mulligan" (earned or Groom's) and the Groom's Mulligan button on the
-// groom's team while it's unused. Mulligans never touch the score math.
+// groom's team while it's unused. Mulligans never touch the score math. The 10-second Undo for a
+// mulligan just used is an inline chip in place of the card's caption (never a toast over the
+// stepper or the action bar).
 import { useState } from "react";
 import type { MulliganSource } from "@/lib/types";
 import { BottomSheet, Button, Card, useConfirm } from "@/components/ui";
-import type { MulliganOptions } from "./model";
+import type { MulliganOptions, MulliganUndoView } from "./model";
+import { InlineUndoChip } from "./InlineUndoChip";
 
 export function MulliganPanel({
   hole,
@@ -13,6 +16,8 @@ export function MulliganPanel({
   groomName,
   disabled,
   onUse,
+  undo = null,
+  onUndo = () => {},
 }: {
   hole: number;
   options: MulliganOptions;
@@ -20,6 +25,9 @@ export function MulliganPanel({
   groomName: string;
   disabled: boolean;
   onUse: (source: MulliganSource) => void;
+  /** Undo chip for the mulligan this phone just used (or its "back in the bank" mark). */
+  undo?: MulliganUndoView | null;
+  onUndo?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const confirm = useConfirm();
@@ -44,14 +52,31 @@ export function MulliganPanel({
           </span>
           <span className="text-[10px] font-black tracking-wider uppercase">in bank</span>
         </div>
-        <div className="min-w-0 flex-1">
-          <h2 className="text-lg leading-tight font-black uppercase">Mulligans</h2>
-          <p className="text-sm font-bold text-muted">
-            {options.earned > 0
-              ? `Every shotgun or shot banks one. ${options.usedTotal} used so far.`
-              : "Shotgun or shot something to bank one."}
-          </p>
-        </div>
+        {undo?.kind === "chip" ? (
+          <InlineUndoChip
+            ariaLabel={undo.ariaLabel}
+            detail={undo.detail}
+            remainingMs={undo.remainingMs}
+            elapsedMs={undo.elapsedMs}
+            onUndo={onUndo}
+            testId="mulligan-undo"
+          />
+        ) : (
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg leading-tight font-black uppercase">Mulligans</h2>
+            {undo?.kind === "undone" ? (
+              <p className="text-sm font-black text-flag-dark" data-testid="mulligan-undone">
+                {undo.text}
+              </p>
+            ) : (
+              <p className="text-sm font-bold text-muted">
+                {options.earned > 0
+                  ? `Every shotgun or shot banks one. ${options.usedTotal} used so far.`
+                  : "Shotgun or shot something to bank one."}
+              </p>
+            )}
+          </div>
+        )}
       </div>
       <div className="grid gap-2 px-3 pb-3">
         <Button variant="secondary" size="lg" full disabled={disabled || !options.any} onClick={() => setOpen(true)} leading={<span aria-hidden="true">♻️</span>}>

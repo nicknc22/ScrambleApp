@@ -13,6 +13,7 @@ import {
   payoutRuleLabel,
   potShortName,
   potStatus,
+  resultsChangedSinceFinal,
   signedCents,
   sittingOut,
   sortLedger,
@@ -149,6 +150,36 @@ describe("money components (server-rendered)", () => {
     expect(proj).toContain("Projected");
     expect(proj).toContain("final when the commissioner finalizes");
     expect(proj).not.toContain("FINAL");
+  });
+
+  it("banner: results changed after the final whistle (finding: late-sync-rewrites-final-settleup)", () => {
+    const finalizedAt = "2026-10-24T22:00:00.000Z";
+    const ev = (type: string, created_at: string, deleted_at: string | null = null) => ({ type, created_at, deleted_at }) as never;
+    const trip = { status: "final" as const, finalized_at: finalizedAt };
+    // Nothing after the finalize: no banner.
+    expect(resultsChangedSinceFinal(trip, [ev("final_results", finalizedAt), ev("results_changed", "2026-10-24T21:00:00.000Z")])).toBeNull();
+    // A results_changed after it: the newest one's time; deleted ones don't count; only while final.
+    const events = [
+      ev("final_results", finalizedAt),
+      ev("results_changed", "2026-10-24T22:01:00.000Z"),
+      ev("results_changed", "2026-10-24T22:05:00.000Z"),
+      ev("results_changed", "2026-10-24T22:09:00.000Z", "2026-10-24T22:10:00.000Z"),
+    ];
+    expect(resultsChangedSinceFinal(trip, events)).toBe("2026-10-24T22:05:00.000Z");
+    expect(resultsChangedSinceFinal({ status: "live", finalized_at: finalizedAt }, events)).toBeNull();
+    // Re-finalized after the change: the old notice is history.
+    expect(resultsChangedSinceFinal({ status: "final", finalized_at: "2026-10-24T22:30:00.000Z" }, events)).toBeNull();
+
+    const changed = renderToStaticMarkup(<MoneyBanner status="final" totalCents={59000} myNetCents={-3037} changedAt="2026-10-24T22:05:00.000Z" onSeeFeed={() => {}} />);
+    expect(changed).toContain("Results changed after the final whistle — see the feed");
+    expect(changed).toContain('data-testid="money-results-changed"');
+    expect(changed).toContain("See what changed");
+    expect(changed).not.toContain("These numbers are real. Pay up.");
+    const plain = renderToStaticMarkup(<MoneyBanner status="final" totalCents={59000} myNetCents={-3037} changedAt={null} />);
+    expect(plain).not.toContain("Results changed");
+    expect(plain).toContain("These numbers are real. Pay up.");
+    // Never while live (a projection can change all it wants).
+    expect(renderToStaticMarkup(<MoneyBanner status="live" totalCents={1} myNetCents={null} changedAt="2026-10-24T22:05:00.000Z" />)).not.toContain("Results changed");
   });
 
   it("team match card shows the payout rule, places and per-member amounts", () => {

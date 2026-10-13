@@ -316,8 +316,8 @@ describe("sendToPlayers", () => {
     const r2 = await sendToPlayers(s.trip, [s.player.A1, s.player.B1], { title: "2", body: "", tag: "groom" }, at(60));
     expect(r2.throttled).toEqual([s.player.A1]);
     expect(r2.sent).toEqual([s.player.B1]);
-    expect((await sendToPlayers(s.trip, [s.player.A1], { title: "3", body: "", tag: "final" }, at(119))).throttled).toEqual([s.player.A1]);
-    expect((await sendToPlayers(s.trip, [s.player.A1], { title: "4", body: "", tag: "final" }, at(121))).sent).toEqual([s.player.A1]);
+    expect((await sendToPlayers(s.trip, [s.player.A1], { title: "3", body: "", tag: "ctplead:3" }, at(119))).throttled).toEqual([s.player.A1]);
+    expect((await sendToPlayers(s.trip, [s.player.A1], { title: "4", body: "", tag: "ctplead:3" }, at(121))).sent).toEqual([s.player.A1]);
     expect(sent.map((x) => x.payload.title)).toEqual(["1", "2", "4"]);
 
     // A custom throttle from trip settings.
@@ -338,6 +338,24 @@ describe("sendToPlayers", () => {
     expect((await sendToPlayers(s.trip, [s.player.A1], { title: "ctp", body: "", tag: "ctplead:3" }, at(151))).sent).toHaveLength(1);
     expect((await sendToPlayers(s.trip, [s.player.A1], { title: "lead 3", body: "", tag: "lead" }, at(COLLAPSE_WINDOW_SEC + 1))).sent).toHaveLength(1);
     expect(sent.map((x) => x.payload.title)).toEqual(["lead 1", "ctp", "lead 3"]);
+  });
+
+  it("results pushes (final, results_changed) skip the throttle and the collapse window; they still reset the throttle", async () => {
+    const s = await setup();
+    await subscribe(s, "A1");
+    const t0 = Date.now();
+    const at = (sec: number) => ({ now: new Date(t0 + sec * 1000) });
+    const send = (tag: string, sec: number) => sendToPlayers(s.trip, [s.player.A1], { title: tag, body: "", tag }, at(sec));
+    expect((await send("lead", 0)).sent).toEqual([s.player.A1]);
+    expect((await send("final", 10)).sent).toEqual([s.player.A1]);
+    expect((await send("results_changed", 20)).sent).toEqual([s.player.A1]);
+    expect((await send("results_changed", 30)).sent).toEqual([s.player.A1]);
+    expect((await send("final", 40)).sent).toEqual([s.player.A1]);
+    // Everything else is still throttled behind them.
+    expect((await send("groom", 50)).throttled).toEqual([s.player.A1]);
+    // Muted is muted.
+    await applyOpsToTrip({ db, trip: s.trip, ops: [mk("player.mute", { player_id: s.player.A1, muted: true, by: s.player.A1 })], isCommissioner: false });
+    expect((await send("results_changed", 60)).muted).toEqual([s.player.A1]);
   });
 
   it("deletes subscriptions the push service says are gone (404/410), keeps others, never throws", async () => {
@@ -403,6 +421,57 @@ describe("push triggers", () => {
     ]);
     // The lead change goes first (to everyone); A1 is then throttled for the roast.
     expect(sent.map((x) => x.payload.title)).toEqual(["new lead", "new lead"]);
+  });
+
+  it("money/speccheck review repro: a late sync right after the FINAL push still reaches everyone, and so does a quick re-finalize", async () => {
+    const s = await setup();
+    for (const label of ["A1", "A2", "B1", "B2"]) await subscribe(s, label);
+    // $20 team match. A shoots 72, B 73; B2's shotgun on 18 sits in a dead zone; both tap Round complete.
+    const ops: Op[] = [mk("trip.update", { patch: { settings: { team_match_ante_cents: 2000 } } })];
+    for (const letter of ["A", "B"]) {
+      for (let hole = 1; hole <= 18; hole++) {
+        ops.push(mk("tee.open", { team_id: s.team[letter], hole }));
+        ops.push(mk("score.set", { team_id: s.team[letter], hole, strokes: letter === "B" && hole === 18 ? 5 : 4 }));
+      }
+    }
+    const shotgun = mk("drink.log", { drink_id: newId(), team_id: s.team.B, player_id: s.player.B2, hole: 18, drink_type: "shotgun", photo_path: null, by: s.player.B2 });
+    ops.push(mk("round.complete", { team_id: s.team.A }), mk("round.complete", { team_id: s.team.B }));
+    await applyOpsToTrip({ db, trip: s.trip, ops, isCommissioner: true });
+    const t0 = Date.now();
+    const at = (sec: number) => ({ now: new Date(t0 + sec * 1000) });
+    const deliver = async (batchOps: Op[], sec: number, commish = false) => {
+      const out = await applyOpsToTrip({ db, trip: s.trip, ops: batchOps, isCommissioner: commish });
+      expect(out.results.every((r) => r.status === "applied")).toBe(true);
+      sent = [];
+      const reports = await deliverPushTriggers(out.snapshot.state.trip, out.snapshot.state, out.events.push_triggers, at(sec));
+      return { out, reports };
+    };
+
+    const fin = await deliver([mk("trip.finalize", {})], 0, true);
+    expect(fin.out.events.push_triggers.map((t) => t.collapse_key)).toEqual(["final"]);
+    expect(sent).toHaveLength(4);
+
+    // B2's phone finds signal a minute later: the champion flips and the settle-up reverses.
+    const late = await deliver([shotgun], 60);
+    expect(late.out.events.push_triggers.map((t) => t.collapse_key)).toEqual(["results_changed"]);
+    expect(late.reports[0]).toMatchObject({ throttled: [], collapsed: [] });
+    expect(sent.map((x) => x.payload.title)).toEqual(Array(4).fill(expect.stringContaining("RESULTS CHANGED")));
+
+    // The commissioner reopens and finalizes again 2 minutes later: the corrected FINAL goes out too.
+    await deliver([mk("trip.reopen", {})], 150, true);
+    const refin = await deliver([mk("trip.finalize", {})], 180, true);
+    expect(refin.out.events.push_triggers.map((t) => t.collapse_key)).toEqual(["final"]);
+    expect(refin.reports[0]).toMatchObject({ throttled: [], collapsed: [] });
+    expect(sent).toHaveLength(4);
+    expect(String(sent[0].payload.body)).toContain("Team B");
+  });
+
+  it("results_changed goes before anything else in a batch", async () => {
+    const s = await setup();
+    await subscribe(s, "A1");
+    const state = await loadTripState(db, s.trip.id);
+    await deliverPushTriggers(s.trip, state, [trig("groom"), trig("lead"), trig("results_changed")]);
+    expect(sent.map((x) => x.payload.title)).toEqual(["results_changed"]);
   });
 
   it("pushHook sends a sync batch's lead change to every subscribed player", async () => {

@@ -460,34 +460,256 @@ test("the advance sheet's untouched par never replaces a teammate's real score",
   await ctxB.close();
 });
 
+/** Ops the commissioner's request context sends straight to the server (setup for a scenario). */
+async function commishOps(request: APIRequestContext, code: string, ops: Array<Record<string, unknown>>) {
+  let t = Date.now() - 30 * 60_000;
+  const res = await request.post(`/api/t/${code}/sync`, {
+    data: { ops: ops.map((o) => ({ id: randomUUID(), at: new Date((t += 1000)).toISOString(), by: null, as_commissioner: true, ...o })) },
+  });
+  expect(res.ok()).toBe(true);
+  const body = (await res.json()) as { results: Array<{ status: string; reason?: string }> };
+  expect(body.results.filter((r) => r.status !== "applied")).toEqual([]);
+}
+
+/** Where the chips, the stepper's + and the action bar sit on the first screen. */
+async function firstScreen(page: Page) {
+  return page.evaluate(() => {
+    const bar = document.querySelector('[data-testid="play-action-bar"]')!.getBoundingClientRect().top;
+    const chips = [...document.querySelectorAll('[data-testid="teeshot-panel"] [role="group"] button')].map((b) => b.getBoundingClientRect().bottom);
+    const plus = document.querySelector('[data-testid="score-panel"] button[aria-label="One more stroke"]')!.getBoundingClientRect().bottom;
+    return { scrollY: window.scrollY, bar, chips, plus };
+  });
+}
+
+async function expectChipsAndStepperVisible(page: Page, who: string, chipCount: number) {
+  const m = await firstScreen(page);
+  expect(m.scrollY).toBe(0);
+  expect(m.chips.length).toBe(chipCount);
+  for (const bottom of m.chips) expect(bottom, `${who}: chip bottom ${bottom} vs action bar ${m.bar}`).toBeLessThanOrEqual(m.bar);
+  expect(m.plus, `${who}: stepper bottom ${m.plus} vs action bar ${m.bar}`).toBeLessThanOrEqual(m.bar);
+}
+
 // 390x664 = iPhone 13 Safari's visible area; 390x763 = the Home Screen app (status bar + home
-// indicator); 360x740 = a small Android. The chips must clear the action bar everywhere; on the
-// Home Screen sizes the stepper's buttons do too.
+// indicator); 360x740 = a small Android. On a normal hole the chips AND the stepper's buttons clear
+// the action bar everywhere, and on a drive-warning hole too; on the Home Screen sizes also with
+// the commissioner's team strip (Switch team).
 for (const vp of [
-  { width: 390, height: 664, stepper: false },
-  { width: 390, height: 763, stepper: true },
-  { width: 360, height: 740, stepper: true },
+  { width: 390, height: 664, commish: false },
+  { width: 390, height: 763, commish: true },
+  { width: 360, height: 740, commish: true },
 ]) {
-  test(`the tee-shot chips are on the first screen of a normal hole (${vp.width}x${vp.height})`, async ({ page }) => {
-    test.setTimeout(120_000);
+  test(`the tee-shot chips and the stepper are on the first screen (${vp.width}x${vp.height})`, async ({ page }) => {
+    test.setTimeout(150_000);
     const { code, players } = await createLiveTrip(page.request);
+    const id = (n: string) => players.find((p) => p.name === n)!.id;
+    const size = { width: vp.width, height: vp.height };
+    const teams = (await (await page.request.get(`/api/t/${code}/state`)).json()) as { state: { teams: Array<{ id: string; name: string }> } };
+    const grip = teams.state.teams.find((t) => t.name === "Grip It & Sip It")!.id;
     await page.context().clearCookies();
-    for (const who of ["Tom", "Dave"]) {
-      await joinAs(page, code, players.find((p) => p.name === who)!.id, { width: vp.width, height: vp.height });
+
+    // A normal hole (hole 1) on both teams' phones.
+    for (const [who, chips] of [
+      ["Tom", 3],
+      ["Dave", 4],
+    ] as const) {
+      await joinAs(page, code, id(who), size);
       if (await page.getByTestId("tee-cta").count()) {
         await page.getByTestId("tee-cta").click();
         await dismissFanfare(page, "hype");
       }
-      const m = await page.evaluate(() => {
-        const bar = document.querySelector('[data-testid="play-action-bar"]')!.getBoundingClientRect().top;
-        const chips = [...document.querySelectorAll('[data-testid="teeshot-panel"] [role="group"] button')].map((b) => b.getBoundingClientRect().bottom);
-        const plus = document.querySelector('[data-testid="score-panel"] button[aria-label="One more stroke"]')!.getBoundingClientRect().bottom;
-        return { scrollY: window.scrollY, bar, chips, plus };
-      });
-      expect(m.scrollY).toBe(0);
-      expect(m.chips.length).toBe(who === "Dave" ? 4 : 3);
-      for (const bottom of m.chips) expect(bottom, `${who}: chip bottom ${bottom} vs action bar ${m.bar}`).toBeLessThanOrEqual(m.bar);
-      if (vp.stepper) expect(m.plus, `${who}: stepper bottom ${m.plus} vs action bar ${m.bar}`).toBeLessThanOrEqual(m.bar);
+      await expectChipsAndStepperVisible(page, who, chips);
+    }
+
+    // A drive-warning hole: the foursome moves on to hole 7 with only Dave's drives used, so Big
+    // Nick, Mike and Chris need one with 3 holes left (hard). The red banner is short and the chips
+    // and the stepper still fit.
+    await page.request.post(`/api/t/${code}/commissioner`, { data: { pin: "2468" } });
+    const ops: Array<Record<string, unknown>> = [];
+    for (let h = 1; h <= 6; h++) {
+      ops.push({ type: "score.set", team_id: grip, hole: h, strokes: 4 }, { type: "teeshot.set", team_id: grip, hole: h, player_id: id("Dave") });
+      ops.push({ type: "tee.open", team_id: grip, hole: h + 1 });
+    }
+    await commishOps(page.request, code, ops);
+    await page.context().clearCookies();
+    await joinAs(page, code, id("Dave"), size);
+    await expect(page.getByTestId("hole-number")).toHaveText("7");
+    await expect(page.getByTestId("drive-banner")).toContainText("NOW");
+    await expectChipsAndStepperVisible(page, "Dave on a drive-warning hole", 4);
+    await page.screenshot({ path: test.info().outputPath(`drive-warning-${vp.width}x${vp.height}.png`) });
+
+    if (vp.commish) {
+      // The commissioner on his own team: the compact team strip with Switch team, still everything on screen.
+      await page.request.post(`/api/t/${code}/commissioner`, { data: { pin: "2468" } });
+      await page.reload();
+      await expect(page.getByTestId("team-strip").getByRole("button", { name: "Switch team" })).toBeVisible({ timeout: 30_000 });
+      await expectChipsAndStepperVisible(page, "the commissioner", 4);
+      await page.screenshot({ path: test.info().outputPath(`commissioner-${vp.width}x${vp.height}.png`) });
     }
   });
 }
+
+test("Play notices sit at the top and the mulligan Undo is inline: a tap on + always lands (390x763)", async ({ browser, page }) => {
+  test.setTimeout(150_000);
+  const { code, players } = await createLiveTrip(page.request);
+  const id = (n: string) => players.find((p) => p.name === n)!.id;
+  const phone = { ...devices["iPhone 13"], baseURL: test.info().project.use.baseURL, viewport: { width: 390, height: 763 } };
+  const ctxA = await browser.newContext(phone);
+  const ctxB = await browser.newContext(phone);
+  const a = await ctxA.newPage();
+  const b = await ctxB.newPage();
+  await joinAs(a, code, id("Tom"));
+  await joinAs(b, code, id("Jimmy"));
+  await a.getByTestId("tee-cta").click();
+  await dismissFanfare(a, "hype");
+
+  // A shotgun banks a mulligan; spend it.
+  await a.getByRole("button", { name: "Shotgun for Rob" }).click();
+  await expect(a.getByTestId("mulligan-bank")).toHaveText("1");
+  await a.getByRole("button", { name: "Use mulligan" }).click();
+  await a.getByRole("dialog").getByRole("button", { name: /Earned/ }).click();
+  await expect(a.getByTestId("mulligan-bank")).toHaveText("0");
+  // Its Undo is a chip in the Mulligans card: no toast with an Undo anywhere.
+  await expect(a.getByTestId("mulligan-undo")).toBeVisible();
+  await expect(a.locator("[data-toast-host] button", { hasText: /undo/i })).toHaveCount(0);
+
+  // Back at the top, a tap on + lands on + (it used to hit the toast or its UNDO).
+  await a.evaluate(() => window.scrollTo(0, 0));
+  await rawTap(a, a.getByRole("button", { name: "One more stroke" }));
+  await expect(a.getByTestId("save-score")).toHaveText(/Save\s*5/);
+  await expect(a.getByTestId("mulligan-bank")).toHaveText("0");
+  await expect.poll(async () => {
+    const st = (await (await page.request.get(`/api/t/${code}/state`)).json()) as { state: { mulligans: Array<{ deleted_at: string | null }> } };
+    return st.state.mulligans.filter((m) => m.deleted_at === null).length;
+  }, { timeout: 20_000 }).toBe(1);
+
+  // The chip's Undo puts it back (one tap, one undo).
+  await a.getByTestId("mulligan-undo").click();
+  await expect(a.getByTestId("mulligan-undone")).toBeVisible();
+  await expect(a.getByTestId("mulligan-bank")).toHaveText("1");
+  await a.evaluate(() => window.scrollTo(0, 0));
+
+  // A teammate tees off hole 2 while A has its unsaved 5: the notice shows under the header, clear of
+  // the stepper, and + still takes taps.
+  await expect(b.getByTestId("tee-cta")).toHaveCount(0, { timeout: 15_000 });
+  await b.getByRole("button", { name: "On the tee: hole 2" }).click();
+  await b.getByRole("dialog").getByRole("button", { name: "Tee off without a score" }).click();
+  await expect(b.getByTestId("hole-number")).toHaveText("2");
+  const notice = a.locator("[data-toast-host] > *").filter({ hasText: "Hole 2 teed off on another phone" });
+  await expect(notice).toBeVisible({ timeout: 15_000 });
+  const geo = await a.evaluate(() => {
+    const toast = [...document.querySelectorAll("[data-toast-host] > *")].map((e) => e.getBoundingClientRect()).filter((r) => r.height > 0);
+    const header = document.querySelector('[data-testid="trip-shell"] > header')!.getBoundingClientRect().bottom;
+    const plus = document.querySelector('[data-testid="score-panel"] button[aria-label="One more stroke"]')!;
+    const minus = document.querySelector('[data-testid="score-panel"] button[aria-label="One fewer stroke"]')!;
+    const hits = [plus, minus].every((btn) => {
+      const r = btn.getBoundingClientRect();
+      for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.9], [0.7, 0.1]]) {
+        const hit = document.elementFromPoint(r.left + r.width * fx, r.top + r.height * fy);
+        if (!hit || !btn.contains(hit)) return false;
+      }
+      return true;
+    });
+    return { toast, header, stepperTop: Math.min(plus.getBoundingClientRect().top, minus.getBoundingClientRect().top), hits };
+  });
+  expect(geo.toast.length).toBe(1);
+  expect(geo.toast[0].top).toBeGreaterThanOrEqual(geo.header);
+  expect(geo.toast[0].bottom).toBeLessThanOrEqual(geo.stepperTop);
+  expect(geo.hits).toBe(true);
+  await rawTap(a, a.getByRole("button", { name: "One more stroke" }));
+  await expect(a.getByTestId("save-score")).toHaveText(/Save\s*6/);
+  await a.screenshot({ path: test.info().outputPath("notice-at-top-390x763.png") });
+  await ctxA.close();
+  await ctxB.close();
+});
+
+test("a quick double tap on the drink Undo takes back one drink, not two", async ({ page }) => {
+  test.setTimeout(120_000);
+  const { code, players, threesome } = await createLiveTrip(page.request);
+  const id = (n: string) => players.find((p) => p.name === n)!.id;
+  await page.context().clearCookies();
+  await joinAs(page, code, id("Tom"));
+  await page.getByTestId("tee-cta").click();
+  await dismissFanfare(page, "hype");
+  await drinkButton(page, "Rob").click();
+  await drinkButton(page, "Rob").click();
+  const chip = drinkRow(page, id("Rob")).getByTestId("drink-undo");
+  await expect(chip).toHaveAttribute("data-count", "2");
+  await expect(drinkRow(page, id("Rob")).getByTestId("drink-count")).toHaveText("2");
+  const box = (await chip.boundingBox())!;
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.touchscreen.tap(x, y);
+  await page.waitForTimeout(120);
+  await page.touchscreen.tap(x, y);
+  await expect(drinkRow(page, id("Rob")).getByTestId("drink-count")).toHaveText("1");
+  await page.waitForTimeout(1500);
+  await expect(drinkRow(page, id("Rob")).getByTestId("drink-count")).toHaveText("1");
+  // The older drink's Undo comes back after a beat (a deliberate tap still works).
+  await expect(chip).toHaveAttribute("data-count", "1");
+  await expect
+    .poll(async () => (await serverState(page.request, code)).drinks.filter((d) => d.team_id === threesome.id && d.deleted_at === null).length, { timeout: 20_000 })
+    .toBe(1);
+});
+
+test("a photo drink needs no CDN and lands on the hole it was tapped on, even if the team tees off while it saves", async ({ page }) => {
+  test.setTimeout(120_000);
+  const { code, players, threesome } = await createLiveTrip(page.request);
+  const id = (n: string) => players.find((p) => p.name === n)!.id;
+  await page.context().clearCookies();
+  // A stalled third-party CDN (bars, no data) must not matter: nothing should even ask it.
+  const cdnRequests: string[] = [];
+  page.on("request", (r) => {
+    if (/cdn\.jsdelivr\.net/.test(r.url())) cdnRequests.push(r.url());
+  });
+  await page.context().route(/cdn\.jsdelivr\.net/, () => {
+    /* never answers */
+  });
+  // A slow phone: every canvas JPEG export takes 2 s, so the photo is still compressing when the
+  // team tees off the next hole.
+  await page.context().addInitScript(() => {
+    const toBlob = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function (this: HTMLCanvasElement, cb: BlobCallback, ...rest: unknown[]) {
+      setTimeout(() => toBlob.call(this, cb, ...(rest as [string?, number?])), 2000);
+    };
+    if (typeof OffscreenCanvas !== "undefined") {
+      const convert = OffscreenCanvas.prototype.convertToBlob;
+      OffscreenCanvas.prototype.convertToBlob = function (this: OffscreenCanvas, ...args: Parameters<OffscreenCanvas["convertToBlob"]>) {
+        return new Promise<void>((r) => setTimeout(r, 2000)).then(() => convert.apply(this, args));
+      };
+    }
+  });
+  await joinAs(page, code, id("Tom"));
+  await page.getByTestId("tee-cta").click();
+  await dismissFanfare(page, "hype");
+  const photo = Buffer.from(
+    await page.evaluate(() => {
+      const c = document.createElement("canvas");
+      c.width = 1200;
+      c.height = 900;
+      const g = c.getContext("2d")!;
+      g.fillStyle = "#c58b2a";
+      g.fillRect(0, 0, 1200, 900);
+      return c.toDataURL("image/jpeg", 0.9).split(",")[1];
+    }),
+    "base64",
+  );
+
+  // Hole 1: photo of Rob's empty...
+  await page.getByRole("button", { name: "Log a drink for Rob with a photo of the empty" }).click();
+  await page.getByRole("dialog").locator('input[type="file"]').first().setInputFiles({ name: "empty.jpg", mimeType: "image/jpeg", buffer: photo });
+  await expect(drinkRow(page, id("Rob")).getByTestId("drink-photo-saving")).toBeVisible();
+  // ...and the team tees off hole 2 while it is still saving.
+  await page.getByRole("button", { name: "On the tee: hole 2" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Tee off without a score" }).click();
+  await expect(page.getByTestId("hole-number")).toHaveText("2");
+  // The drink logs once the photo is ready, on hole 1 (where it was tapped), with its Undo chip.
+  const chip = drinkRow(page, id("Rob")).getByTestId("drink-undo");
+  await expect(chip).toBeVisible({ timeout: 15_000 });
+  await expect(chip).toContainText("hole 1");
+  await expect
+    .poll(async () => (await serverState(page.request, code)).drinks.filter((d) => d.team_id === threesome.id && d.deleted_at === null).map((d) => d.hole), {
+      timeout: 20_000,
+    })
+    .toEqual([1]);
+  expect(cdnRequests).toEqual([]);
+});

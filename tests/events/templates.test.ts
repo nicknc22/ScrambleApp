@@ -119,6 +119,19 @@ const SAMPLES: Record<string, FeedEvent> = {
     },
     { team_id: T.B },
   ),
+  "results_changed:standings": ev(
+    "results_changed",
+    {
+      champion_before: [T.A],
+      champion_after: [T.A],
+      standings_before: [{ team_id: T.A, pos_label: "1", net: 72, net_to_par: 0 }, { team_id: T.B, pos_label: "2", net: 73, net_to_par: 1 }, { team_id: T.C, pos_label: "3", net: 75, net_to_par: 3 }],
+      standings_after: [{ team_id: T.A, pos_label: "1", net: 72, net_to_par: 0 }, { team_id: T.B, pos_label: "T2", net: 73, net_to_par: 1 }, { team_id: T.C, pos_label: "T2", net: 73, net_to_par: 1 }],
+      payments_before: [{ from_player_id: P.B1, to_player_id: P.A1, amount_cents: 2000 }],
+      payments_after: [{ from_player_id: P.B1, to_player_id: P.A1, amount_cents: 2000 }],
+      late_op_ids: ["op-1"],
+    },
+    { team_id: T.A },
+  ),
 };
 
 const OTHER_SAMPLES: FeedEvent[] = [
@@ -439,6 +452,15 @@ describe("renderFeedEvent", () => {
     expect(tie.body).toContain("Team A still wins, but the standings moved.");
     expect(tie.body).toContain("nobody owes anybody now");
     expect(tie.body).toContain("A commissioner fix after the final whistle.");
+  });
+
+  it("results_changed when only a position moved (same champion, same money): calm, no 'stop paying' and no call to reopen", () => {
+    for (const r of allVariants(SAMPLES["results_changed:standings"])) {
+      expect(r).toMatchObject({ title: "RESULTS CHANGED", big: true });
+      expect(r.body).toContain("Team A still wins, but the standings moved. Money's unchanged.");
+      expect(r.body).toContain("1 play from the course synced after the final whistle.");
+      expect(r.body).not.toMatch(/Venmo|trophy|Reopen|Stop/);
+    }
   });
 
   it("removed: names who removed whose what (drink, entry, mulligan)", () => {

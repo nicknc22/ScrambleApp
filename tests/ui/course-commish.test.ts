@@ -118,6 +118,39 @@ describe("drinkRows", () => {
   });
 });
 
+describe("drinkRows: drinks the engine doesn't count", () => {
+  it("a drink logged after Round complete is worth 0 and says why; pinning it to 18 makes it count (finding: commish-drinks-panel-counts-post-round-drinks)", () => {
+    const f = makeTrip({ teams: [3, 3], status: "live" });
+    for (let h = 1; h <= 18; h++) {
+      f.teeOff("A", h, h * 12);
+      f.score("A", h, 4);
+    }
+    f.complete("A", 18 * 12 + 10); // Round complete at minute 226
+    const inRound = f.drink("A", "A2", 18, "drink", { min: 18 * 12 + 5 });
+    const bar = f.drink("A", "A3", 18, "drink", { min: 18 * 12 + 25 }); // 15 min after Round complete
+    const d = derive(f.state);
+    expect(d.standings.find((r) => r.team_id === f.team.A)).toMatchObject({ drinks: 1, credit: 1 });
+
+    const rows = drinkRows(f.state, d, { teamId: f.team.A, hole: 18 });
+    const byId = new Map(rows.map((r) => [r.drink.id, r]));
+    expect(byId.get(inRound)).toMatchObject({ counted: true, value: 1, uncountedReason: null });
+    expect(byId.get(bar)).toMatchObject({ counted: false, value: 0, ghost: false, hole: 18, uncountedReason: "Logged after Round complete" });
+    // The panel's header counts only what counts.
+    expect(rows.filter((r) => r.counted)).toHaveLength(1);
+
+    // "Count it on 18": a move to its own hole pins it (moved_from_hole), and the engine counts it.
+    const move = applyOp(f.state, { type: "drink.move", id: "op-pin", at: at(240), by: null, drink_id: bar, hole: 18 } as Op, {
+      now: at(240),
+      is_commissioner: true,
+      side: "server",
+    });
+    if (!move.ok) throw new Error(move.reason);
+    const d2 = derive(move.state);
+    expect(drinkRows(move.state, d2, { teamId: f.team.A, hole: 18 }).find((r) => r.drink.id === bar)).toMatchObject({ counted: true, value: 1 });
+    expect(d2.standings.find((r) => r.team_id === f.team.A)).toMatchObject({ drinks: 2 });
+  });
+});
+
 describe("driveFlags", () => {
   it("lists closed nines with players at zero, and nines on the clock", () => {
     const f = makeTrip({ teams: [2, 2], status: "live" });

@@ -1121,7 +1121,8 @@ describe("contest_entry / contest_lead", () => {
     const { sim, p } = live();
     const e = ctp(p.A1, 8, 15);
     const ev = one(sim.run([e], { now: 9990 }), "contest_entry");
-    const r = sim.run([mk("contest.delete", { entry_id: e.entry_id, by: p.A1 })], { now: 9999 });
+    // A quick self-undo (stamped 9 s after the entry landed): its post goes, no "removed" card.
+    const r = sim.run([mk("contest.delete", { entry_id: e.entry_id, by: p.A1, at: srv(9999) })], { now: 9999 });
     expect(r.feed).toEqual([expect.objectContaining({ id: ev.id, deleted_at: srv(9999) })]);
   });
 });
@@ -1492,15 +1493,16 @@ describe("after the final whistle", () => {
     const B = f.team.B;
     const p = f.player;
     const ops: Op[] = [];
+    // Client times are explicit (in step with the server clock), so the test doesn't depend on
+    // how far the shared test clock has run.
     for (const [team, by] of [[A, p.A1], [B, p.B1]] as const) {
       for (let h = 1; h <= 18; h++) {
-        ops.push(tee(team, h, { by }), score(team, h, team === B && h === 18 ? b18 : 4, { by }));
+        ops.push(tee(team, h, { by, at: srv(h * 600) }), score(team, h, team === B && h === 18 ? b18 : 4, { by, at: srv(h * 600 + 300) }));
       }
     }
-    // B2's phone: a shotgun on 18 during the round, stuck in a dead zone (never synced). Client
-    // times here are explicit: the round's ops ran on the shared test clock.
+    // B2's phone: a shotgun on 18 during the round, stuck in a dead zone (never synced).
     const deadZone = drink(B, p.B2, 18, "shotgun", { at: srv(19_900) });
-    ops.push(mk("round.complete", { team_id: A, by: p.A1 }), mk("round.complete", { team_id: B, by: p.B1 }));
+    ops.push(mk("round.complete", { team_id: A, by: p.A1, at: srv(19_950) }), mk("round.complete", { team_id: B, by: p.B1, at: srv(19_950) }));
     sim.run(ops, { now: 10_000 });
     sim.run([mk("trip.finalize", {})], { now: 20_000, commish: true });
     return { f, sim, A, B, p, deadZone };
@@ -1579,6 +1581,61 @@ describe("after the final whistle", () => {
     expect(r.roast_triggers).toEqual([]);
   });
 
+  /** Three twosomes, $20 winner-take-all: A 72, B 73, C `cTotal` (4s, then 5s at the end); final at 20_000. */
+  function finalTrip3(cTotal: number) {
+    const f = makeTrip({ teams: [2, 2, 2], settings: { team_match_ante_cents: 2000 } });
+    currentTripId = f.state.trip.id;
+    const sim = new Sim(f);
+    const [A, B, C] = [f.team.A, f.team.B, f.team.C];
+    const p = f.player;
+    const ops: Op[] = [];
+    for (const [team, by] of [[A, p.A1], [B, p.B1], [C, p.C1]] as const) {
+      for (let h = 1; h <= 18; h++) {
+        const strokes = team === B && h === 18 ? 5 : team === C && h > 18 - (cTotal - 72) ? 5 : 4;
+        ops.push(tee(team, h, { by, at: srv(h * 600) }), score(team, h, strokes, { by, at: srv(h * 600 + 300) }));
+      }
+      ops.push(mk("round.complete", { team_id: team, by, at: srv(19_950) }));
+    }
+    sim.run(ops, { now: 19_960 });
+    sim.run([mk("trip.finalize", {})], { now: 20_000, commish: true });
+    return { sim, A, B, C, p };
+  }
+
+  it("rules/speccheck review repro: a late drink that moves only a team's net (no position, no money, same champion) posts no RESULTS CHANGED", () => {
+    const { sim, A, B, C, p } = finalTrip3(90);
+    const pays = () => derive(sim.state).money.payments.map((x) => `${x.from_player_id}>${x.to_player_id} ${x.amount_cents}`).sort();
+    const before = pays();
+    const r = sim.run([drink(C, p.C1, 18, "shotgun", { at: srv(19_900) })], { now: 21_200 });
+    const d = derive(sim.state);
+    expect(d.standings.map((x) => [x.team_id, x.pos_label, x.net])).toEqual([
+      [A, "1", 72],
+      [B, "2", 73],
+      [C, "3", 88],
+    ]);
+    expect(pays()).toEqual(before);
+    expect(ofType(r, "results_changed")).toEqual([]);
+    expect(r.push_triggers).toEqual([]);
+  });
+
+  it("a late drink that only reshuffles a position (same champion, same money) posts a calm RESULTS CHANGED: no 'stop paying' alarm", () => {
+    const { sim, A, B, C, p } = finalTrip3(75);
+    const r = sim.run([drink(C, p.C2, 18, "shotgun", { at: srv(19_900) })], { now: 21_200 });
+    expect(derive(sim.state).standings.map((x) => [x.team_id, x.pos_label])).toEqual([
+      [A, "1"],
+      [B, "T2"],
+      [C, "T2"],
+    ]);
+    const ev = one(r, "results_changed");
+    expect(ev.payload.payments_before).toEqual(ev.payload.payments_after);
+    expect(r.push_triggers).toEqual([expect.objectContaining({ feed_event_id: ev.id, collapse_key: "results_changed" })]);
+    for (let i = 0; i < 40; i++) {
+      const body = sim.render({ ...ev, id: `variant-${i}` }).body;
+      expect(body).toContain("Team A still wins, but the standings moved.");
+      expect(body).toContain("Money's unchanged.");
+      expect(body).not.toMatch(/Venmo|trophy|Reopen/);
+    }
+  });
+
   it("reopen, fix and finalize again in one batch: final_results for the new finalize, lead changes stay quiet", () => {
     const { sim, B, p } = finalTrip();
     const r = sim.run(
@@ -1601,7 +1658,8 @@ describe("removed", () => {
     const { sim, A, p } = live();
     sim.run([tee(A, 1), tee(A, 3)], { now: 0 });
     const d = drink(A, p.A1, 3, "shotgun");
-    const e = ctp(p.A1, 3, 4);
+    // Phones stamp server-corrected time: the entry was submitted as it synced.
+    const e = ctp(p.A1, 3, 4, { at: srv(60) });
     sim.run([d, e], { now: 60 });
     const r = sim.run(
       [mk("drink.delete", { drink_id: d.drink_id, by: p.A2, at: plus(d.at, 2400) }), mk("contest.delete", { entry_id: e.entry_id, by: p.A2, at: plus(e.at, 2400) })],
@@ -1642,6 +1700,25 @@ describe("removed", () => {
       [theirs.drink_id, p.A4],
     ]);
     expect(sim.render(ofType(r, "removed")[0]).body).toContain("their own drink on hole 1");
+  });
+
+  it("rules/offline review repro: a quick self-undo of a contest entry that syncs late (dead zone) posts nothing", () => {
+    const { sim, p } = live();
+    // Submitted at 100, synced at 101; Undo tapped at 105 but the signal dropped: it lands at 700.
+    const e = ctp(p.A1, 3, 12.5, { at: srv(100) });
+    sim.run([e], { now: 101 });
+    const r = sim.run([mk("contest.delete", { entry_id: e.entry_id, by: p.A1, at: srv(105) })], { now: 700 });
+    expect(sim.state.contest_entries.find((x) => x.id === e.entry_id)!.deleted_at).not.toBeNull();
+    expect(ofType(r, "removed")).toEqual([]);
+    // The entry itself synced late (created_at after the undo's client time): still a quick undo.
+    const late = ctp(p.A2, 3, 20, { at: srv(200) });
+    sim.run([late], { now: 900 });
+    expect(ofType(sim.run([mk("contest.delete", { entry_id: late.entry_id, by: p.A2, at: srv(205) })], { now: 905 }), "removed")).toEqual([]);
+    // Pulling your own entry more than 60 s after it landed still posts, however the delete syncs.
+    const slow = ctp(p.A3, 3, 30, { at: srv(1000) });
+    sim.run([slow], { now: 1001 });
+    const s = sim.run([mk("contest.delete", { entry_id: slow.entry_id, by: p.A3, at: srv(1062) })], { now: 1063 });
+    expect(one(s, "removed").payload).toMatchObject({ kind: "contest_entry", owner_id: p.A3, after_sec: 61 });
   });
 
   it("mulligan undo by a teammate posts; the commissioner's delete posts commissioner_override instead", () => {

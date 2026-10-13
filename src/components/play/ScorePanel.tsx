@@ -1,6 +1,6 @@
 "use client";
 // The big strokes stepper with a live net preview ("4 − 2 🍺 = 2 net"). Save lives in the bottom bar.
-// Kept compact: it sits under the tee-shot chips and should still clear the action bar on a phone.
+// Kept compact: it sits under the tee-shot chips and its buttons clear the action bar on a phone.
 import { Card, Stepper, cx } from "@/components/ui";
 import { MAX_STROKES, MIN_STROKES, netPreview, scoreName, type ScoreDraftView } from "./model";
 
@@ -26,16 +26,26 @@ export function ScorePanel({
   const over = draft.value - par >= 2;
   return (
     <Card padded={false} className="overflow-hidden border-ink" data-testid="score-panel">
-      <div className="flex items-center justify-between gap-2 border-b-2 border-line px-4 py-1">
-        <h2 className="min-w-0 truncate text-lg font-black uppercase">Team score</h2>
+      {/* The score's name ("Birdie") is the card's title, not a line under the number: the stepper
+          stays as tall as its buttons, so it fits the first screen under the tee-shot chips. */}
+      <div className="flex min-h-7 items-center justify-between gap-2 border-b-2 border-line px-4">
+        <h2 className="flex min-w-0 items-baseline">
+          <span className="sr-only">Team score: </span>
+          <span
+            className={cx("truncate text-base font-black uppercase", under ? "text-fairway-dark" : over ? "text-flag-dark" : "text-ink")}
+            data-testid="score-name"
+          >
+            {name}
+          </span>
+        </h2>
         <span
           className={cx(
-            "shrink-0 rounded-full border-2 px-2.5 py-0.5 text-sm font-black whitespace-nowrap uppercase",
+            "shrink-0 rounded-full border-2 px-2.5 text-sm leading-5 font-black whitespace-nowrap uppercase",
             draft.dirty ? "border-ink bg-hazard text-ink" : "border-fairway-dark bg-fairway text-white",
           )}
           data-testid="score-status"
         >
-          {draft.dirty ? (draft.saved === null ? "Not saved" : "Unsaved change") : "✓ Saved"}
+          {draft.dirty ? (draft.saved === null ? "Not saved" : "Unsaved") : "✓ Saved"}
         </span>
       </div>
       <div className="px-3 pt-2 pb-2">
@@ -50,7 +60,6 @@ export function ScorePanel({
           disabled={disabled}
           decrementLabel="One fewer stroke"
           incrementLabel="One more stroke"
-          hint={<span className={cx("font-black uppercase", under ? "text-fairway-dark" : over ? "text-flag-dark" : "text-muted")}>{name}</span>}
         />
         <div
           className="num mt-1.5 flex items-center justify-center gap-2 rounded-2xl border-2 border-beer-dark bg-beer-soft px-3 py-0.5 text-center text-xl font-black"

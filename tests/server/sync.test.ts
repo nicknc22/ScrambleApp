@@ -28,7 +28,7 @@ import {
   unregisterPostCommitHook,
   type PostCommitContext,
 } from "@/lib/server/hooks";
-import { MAX_OPS_PER_SYNC } from "@/lib/server/apply";
+import { DEMO_MAX_APPLIED_OPS, MAX_OPS_PER_SYNC } from "@/lib/server/apply";
 import { newId } from "@/lib/ids";
 import type { Op, OpType, SyncResponse } from "@/lib/ops";
 import type { FeedEventType, Trip } from "@/lib/types";
@@ -88,8 +88,8 @@ interface Setup {
 }
 
 /** Create a trip and set it up through the sync route with a commissioner cookie. */
-async function setupTrip(teams: number[], start = true): Promise<Setup> {
-  const trip = await createTrip(db, { name: "Route Sync Trip", app_name: "Scramble", pin_hash: PIN_HASH });
+async function setupTrip(teams: number[], start = true, demo = false): Promise<Setup> {
+  const trip = await createTrip(db, { name: "Route Sync Trip", app_name: "Scramble", pin_hash: PIN_HASH, is_demo: demo });
   const team: Record<string, string> = {};
   const player: Record<string, string> = {};
   const ops: Op[] = [];
@@ -377,6 +377,22 @@ describe("POST /api/t/[code]/sync: scenarios", () => {
     const again = await syncOk(s.trip.code, [bad]);
     expect(again.results).toEqual(first.results);
     expect(again.snapshot.state.drinks).toEqual([]);
+  });
+
+  it("security review repro: a demo trip out of write budget answers 200 with per-op 'Demo's full' rejections (never a 4xx the phone would resend)", async () => {
+    const s = await setupTrip([2, 2], true, true);
+    const [{ n }] = await db.query<{ n: number }>("select count(*)::int as n from applied_ops where trip_id = $1", [s.trip.id]);
+    await db.query(
+      `insert into applied_ops (id, trip_id, op_type, status)
+       select gen_random_uuid(), $1, 'drink.log', 'applied' from generate_series(1, $2::int)`,
+      [s.trip.id, DEMO_MAX_APPLIED_OPS - n],
+    );
+    const ops = [mk("tee.open", { team_id: s.team.A, hole: 1, by: s.player.A1 }), drinkOp(s, "A", "A1", 1)];
+    const out = await syncOk(s.trip.code, ops);
+    expect(out.results).toEqual(ops.map((op) => ({ id: op.id, status: "rejected", code: "conflict", reason: "Demo's full. Hit Reset demo." })));
+    expect(out.snapshot.state.drinks).toEqual([]);
+    const [{ n: after }] = await db.query<{ n: number }>("select count(*)::int as n from applied_ops where trip_id = $1", [s.trip.id]);
+    expect(after).toBe(DEMO_MAX_APPLIED_OPS);
   });
 
   it("commissioner-only ops: forbidden without (or with another trip's) cookie, applied with a valid one", async () => {

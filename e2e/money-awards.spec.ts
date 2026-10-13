@@ -261,6 +261,51 @@ test.describe("money + awards", () => {
     expect((await request.get("/api/t/nosuchtrip99/recap")).status()).toBe(404);
   });
 
+  test("a late sync after the final whistle that flips the money: the Money tab says the results changed", async ({ page, request }) => {
+    const ctx = await createTrip(request, "E2E Late Sync Scramble");
+    const r = roster();
+    await sync(ctx, setupOps(ctx, r));
+    await sync(ctx, [op(ctx, { type: "trip.start" })]);
+    // Team 0 shoots par; team 1 bogeys every third hole and loses. Six of team 1's beers sit on a
+    // phone with no signal: they were drunk during the round but reach the server after the finalize.
+    const play: Json[] = [];
+    const late: Json[] = [];
+    r.teams.forEach((team, ti) => {
+      const members = r.players.filter((_, i) => r.assign[i] === ti);
+      for (let h = 1; h <= 18; h++) {
+        play.push(op(ctx, { type: "tee.open", team_id: team.id, hole: h }));
+        if (ti === 1 && h <= 6) {
+          const p = members[h % members.length];
+          late.push(op(ctx, { type: "drink.log", drink_id: randomUUID(), team_id: team.id, player_id: p.id, hole: h, drink_type: "drink", photo_path: null, by: p.id }));
+        }
+        play.push(op(ctx, { type: "score.set", team_id: team.id, hole: h, strokes: PARS[h - 1] + (ti === 1 && h % 3 === 0 ? 1 : 0) }));
+      }
+      play.push(op(ctx, { type: "round.complete", team_id: team.id }));
+    });
+    await sync(ctx, play);
+    await sync(ctx, [op(ctx, { type: "trip.finalize" })]);
+
+    const payer = r.players[4]; // team 1: owes money under the FINAL numbers
+    await openAs(page, ctx.code, payer.id, "money");
+    await expect(page.getByTestId("money-banner")).toHaveAttribute("data-final", "true");
+    await expect(page.getByTestId("money-results-changed")).toHaveCount(0);
+    await expect(page.getByTestId("payment").first()).toHaveAttribute("data-mine", "pay");
+
+    // The dead phone syncs: team 1 now wins, and the settle-up reverses.
+    await sync(ctx, late);
+    await page.reload();
+    await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "money", { timeout: 60_000 });
+    const notice = page.getByTestId("money-results-changed");
+    await expect(notice).toBeVisible({ timeout: 30_000 });
+    await expect(notice).toContainText("Results changed after the final whistle — see the feed");
+    await expect(page.getByTestId("money-banner")).not.toContainText("These numbers are real. Pay up.");
+    await expect(page.locator('[data-testid="payment"][data-mine="pay"]')).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: test.info().outputPath("money-results-changed.png") });
+    await notice.getByRole("button", { name: "See what changed" }).click();
+    await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "feed");
+  });
+
   test("opting out of a pot during setup syncs, and locks once the round starts", async ({ page, request }) => {
     const ctx = await createTrip(request, "E2E Optout Scramble");
     const r = roster();

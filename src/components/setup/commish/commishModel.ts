@@ -4,6 +4,7 @@ import type { ContestEntryView, ContestHoleSummary, Derived, PotView } from "@/l
 import type { OpInput } from "@/lib/ops";
 import { contestScore } from "@/lib/engine/contests";
 import { formatFeetInches } from "@/lib/engine/format";
+import { loggedAfterRound } from "@/lib/engine/windows";
 
 // ---------------------------------------------------------------------------
 // Contest review
@@ -129,9 +130,13 @@ export interface DrinkRow {
   loggedBy: Player | null;
   /** Hole the drink counts on (engine's effective hole; can differ from the phone-stamped drink.hole). */
   hole: number;
-  /** Derived credit for this drink (2 for a ghost beer). */
+  /** Derived credit for this drink (2 for a ghost beer); 0 when it doesn't count. */
   value: number;
   ghost: boolean;
+  /** The engine counts it (false: logged after the team's Round complete, or its team is gone). */
+  counted: boolean;
+  /** Why it doesn't count, for the commissioner ("Logged after Round complete"), else null. */
+  uncountedReason: string | null;
 }
 
 export interface DrinkFilter {
@@ -139,24 +144,40 @@ export interface DrinkFilter {
   hole: number | null;
 }
 
-/** Active drinks matching the filter, newest first. */
-export function drinkRows(state: Pick<TripState, "drinks" | "players" | "teams">, d: Pick<Derived, "drinkValues">, filter: DrinkFilter): DrinkRow[] {
+/**
+ * Active drinks matching the filter, newest first. Values come from the engine: a drink it doesn't
+ * count (logged after Round complete, past the clock grace) is listed with value 0 and a reason,
+ * so the commissioner can see it and pin it to its hole with a move if it really happened in time.
+ */
+export function drinkRows(
+  state: Pick<TripState, "drinks" | "players" | "teams" | "team_round_state">,
+  d: Pick<Derived, "drinkValues">,
+  filter: DrinkFilter,
+): DrinkRow[] {
   const players = new Map(state.players.map((p) => [p.id, p]));
   const teams = new Map(state.teams.map((t) => [t.id, t]));
+  const rounds = new Map(state.team_round_state.map((r) => [r.team_id, r]));
   return state.drinks
     .filter((x) => x.deleted_at === null)
     .filter((x) => (filter.teamId === null || x.team_id === filter.teamId) && (filter.hole === null || (d.drinkValues[x.id]?.hole ?? x.hole) === filter.hole))
     .sort((a, b) => b.logged_at.localeCompare(a.logged_at) || b.id.localeCompare(a.id))
     .map((drink) => {
       const dv = d.drinkValues[drink.id];
+      const uncountedReason = dv
+        ? null
+        : loggedAfterRound(drink, rounds.get(drink.team_id))
+          ? "Logged after Round complete"
+          : "Doesn't count for any team";
       return {
         drink,
         player: players.get(drink.player_id) ?? null,
         team: teams.get(drink.team_id) ?? null,
         loggedBy: drink.logged_by ? (players.get(drink.logged_by) ?? null) : null,
         hole: dv?.hole ?? drink.hole,
-        value: dv?.value ?? 1,
+        value: dv?.value ?? 0,
         ghost: dv?.ghost ?? false,
+        counted: !!dv,
+        uncountedReason,
       };
     });
 }

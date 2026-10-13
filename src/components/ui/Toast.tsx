@@ -118,6 +118,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div
         aria-live="polite"
+        data-toast-host=""
         className="pointer-events-none fixed inset-x-0 z-[80] mx-auto flex max-w-xl flex-col gap-2 px-3"
         style={{ bottom: "calc(var(--toast-bottom, 16px) + env(safe-area-inset-bottom, 0px))" }}
       >

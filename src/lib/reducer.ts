@@ -170,6 +170,11 @@ const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInt
 const time = (iso: ISODate) => Date.parse(iso);
 /** a is strictly later than b (client timestamps; unparseable a never wins). */
 const isAfter = (a: ISODate | null, b: ISODate) => a !== null && time(a) > time(b);
+/**
+ * A hole score that only holds an untouched par default (score.set with if_empty): strokes but no
+ * LWW time. Any real score replaces it, and that's neither an edit nor a dispute.
+ */
+export const isWeakDefault = (row: Pick<HoleScore, "strokes" | "strokes_at">): boolean => row.strokes !== null && row.strokes_at === null;
 const uniqSorted = (xs: number[]) => Array.from(new Set(xs)).sort((x, y) => x - y);
 
 function requireId(v: unknown, what: string): UUID {
@@ -456,9 +461,12 @@ function scoreSet(tx: Tx, op: ScoreSetOp): void {
     reject("invalid", `Strokes must be a whole number from 1 to ${MAX_STROKES}. Pick up, my guy.`);
   }
   const existing = tx.state.hole_scores.find((r) => r.team_id === team.id && r.hole === hole);
-  // "Fill only if empty" (an untouched par default saved on advance): never overwrites anything,
-  // never rejected. The commissioner's override ignores the flag.
-  if (op.if_empty === true && existing && existing.strokes !== null && !tx.override) return;
+  // "Fill only if empty" (an untouched par default saved on advance) is a WEAK default: it never
+  // overwrites anything and is never rejected; when it fills the hole it stores no LWW time
+  // (strokes_at null, see isWeakDefault), so any real score.set replaces it whatever its client
+  // time, in either sync order. The commissioner's override ignores the flag (a real, timed score).
+  const weak = op.if_empty === true && !tx.override;
+  if (weak && existing && existing.strokes !== null) return;
   // LWW by client time: an older (e.g. offline) edit never clobbers a newer one. It's rejected
   // (so the losing phone hears about it) unless it agrees with the stored value. A commissioner
   // override always wins, so a phone with a clock set in the future can't lock a hole forever.
@@ -467,16 +475,18 @@ function scoreSet(tx: Tx, op: ScoreSetOp): void {
     reject("conflict", `Hole ${hole} already got a newer edit: ${existing.strokes ?? "no score"}. Your ${op.strokes} lost the race.`);
   }
   const by = actorId(tx.state, op);
+  const strokesAt = weak ? null : op.at;
   if (existing) {
-    const changed = existing.strokes !== null && existing.strokes !== op.strokes;
+    // Replacing a default nobody typed isn't an edit.
+    const changed = existing.strokes !== null && !isWeakDefault(existing) && existing.strokes !== op.strokes;
     tx.patch("hole_scores", existing, {
       strokes: op.strokes,
-      strokes_at: op.at,
+      strokes_at: strokesAt,
       updated_by: by,
       edit_count: existing.edit_count + (changed ? 1 : 0),
     });
   } else {
-    tx.put("hole_scores", { ...newHoleScore(tx, team.id, hole), strokes: op.strokes, strokes_at: op.at, updated_by: by });
+    tx.put("hole_scores", { ...newHoleScore(tx, team.id, hole), strokes: op.strokes, strokes_at: strokesAt, updated_by: by });
   }
   implicitOpen(tx, team.id, hole);
 }

@@ -45,7 +45,6 @@ const blob = (path: string, failures = 0): PendingBlob => ({
   path,
   blob: new Blob(["x"]),
   failures,
-  permanentFailures: 0,
   created_at: "2026-10-24T17:00:00.000Z",
 });
 
@@ -146,6 +145,28 @@ describe("photos never block ops", () => {
     };
     expect(await uploadPhotos(host)).toMatchObject({ failed: false, uploaded: 1 });
     expect(events).toEqual(["fail:big:true:Too big", "ok:ok"]);
+  });
+
+  it("a 409 photo_exists is permanent: reported as such, and the photos queued behind it still upload", async () => {
+    // Write-once evidence: the server already holds different bytes at that path and never will
+    // take these. It must not park at the head of the queue and hold up every later photo.
+    const events: string[] = [];
+    const host: UploadHost = {
+      code: "c",
+      fetch: async (url) => {
+        const path = new URL(url, "http://x").searchParams.get("path")!;
+        events.push(`upload:${path}`);
+        return path === "squatted" ? jsonRes({ error: "Evidence is final", code: "photo_exists" }, 409) : jsonRes({ path });
+      },
+      timers: new ManualTimers(),
+      ready: async () => undefined,
+      pendingBlobs: () => [blob("squatted"), blob("drink"), blob("post")],
+      hasPending: () => true,
+      onUploaded: (path) => void events.push(`ok:${path}`),
+      onUploadFailed: (path, permanent, message) => void events.push(`fail:${path}:${permanent}:${message}`),
+    };
+    expect(await uploadPhotos(host)).toMatchObject({ failed: false, uploaded: 2 });
+    expect(events).toEqual(["upload:squatted", "fail:squatted:true:Evidence is final", "upload:drink", "ok:drink", "upload:post", "ok:post"]);
   });
 });
 

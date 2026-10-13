@@ -77,7 +77,8 @@ export function CommissionerTools({ focus = null }: { focus?: ToolFocus | null }
 
   const queue = reviewQueue(derived.contests).length;
   const misses = driveFlags(derived).filter((f) => f.kind === "missed").length;
-  const drinks = view.drinks.filter((d) => d.deleted_at === null).length;
+  // Drinks that count (a drink logged after Round complete is listed, but isn't one).
+  const drinks = Object.keys(derived.drinkValues).length;
 
   return (
     <section

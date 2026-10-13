@@ -77,6 +77,17 @@ export interface ClientState {
 
 export type DispatchResult = { ok: true; op: Op } | { ok: false; code: RejectCode; reason: string };
 
+export interface DispatchOptions {
+  /**
+   * The op was tapped earlier and is only being created now (a photo drink, dispatched once its
+   * photo is compressed): stamp it with the tap's time (serverNow() at the tap; clamped to now) and
+   * check it like a queued op (reducer side "server"), because the client-only checks (the drink
+   * window) were made at the tap. A tee-off or Round complete tapped in between then neither moves
+   * nor drops it: the engine files it by the window that was open at its timestamp.
+   */
+  at?: ISODate;
+}
+
 /** Injectable dependencies (tests). Every field is optional; defaults use the real modules. */
 export interface TripStoreDeps {
   fetch?: FetchLike;
@@ -160,6 +171,19 @@ type ResolvedDeps = {
 };
 
 const LOADING_REASON = "Still loading the trip. Give it a second.";
+
+const PHOTO_KIND_LABEL: Record<string, string> = {
+  drinks: "Photo of an empty",
+  ld: "Long drive photo",
+  ctp: "Closest to pin photo",
+  posts: "Feed photo",
+};
+
+/** "Closest to pin photo" for trips/<trip>/ctp/<uuid>.jpg. */
+function photoDescription(path: string): string {
+  const kind = /^trips\/[^/]+\/([^/]+)\//.exec(path)?.[1];
+  return (kind && PHOTO_KIND_LABEL[kind]) || "A photo";
+}
 
 function iso(ms: number): ISODate {
   return new Date(ms).toISOString();
@@ -530,19 +554,23 @@ export class TripStore {
   // ------------------------------------------------------------------ actions
 
   /**
-   * Fill id/at/by (by = meId), run the reducer against the current view (side "client").
+   * Fill id/at/by (by = meId), run the reducer against the current view (side "client"; for an
+   * op from an earlier tap, see DispatchOptions.at).
    * Rejected -> nothing is queued, returns the reason (UI shows a toast/roast).
    * Accepted -> written to the outbox, view/derived update synchronously, flush scheduled.
    */
-  dispatch(input: OpInput): DispatchResult {
+  dispatch(input: OpInput, opts: DispatchOptions = {}): DispatchResult {
     if (!this.isLoaded()) return { ok: false, code: "invalid", reason: LOADING_REASON };
     const nowMs = this.d.now();
-    const at = iso(this.clock ? this.clock.now(nowMs) : nowMs);
+    const correctedNow = this.clock ? this.clock.now(nowMs) : nowMs;
+    const tappedMs = opts.at !== undefined ? Date.parse(opts.at) : Number.NaN;
+    const earlierTap = Number.isFinite(tappedMs);
+    const at = iso(earlierTap ? Math.min(tappedMs, correctedNow) : correctedNow);
     const op = { ...input, id: this.d.newId(), at, by: this.meId } as Op;
     const view = this.computeView();
     let res: ApplyResult;
     try {
-      res = this.d.applyOp(view, op, this.ctx(op));
+      res = this.d.applyOp(view, op, this.ctx(op, earlierTap ? "server" : "client"));
     } catch (err) {
       console.error("[scramble] reducer threw", op.type, err);
       return { ok: false, code: "invalid", reason: `That didn't work (${errorMessage(err)}).` };
@@ -567,6 +595,12 @@ export class TripStore {
     this.schedulePersist();
     this.worker.schedule();
     return { ok: true, op };
+  }
+
+  /** Now, server-clock corrected: the time dispatch stamps on an op (pass it back as `at` for a tap). */
+  serverNow(): ISODate {
+    const nowMs = this.d.now();
+    return iso(this.clock ? this.clock.now(nowMs) : nowMs);
   }
 
   /**
@@ -685,7 +719,6 @@ export class TripStore {
       path,
       blob,
       failures: 0,
-      permanentFailures: 0,
       created_at: iso(this.d.now()),
       persisted: false,
     });
@@ -853,7 +886,7 @@ export class TripStore {
     const state = this.snapshot?.state ?? null;
     const issues = results.map((r): SyncIssue => {
       const op = ops.get(r.id);
-      let description = "A change";
+      let description = opType === "photo" ? photoDescription(r.id) : "A change";
       try {
         if (op) description = describeOp(op, state);
       } catch {
@@ -985,21 +1018,20 @@ export class TripStore {
       onUploadFailed: (path, permanent, message) => {
         const b = store.blobs.get(path);
         if (!b) return;
-        b.failures++;
-        if (permanent) {
-          b.permanentFailures++;
-          if (b.permanentFailures >= 3) {
-            store.blobs.delete(path);
-            store.removedBlobPaths.add(path);
-            store.pushRejected(
-              [{ id: path, status: "rejected", code: "invalid", reason: `A photo couldn't be uploaded (${message}). Everything else was saved.` }],
-              undefined,
-              "photo",
-            );
-            store.schedulePersist();
-            store.changed();
-          }
+        if (!permanent) {
+          b.failures++;
+          return;
         }
+        // The server will never take this blob (e.g. 409: a different photo is already filed under
+        // that path). Retrying would only park it at the head of the queue forever: drop it, say
+        // so, and let the rest of the queue upload.
+        store.dropBlob(path);
+        store.pushRejected(
+          [{ id: path, status: "rejected", code: "invalid", reason: `A photo couldn't be uploaded (${message}). Everything else was saved.` }],
+          undefined,
+          "photo",
+        );
+        store.changed();
       },
     };
   }
@@ -1085,7 +1117,6 @@ export class TripStore {
         path: b.path,
         blob: rowBlob(b),
         failures: 0,
-        permanentFailures: 0,
         created_at: b.created_at,
         persisted: true,
       });

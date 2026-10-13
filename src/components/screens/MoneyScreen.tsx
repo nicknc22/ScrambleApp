@@ -13,13 +13,15 @@ import { MoneyBanner } from "@/components/money/MoneyBanner";
 import { MyPots } from "@/components/money/MyPots";
 import { ContestPotCard, TeamMatchCard } from "@/components/money/PotCards";
 import { SettleUpList } from "@/components/money/SettleUp";
-import { totalAntes } from "@/components/money/money";
+import { resultsChangedSinceFinal, totalAntes } from "@/components/money/money";
 
 export function MoneyScreen() {
   const derived = useClientState((s) => s.derived);
   const trip = useClientState((s) => s.view?.trip ?? null);
   const meId = useClientState((s) => s.meId);
   const isCommissioner = useClientState((s) => s.isCommissioner);
+  // A results_changed post after this finalize: the numbers below are new since the FINAL push.
+  const changedAt = useClientState((s) => (s.view ? resultsChangedSinceFinal(s.view.trip, s.view.feed_events) : null));
   const toast = useToast();
   const nav = useShellNav();
 
@@ -46,7 +48,15 @@ export function MoneyScreen() {
   const showLedger = status !== "setup" && money.ledger.length > 0;
   const note = venmoNote(trip.app_name, trip.name);
 
-  const banner = <MoneyBanner status={status} totalCents={total} myNetCents={status === "setup" || !myRow ? null : myRow.net_cents} />;
+  const banner = (
+    <MoneyBanner
+      status={status}
+      totalCents={total}
+      myNetCents={status === "setup" || !myRow ? null : myRow.net_cents}
+      changedAt={changedAt}
+      onSeeFeed={() => nav.setTab("feed")}
+    />
+  );
 
   if (noMoney) {
     return (

@@ -9,7 +9,8 @@
 //      on success adopt the response snapshot (the store re-applies whatever is still pending).
 //   photos (uploadPhotos): upload pending blobs one by one (POST /api/t/<code>/upload?path=...).
 //      A failed or timed-out upload is retried with backoff but never marks the phone offline:
-//      "online" only reflects op sync and state fetches.
+//      "online" only reflects op sync and state fetches. A permanent refusal (400/409/413/415/422)
+//      drops that one blob (surfaced as a sync issue) and the pass carries on with the rest.
 // A flush requested while a pass is running re-runs right after it.
 // It never drops an op on an ambiguous failure: only an explicit per-op server rejection or a
 // 400/422 JSON answer for that single op (a poison op) removes it.
@@ -19,8 +20,6 @@ import type { Op, OpResult, RejectCode, SyncResponse } from "../ops";
 export const SYNC_TIMEOUT_MS = 15_000;
 export const UPLOAD_TIMEOUT_MS = 60_000;
 export const MAX_BATCH = 100;
-/** A photo the server permanently refuses (400/413/415/422) is dropped after this many attempts. */
-export const PHOTO_MAX_PERMANENT_FAILURES = 3;
 /** keepalive requests must stay under 64 KiB. */
 export const KEEPALIVE_MAX_BYTES = 60_000;
 
@@ -48,10 +47,8 @@ export interface PendingOp {
 export interface PendingBlob {
   path: string;
   blob: Blob;
-  /** Failed upload attempts (any reason). */
+  /** Failed upload attempts (transient: network, timeout, 5xx). */
   failures: number;
-  /** Failed attempts the server answered with a permanent 4xx. */
-  permanentFailures: number;
   created_at: string;
 }
 
@@ -209,7 +206,13 @@ export interface FlushResult {
   error: string | null;
 }
 
-const PERMANENT_UPLOAD_STATUSES = new Set([400, 413, 415, 422]);
+/**
+ * The server will never take this blob at this path: a bad path/body (400/422), too big or over the
+ * trip's photo quota (413), not a JPEG (415), or a different photo already filed there (409
+ * photo_exists: evidence is write-once). The store drops it and records a sync issue; the pass
+ * moves on to the next photo.
+ */
+export const PERMANENT_UPLOAD_STATUSES: ReadonlySet<number> = new Set([400, 409, 413, 415, 422]);
 
 function uploadUrl(code: string, path: string): string {
   return `/api/t/${encodeURIComponent(code)}/upload?path=${encodeURIComponent(path)}`;

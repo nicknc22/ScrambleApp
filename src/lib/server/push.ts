@@ -8,7 +8,8 @@
 //     settings.push_throttle_sec (push_log), collapses duplicates by collapse key (same key to the
 //     same player within COLLAPSE_WINDOW_SEC is skipped; the key is also the notification tag and,
 //     hashed, the push-service Topic, so a newer one replaces an undelivered/unread older one),
-//     deletes subscriptions the push service says are gone (404/410) and never throws.
+//     deletes subscriptions the push service says are gone (404/410) and never throws. Results
+//     pushes (FINAL RESULTS, RESULTS CHANGED) are never throttled or collapsed (RESULTS_KEYS).
 //   - pushHook delivers the PushTriggers a sync batch produced (post-commit, via integrations.ts).
 import crypto from "node:crypto";
 import { DEFAULT_SETTINGS, type Trip, type TripState, type UUID } from "@/lib/types";
@@ -20,6 +21,13 @@ import { isUuid, readTripState } from "./repo";
 
 /** Same collapse key to the same player within this window is a duplicate. */
 export const COLLAPSE_WINDOW_SEC = 5 * 60;
+/**
+ * Results pushes skip the throttle and the collapse window: people pay from them, and the likely
+ * moment for a change (dead-zone phones finding signal at the clubhouse, a quick re-finalize) is
+ * right after the FINAL push. Each one is a real change, never a duplicate; the shared tag still
+ * replaces the older notification on the phone.
+ */
+export const RESULTS_KEYS: ReadonlySet<string> = new Set(["final", "results_changed"]);
 /** Push services drop a message nobody picked up after this long (a stale lead change is noise). */
 export const PUSH_TTL_SEC = 30 * 60;
 export const PUSH_SEND_TIMEOUT_MS = 5000;
@@ -229,6 +237,7 @@ export async function sendToPlayers(
     const now = deps.now ?? new Date();
     const throttleSec = Math.max(0, Number(trip.settings?.push_throttle_sec ?? DEFAULT_SETTINGS.push_throttle_sec) || 0);
     const collapseKey = msg.tag ? String(msg.tag).slice(0, 200) : null;
+    const urgent = collapseKey !== null && RESULTS_KEYS.has(collapseKey);
     const windowSec = Math.max(throttleSec, collapseKey ? COLLAPSE_WINDOW_SEC : 0);
     const since = new Date(now.getTime() - windowSec * 1000).toISOString();
     const throttleSince = now.getTime() - throttleSec * 1000;
@@ -262,7 +271,7 @@ export async function sendToPlayers(
           report.unsubscribed.push(p.id);
           continue;
         }
-        const mine = recent.filter((r) => r.player_id === p.id);
+        const mine = urgent ? [] : recent.filter((r) => r.player_id === p.id);
         if (collapseKey && mine.some((r) => r.collapse_key === collapseKey)) {
           report.collapsed.push(p.id);
           continue;
@@ -347,7 +356,7 @@ export function audienceOf(state: TripState, audience: PushTrigger["audience"]):
 
 /** Lower = more important (a player throttled after the first push should get the best one). */
 function priorityOf(collapseKey: string): number {
-  if (collapseKey === "final") return 0;
+  if (RESULTS_KEYS.has(collapseKey)) return 0;
   if (collapseKey === "groom") return 1;
   if (collapseKey === "lead") return 2;
   if (collapseKey.startsWith("judge:")) return 3;

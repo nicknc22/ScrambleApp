@@ -1,20 +1,33 @@
 "use client";
 // Sticky bottom action bar, just above the tab bar: Save + Next hole (or the big On the tee CTA).
-// The thumb zone: scoring a hole is stepper -> Save -> Next without reaching up.
+// The thumb zone: scoring a hole is stepper -> Save -> Next without reaching up. No toast ever sits
+// on it: Play shows its notices at the top (PlayToastPlacement) and its Undos inline.
 import type { ReactNode } from "react";
 import { IconCheck, IconChevronLeft, IconChevronRight, cx } from "@/components/ui";
 
-/** Height of the bar content (without safe area); toasts float above it. */
+/** Height of the bar content (without safe area). */
 export const ACTION_BAR_H = 80;
+
+/**
+ * On Play, the toast host moves to the top of the screen, right under the header and Play's
+ * sticky banners (`top`): the bottom half is the stepper, Save / On the tee and the tab bar, and a
+ * toast parked there sat on the stepper. Only the newest notice shows, it is tap-through (an
+ * informational notice never swallows a tap meant for what is under it) and has no ✕; a toast's
+ * own action button (a contest entry's Undo) stays tappable.
+ */
+export function PlayToastPlacement({ top }: { top: number }) {
+  return (
+    <style>{`[data-toast-host]{top:${Math.round(top)}px !important;bottom:auto !important}
+[data-toast-host]>:not(:last-child){display:none !important}
+[data-toast-host]>*{pointer-events:none !important}
+[data-toast-host] button[aria-label="Dismiss"]{display:none !important}
+[data-toast-host] button{pointer-events:auto !important}`}</style>
+  );
+}
 
 export function ActionBar({ children }: { children: ReactNode }) {
   return (
     <>
-      {/* Toasts sit above the tab bar by default; lift them above this bar too (!important beats the
-          shell's inline var), so no toast ever lands on Save / On the tee or the tab bar. The stack
-          only grows upward from there. (Drink logs have no toast at all: their Undo is inline in the
-          drinks panel.) While a modal sheet is open, globals.css parks toasts near the top. */}
-      <style>{`:root{--toast-bottom:calc(var(--tabbar-h) + ${ACTION_BAR_H + 10}px) !important}`}</style>
       <div
         className="fixed inset-x-0 z-[35] border-t-2 border-ink bg-paper/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur"
         style={{ bottom: "calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px))" }}

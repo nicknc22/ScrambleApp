@@ -24,6 +24,8 @@ export function DrinksPanel() {
   if (!derived || !view) return null;
   const rows = drinkRows(view, derived, { teamId, hole });
   const ghosts = rows.filter((r) => r.ghost).length;
+  const counted = rows.filter((r) => r.counted).length;
+  const uncounted = rows.length - counted;
 
   const del = async (r: DrinkRow) => {
     const ok = await confirm({
@@ -47,7 +49,14 @@ export function DrinksPanel() {
   const move = (r: DrinkRow, to: number) => {
     const from = r.hole; // where it counts now (moving to its stamped hole pins it there)
     setMoving(null);
-    if (to === from) return;
+    // A drink that doesn't count yet (after Round complete) is pinned even on its own hole.
+    if (to === from && r.counted) return;
+    if (to === from) {
+      if (dispatch({ type: "drink.move", drink_id: r.drink.id, hole: to })) {
+        toast.success(`Counted on hole ${to}. Credit's in, feed told. Changed your mind? Delete it.`, { emoji: "🍺", id: `move-${r.drink.id}` });
+      }
+      return;
+    }
     if (dispatch({ type: "drink.move", drink_id: r.drink.id, hole: to })) {
       toast.show({
         tone: "success",
@@ -72,9 +81,10 @@ export function DrinksPanel() {
       </Button>
       <TeamChips teams={derived.teams} value={teamId} onChange={setTeamId} allLabel="All teams" />
       <HoleSelect value={hole} onChange={setHole} />
-      <p className="text-sm font-extrabold text-muted" aria-live="polite">
-        {rows.length} drink{rows.length === 1 ? "" : "s"}
+      <p className="text-sm font-extrabold text-muted" aria-live="polite" data-testid="commish-drinks-count">
+        {counted} drink{counted === 1 ? "" : "s"}
         {ghosts > 0 ? ` · ${ghosts} ghost beer${ghosts === 1 ? "" : "s"}` : ""}
+        {uncounted > 0 ? ` · ${uncounted} ${uncounted === 1 ? "doesn't" : "don't"} count` : ""}
       </p>
       {rows.length === 0 ? (
         <EmptyState emoji="🏜️" title="Bone dry" className="py-6">
@@ -87,9 +97,10 @@ export function DrinksPanel() {
             return (
               <li
                 key={r.drink.id}
-                className={cx("rounded-2xl border-2 p-2.5", r.ghost ? "border-ghost bg-ghost-soft" : "border-line bg-paper")}
+                className={cx("rounded-2xl border-2 p-2.5", !r.counted ? "border-line bg-sand" : r.ghost ? "border-ghost bg-ghost-soft" : "border-line bg-paper")}
                 data-testid="commish-drink-row"
                 data-drink-id={r.drink.id}
+                data-counted={r.counted}
               >
                 <div className="flex items-start gap-2.5">
                   {photo ? (
@@ -108,8 +119,19 @@ export function DrinksPanel() {
                         <PlayerName player={r.player} />
                       </span>
                       <Badge tone={r.drink.type === "drink" ? "beer" : "ink"}>{DRINK_LABEL[r.drink.type]}</Badge>
-                      {r.ghost ? <Badge tone="ghost">👻 Ghost −{r.value}</Badge> : <Badge tone="neutral">−{r.value}</Badge>}
+                      {!r.counted ? (
+                        <Badge tone="flag">Doesn&apos;t count</Badge>
+                      ) : r.ghost ? (
+                        <Badge tone="ghost">👻 Ghost −{r.value}</Badge>
+                      ) : (
+                        <Badge tone="neutral">−{r.value}</Badge>
+                      )}
                     </div>
+                    {r.uncountedReason && (
+                      <p className="mt-1 text-sm font-extrabold text-flag-dark" data-testid="commish-drink-uncounted">
+                        {r.uncountedReason}: worth 0. If it really was before the finish, count it.
+                      </p>
+                    )}
                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-bold text-muted">
                       <TeamPill team={r.team} size="sm" />
                       <span className="text-ink">Hole {r.hole}</span>
@@ -125,9 +147,16 @@ export function DrinksPanel() {
                   </div>
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2">
-                  <Button variant="secondary" onClick={() => setMoving(r)} aria-label={`Move drink on hole ${r.hole}`}>
-                    Move hole
-                  </Button>
+                  {r.counted ? (
+                    <Button variant="secondary" onClick={() => setMoving(r)} aria-label={`Move drink on hole ${r.hole}`}>
+                      Move hole
+                    </Button>
+                  ) : (
+                    // Pinning it to its hole (a move, moved_from_hole set) makes the engine count it.
+                    <Button variant="secondary" onClick={() => move(r, r.hole)} aria-label={`Count the drink on hole ${r.hole}`}>
+                      Count it on {r.hole}
+                    </Button>
+                  )}
                   <Button variant="danger" onClick={() => void del(r)} aria-label={`Delete drink on hole ${r.hole}`}>
                     Delete
                   </Button>

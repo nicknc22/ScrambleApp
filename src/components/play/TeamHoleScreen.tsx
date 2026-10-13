@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DrinkType, MulliganSource, TripState, UUID } from "@/lib/types";
 import type { Derived } from "@/lib/engine/types";
-import { Button, Card, TeamPill, displayName, useToast, IconUserSwap } from "@/components/ui";
+import { Card, TeamPill, cx, displayName, useToast, IconUserSwap } from "@/components/ui";
 import { readPref, writePref } from "@/lib/client/ui-prefs";
 import { Screen } from "@/components/shell/Screen";
 import { ClosestToPinSheet } from "@/components/contests/ClosestToPinSheet";
@@ -36,7 +36,8 @@ import {
 } from "./model";
 import { usePlayActions } from "./usePlayActions";
 import { useDrinkUndo } from "./drinkUndo";
-import { useStickyTop } from "./useStickyTop";
+import { useMulliganUndo } from "./mulliganUndo";
+import { useElementHeight, useStickyTop } from "./useStickyTop";
 import { HoleHeader } from "./HoleHeader";
 import { ScorePanel } from "./ScorePanel";
 import { TeeShotPanel } from "./TeeShotPanel";
@@ -46,7 +47,7 @@ import { ContestPanel } from "./ContestPanel";
 import { ThreesomeReminder } from "./ThreesomeReminder";
 import { ScorecardStrip } from "./ScorecardStrip";
 import { RoundSummaryCard } from "./RoundSummaryCard";
-import { ActionBar, ActionBarSpacer, NextButton, SaveButton, TeeButton } from "./ActionBar";
+import { ActionBar, ActionBarSpacer, NextButton, PlayToastPlacement, SaveButton, TeeButton } from "./ActionBar";
 import { AdvanceSheet, type AdvanceChoice } from "./AdvanceSheet";
 
 /** Threesome rule reminder dismissed on this device for this team's round. */
@@ -82,6 +83,10 @@ export function TeamHoleScreen({
   const openWindow = derived.openWindow[teamId] ?? null;
   // The drinks panel's Undo chip (drinks count on the open window, else the current hole).
   const drinkUndo = useDrinkUndo(teamId, openWindow ?? currentHole);
+  const mulliganUndo = useMulliganUndo(teamId);
+  // Play's notices show right under the header and Play's sticky banners (never on the stepper).
+  const [stickyEl, setStickyEl] = useState<HTMLDivElement | null>(null);
+  const toastTop = stickyTop + useElementHeight(stickyEl) + 8;
   const roundComplete = rs?.status === "complete";
   const finished = roundComplete || tripStatus === "final";
   const lines = useMemo(() => derived.teamHoles[teamId] ?? [], [derived.teamHoles, teamId]);
@@ -247,25 +252,42 @@ export function TeamHoleScreen({
     writePref(reminderKey(view.trip.code, teamId), "1");
   };
 
-  const teamRow = (
-    <div className="flex items-center gap-2">
-      <TeamPill team={team} size="md" you={team.id === myTeamId} className="max-w-[60%]" />
-      <span className="min-w-0 flex-1" />
+  // Whose card this is, for the commissioner (or a spectator): one compact row, not a team row in
+  // the hole header plus a three-line override banner (together they pushed the stepper under the
+  // action bar).
+  const isMine = team.id === myTeamId;
+  const overrideNote = `Commissioner override: changes to ${team.name} post to the feed as overrides.`;
+  const teamStrip = (canSwitch || !isMine) && (
+    <div
+      className={cx("flex min-h-12 items-center gap-2 rounded-2xl border-2 py-0.5 pr-0.5 pl-2", override ? "border-ink bg-hazard" : "border-line bg-paper")}
+      data-testid={override ? "override-banner" : "team-strip"}
+      title={override ? overrideNote : undefined}
+    >
+      {override && (
+        <span className="shrink-0 leading-none" aria-hidden="true">
+          <span className="block text-[13px] font-black uppercase">👔 Override</span>
+          <span className="block text-[11px] font-bold">posts to the feed</span>
+        </span>
+      )}
+      {override && <span className="sr-only">{overrideNote}</span>}
+      <TeamPill team={team} size="sm" you={isMine} className="min-w-0" />
       {canSwitch && (
-        <Button variant="secondary" size="md" onClick={onSwitchTeam} leading={<IconUserSwap size={18} strokeWidth={2.75} />}>
-          Switch team
-        </Button>
+        <button
+          type="button"
+          onClick={onSwitchTeam}
+          aria-label="Switch team"
+          className="btn ml-auto min-h-12 shrink-0 border-ink bg-paper px-3 text-sm font-black text-ink active:bg-sand"
+        >
+          <IconUserSwap size={18} strokeWidth={2.75} />
+          Switch
+        </button>
       )}
     </div>
   );
 
   const banners = (
     <>
-      {override && (
-        <Card tone="hazard" padded={false} className="px-4 py-2 text-[15px] font-extrabold" data-testid="override-banner">
-          👔 Commissioner override: changes to {team.name} post to the feed as overrides.
-        </Card>
-      )}
+      {teamStrip}
       {!editable && (
         <Card tone="sand" padded={false} className="border-ink px-4 py-2 text-[15px] font-extrabold">
           🏆 The round is final. Only the commissioner can change scores now.
@@ -277,7 +299,7 @@ export function TeamHoleScreen({
   if (showSummary) {
     return (
       <Screen>
-        {(canSwitch || team.id !== myTeamId) && teamRow}
+        <PlayToastPlacement top={toastTop} />
         {banners}
         <RoundSummaryCard summary={roundSummary(standing, lines)} final={tripStatus === "final"} teamName={team.name} canEdit={editable} />
         <ScorecardStrip lines={lines} currentHole={-1} viewing={null} unsavedHoles={unsavedHoles} onSelect={selectHole} canEdit={editable} />
@@ -290,8 +312,9 @@ export function TeamHoleScreen({
   return (
     <>
       <Screen>
+        <PlayToastPlacement top={toastTop} />
         {(editingOther || driveBanner) && (
-          <div className="sticky z-20 -mx-4 space-y-0 shadow-[0_6px_12px_rgba(0,0,0,0.12)]" style={{ top: stickyTop }}>
+          <div ref={setStickyEl} className="sticky z-20 -mx-4 mb-2 space-y-0 shadow-[0_6px_12px_rgba(0,0,0,0.12)]" style={{ top: stickyTop }}>
             {editingOther && (
               <div className="flex min-h-14 items-center gap-2 border-y-2 border-ink bg-sky px-4 py-1.5 text-white" data-testid="editing-bar">
                 <span className="min-w-0 flex-1 text-lg leading-tight font-black">
@@ -309,67 +332,62 @@ export function TeamHoleScreen({
             )}
             {driveBanner && drive && (
               <div
-                className="flex items-start gap-2 border-y-2 border-flag-dark bg-flag px-4 py-2 text-[15px] leading-snug font-black text-white"
+                className="flex items-start gap-2 border-y-2 border-flag-dark bg-flag px-4 py-0.5 text-sm leading-tight font-black text-white"
                 role="alert"
                 data-testid="drive-banner"
               >
                 <span aria-hidden="true">🚨</span>
-                <span className="min-w-0">{drive.text}</span>
+                <span className="min-w-0">{drive.bannerText ?? drive.text}</span>
               </div>
             )}
           </div>
         )}
-        {banners}
-        <HoleHeader
-          hole={hole}
-          holeRow={holeRow}
-          teeSet={view.trip.settings.tee_set}
-          team={team}
-          isMyTeam={team.id === myTeamId}
-          standing={standing}
-          canSwitch={canSwitch}
-          onSwitch={onSwitchTeam}
-        />
-        {teeCta !== null && (
-          <Card tone="hazard" padded={false} className="flex items-center gap-3 px-3 py-2.5" data-testid="tee-cta-card">
-            <span className="text-3xl leading-none" aria-hidden="true">
-              ⛳
-            </span>
-            <p className="min-w-0 text-[15px] leading-snug font-bold">
-              {teeCta === 1 && rs?.open_hole == null ? (
-                <>
-                  <span className="font-black uppercase">Not teed off yet.</span> Drinks don&apos;t count until you hit the big yellow button.
-                </>
-              ) : (
-                <>
-                  <span className="font-black uppercase">Hole {teeCta} isn&apos;t open.</span> Drinks keep landing on hole {openWindow ?? currentHole} until you tee off.
-                </>
-              )}
-            </p>
-          </Card>
-        )}
-        {/* Tee shots happen first, so the chips sit right under the hole; the stepper follows, next
-            to Save. Both fit the first screen of an iPhone Home Screen app (and the chips Safari's). */}
-        <TeeShotPanel
-          hole={hole}
-          members={members}
-          selected={line.tee_shot_player_id}
-          nine={nine}
-          driveView={drive}
-          disabled={disabled}
-          onSelect={(pid) => {
-            expectMove(hole); // a tee shot on hole N+1 opens it
-            actions.setTeeShot(hole, pid);
-          }}
-        />
-        <ScorePanel
-          hole={hole}
-          par={par}
-          credit={line.credit}
-          draft={draft}
-          disabled={disabled}
-          onChange={(v) => setDrafts((d) => ({ ...d, [hole]: v }))}
-        />
+        {/* The first screen, one tight group (closer than the rest of the screen): whose card, the
+            hole, then the tee-shot chips (tee shots happen first) and the stepper next to Save. On a
+            normal hole the chips and the stepper both fit a 390x664 phone (Safari's visible area). */}
+        <div className="space-y-2">
+          {banners}
+          <HoleHeader hole={hole} holeRow={holeRow} teeSet={view.trip.settings.tee_set} standing={standing} />
+          {teeCta !== null && (
+            <Card tone="hazard" padded={false} className="flex items-center gap-3 px-3 py-2.5" data-testid="tee-cta-card">
+              <span className="text-3xl leading-none" aria-hidden="true">
+                ⛳
+              </span>
+              <p className="min-w-0 text-[15px] leading-snug font-bold">
+                {teeCta === 1 && rs?.open_hole == null ? (
+                  <>
+                    <span className="font-black uppercase">Not teed off yet.</span> Drinks don&apos;t count until you hit the big yellow button.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-black uppercase">Hole {teeCta} isn&apos;t open.</span> Drinks keep landing on hole {openWindow ?? currentHole} until you tee off.
+                  </>
+                )}
+              </p>
+            </Card>
+          )}
+          <TeeShotPanel
+            hole={hole}
+            members={members}
+            selected={line.tee_shot_player_id}
+            nine={nine}
+            // The red sticky banner already says it: don't spend the first screen on it twice.
+            driveView={driveBanner ? null : drive}
+            disabled={disabled}
+            onSelect={(pid) => {
+              expectMove(hole); // a tee shot on hole N+1 opens it
+              actions.setTeeShot(hole, pid);
+            }}
+          />
+          <ScorePanel
+            hole={hole}
+            par={par}
+            credit={line.credit}
+            draft={draft}
+            disabled={disabled}
+            onChange={(v) => setDrafts((d) => ({ ...d, [hole]: v }))}
+          />
+        </div>
         {/* Below the chips and the stepper so it never pushes them off the first screen. */}
         {derived.teamSize[teamId] === 3 && !reminderHidden && <ThreesomeReminder onDismiss={hideReminder} />}
         <ContestPanel
@@ -395,6 +413,7 @@ export function TeamHoleScreen({
           onLog={(pid: UUID, type: DrinkType, photo?: Blob | null) => void actions.logDrink(pid, type, photo)}
           undo={drinkUndo.chip}
           undonePlayerId={drinkUndo.undonePlayerId}
+          savingPhotoFor={drinkUndo.savingPhotoFor}
           onUndo={() => void actions.undoLastDrink()}
         />
         <MulliganPanel
@@ -404,6 +423,8 @@ export function TeamHoleScreen({
           groomName={derived.groomId ? nameOf(derived.groomId) : "The groom"}
           disabled={disabled}
           onUse={(source: MulliganSource) => actions.spendMulligan(source, hole)}
+          undo={mulliganUndo}
+          onUndo={() => void actions.undoMulligan()}
         />
         <ScorecardStrip lines={lines} currentHole={currentHole} viewing={hole} unsavedHoles={unsavedHoles} onSelect={selectHole} canEdit={editable} />
         {editable && <ActionBarSpacer />}

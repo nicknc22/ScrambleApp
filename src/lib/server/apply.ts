@@ -6,6 +6,7 @@
 //                         "duplicate", rejected → the recorded rejection again (a phone whose
 //                         response got lost still hears that its op was refused)
 //     loadTripState       the state the whole batch builds on
+//     demo budget         a demo trip past DEMO_MAX_APPLIED_OPS rejects every new op unrecorded
 //     for each op, in order:
 //       normalize         light shape check (uuid id, known type, ISO `at`), canonical `at`,
 //                         clamped to server now + 2 min (a phone with a clock in the future must
@@ -13,9 +14,9 @@
 //       applyOp           the SAME reducer the phones run optimistically (side: "server")
 //       validateWrites    rows the database would choke on reject this op only
 //     deriveFeedEvents    feed rows from the accepted steps (new events + updated drink batches),
-//                         plus an "overruled" score_edit for each score.set that lost last-write-wins
-//                         to a newer, different value (rejected ops make no steps, but the spec
-//                         wants the dispute on the feed in either sync order)
+//                         plus an "overruled" score_edit for each dispute (team, hole, losing and
+//                         winning value) a score.set lost last-write-wins (rejected ops make no
+//                         steps, but the spec wants the dispute on the feed in either sync order)
 //     persist             reducer writes + feed rows + applied_ops bookkeeping
 //   → results (one per op, request order) + snapshot (final in-memory state + snapshotMeta)
 //
@@ -59,6 +60,14 @@ import { buildSnapshot, snapshotMeta } from "./trips";
 export const MAX_OPS_PER_SYNC = 200;
 /** An op's client time is clamped to at most server now + this (clock skew allowance). */
 export const MAX_CLOCK_SKEW_MS = CLOCK_GRACE_MS;
+/**
+ * Write budget of a demo trip (anyone can make one, no PIN): once it has this many applied_ops
+ * rows (accepted + rejected), every further new op is rejected without being recorded, so
+ * "Try the demo" can't fill the database the real round lives in. Reset demo starts over.
+ * A fresh "partial" demo uses a few hundred.
+ */
+export const DEMO_MAX_APPLIED_OPS = 3000;
+export const DEMO_FULL_REASON = "Demo's full. Hit Reset demo.";
 
 export interface ApplyOpsArgs {
   db: Db;
@@ -191,13 +200,17 @@ function seenResult(id: string, prev: Pick<AppliedOpRow, "status" | "code" | "re
   return { id, status: "rejected", code: (prev.code ?? "invalid") as RejectCode, reason: prev.reason ?? "" };
 }
 
-/** Run the ops in order against `initial`, exactly once by id. Pure. */
+/**
+ * Run the ops in order against `initial`, exactly once by id. Pure. `budget`: how many more
+ * applied_ops rows this trip may get (null = unlimited); past it, new ops are rejected unrecorded.
+ */
 function runOps(
   tripId: UUID,
   initial: TripState,
   ops: readonly unknown[],
   prior: ReadonlyMap<string, AppliedOpRow>,
   ctx: ApplyCtx,
+  budget: number | null = null,
 ): BatchRun {
   const run: BatchRun = { results: [], steps: [], writes: [], applied: [], records: [], state: initial, overruled: [] };
   const nowMs = Date.parse(ctx.now);
@@ -232,6 +245,12 @@ function runOps(
         continue;
       }
       seen.set(key, run.results.length); // every path below pushes exactly one result
+    }
+
+    // A demo trip out of write budget: nothing new is evaluated or recorded (not even rejections).
+    if (budget !== null && run.records.length >= budget) {
+      run.results.push({ id: rawId, status: "rejected", code: "conflict", reason: DEMO_FULL_REASON });
+      continue;
     }
 
     const n = normalizeOp(raw, nowMs);
@@ -426,6 +445,12 @@ interface Segment {
   snapshot: Snapshot | null;
 }
 
+/** applied_ops rows of the trip (read under the trip lock: no other writer adds any meanwhile). */
+async function countAppliedOps(t: Db, tripId: UUID): Promise<number> {
+  const [row] = await t.query<{ n: number }>("select count(*)::int as n from applied_ops where trip_id = $1", [tripId]);
+  return Number(row?.n ?? 0);
+}
+
 /** Lock, load, check ids. Shared prologue of every transaction here. */
 async function begin(t: Db, args: ApplyOpsArgs, ops: readonly unknown[]) {
   await lockTrip(t, args.trip.id);
@@ -445,7 +470,8 @@ function applySegment(args: ApplyOpsArgs, ops: readonly unknown[], withFeed: boo
     const { now, prior } = await begin(t, args, ops);
     const initial = await loadTripState(t, tripId);
     const ctx: ApplyCtx = { now, is_commissioner: args.isCommissioner, side: "server" };
-    const run = runOps(tripId, initial, ops, prior, ctx);
+    const budget = initial.trip.is_demo ? Math.max(0, DEMO_MAX_APPLIED_OPS - (await countAppliedOps(t, tripId))) : null;
+    const run = runOps(tripId, initial, ops, prior, ctx, budget);
     let events = withFeed ? deriveEvents(tripId, run, initial.feed_events, now) : NO_EVENTS;
 
     if (run.writes.length > 0) {

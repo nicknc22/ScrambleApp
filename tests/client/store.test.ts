@@ -183,6 +183,8 @@ class FakeServer {
   batchSizes: number[] = [];
   failSync = 0;
   failUpload = 0;
+  /** Upload paths the server refuses for good (status + JSON body), e.g. 409 photo_exists. */
+  refuseUploads = new Map<string, { status: number; body: unknown }>();
   /** Uploads hang (a weak uplink) until released or aborted by the client's timeout. */
   hangUploads = false;
   private uploadWaiters: Array<() => void> = [];
@@ -257,6 +259,11 @@ class FakeServer {
           return json({ error: "storage down" }, 503);
         }
         const path = u.searchParams.get("path")!;
+        const refused = this.refuseUploads.get(path);
+        if (refused) {
+          this.events.push(`refused:${path}`);
+          return json(refused.body, refused.status);
+        }
         this.uploads.set(path, init.body as Blob);
         this.events.push(`upload:${path}`);
         return json({ path });
@@ -1001,6 +1008,34 @@ describe("TripStore offline-first sync", () => {
     expect(h.store.getState().pendingCount).toBe(0);
   });
 
+  it("a photo the server refuses for good (409 photo_exists) is dropped at once with a sync issue, and later photos still upload", async () => {
+    const f = makeTrip({ teams: [4, 3, 3] });
+    const server = new FakeServer(f.state);
+    const h = await started(server);
+    const squatted = await h.store.addPhoto(new Blob(["ctp"], { type: "image/jpeg" }), "ctp");
+    const later = await h.store.addPhoto(new Blob(["drink"], { type: "image/jpeg" }), "drinks");
+    const drink = h.store.dispatch(drinkInput(f, { photo_path: later }));
+    if (!drink.ok) throw new Error("dispatch failed");
+    server.refuseUploads.set(squatted, {
+      status: 409,
+      body: { error: "Nice try. A different photo is already filed under that name, and evidence is final.", code: "photo_exists" },
+    });
+    await h.store.flush({ photos: true });
+    // One attempt for the refused photo, then the queue moved on.
+    expect(server.events.filter((e) => e === `refused:${squatted}`)).toHaveLength(1);
+    expect(server.uploads.has(later)).toBe(true);
+    const s = h.store.getState();
+    expect(s.pendingCount).toBe(0);
+    expect(h.store.isPhotoPending(squatted)).toBe(false);
+    expect(s.online).toBe(true);
+    expect(s.rejected).toHaveLength(1);
+    expect(s.rejected[0]).toMatchObject({ id: squatted, op_type: "photo", status: "rejected", description: "Closest to pin photo" });
+    expect(s.rejected[0].reason).toMatch(/evidence is final/);
+    // Nothing left to retry: no backoff timer for the upload lane, and another pass uploads nothing.
+    await h.store.flush({ photos: true });
+    expect(server.events.filter((e) => e === `refused:${squatted}`)).toHaveLength(1);
+  });
+
   it("scores dispatched before and after a photo post both go without waiting for the upload", async () => {
     const f = makeTrip({ teams: [4, 3, 3] });
     const server = new FakeServer(f.state);
@@ -1275,6 +1310,58 @@ describe("TripStore with the real reducer and engine", () => {
     expect(rowA2.net).toBe(rowA.net);
     // The server's state is exactly the client's view now.
     expect(h.store.getState().view).toEqual(server.state);
+  });
+
+  it("a photo drink keeps the hole and time of its tap, even if the team teed off or finished while the photo compressed (finding: photo-compress-cdn-worker)", async (ctx) => {
+    const real = await realModules();
+    if (!real) {
+      ctx.skip("src/lib/reducer.ts / engine still throw 'not implemented'");
+      return;
+    }
+    const f = makeTrip({ teams: [4, 3, 3] });
+    f.teeOff("A", 12).teeOff("B", 18);
+    const server = new FakeServer(f.state, real.applyOp);
+    const h = await started(server, { applyOp: real.applyOp, derive: (s) => real.derive(s), newId: real.newId });
+    h.store.setMe(f.player.A1);
+    const drink = (team: "A" | "B", player: string, hole: number) =>
+      ({ type: "drink.log", drink_id: real.newId(), team_id: f.team[team], player_id: player, hole, drink_type: "drink", photo_path: null }) as const;
+
+    // Hole 12: the photo is picked (tap), then "On the tee: 13" is tapped while it compresses.
+    const tapped = h.store.serverNow();
+    expect(h.store.getState().derived!.openWindow[f.team.A]).toBe(12);
+    h.tick();
+    expect(h.store.dispatch({ type: "tee.open", team_id: f.team.A, hole: 13 })).toMatchObject({ ok: true });
+    h.tick();
+    const late = drink("A", f.player.A1, 12);
+    const r = h.store.dispatch(late, { at: tapped });
+    expect(r).toMatchObject({ ok: true });
+    if (!r.ok) return;
+    expect(r.op.at).toBe(tapped);
+    expect(h.store.getState().derived!.drinkValues[late.drink_id]?.hole).toBe(12);
+
+    // Hole 18: Round complete lands while the photo compresses. A fresh tap now is refused, but the
+    // drink tapped before it still counts.
+    const tapped18 = h.store.serverNow();
+    h.store.setMe(f.player.B1);
+    h.tick();
+    expect(h.store.dispatch({ type: "round.complete", team_id: f.team.B })).toMatchObject({ ok: true });
+    h.tick();
+    expect(h.store.dispatch(drink("B", f.player.B1, 18))).toMatchObject({ ok: false, code: "no_window" });
+    const on18 = drink("B", f.player.B1, 18);
+    expect(h.store.dispatch(on18, { at: tapped18 })).toMatchObject({ ok: true });
+    expect(h.store.getState().derived!.drinkValues[on18.drink_id]?.hole).toBe(18);
+
+    // An `at` in the future is clamped to now.
+    h.store.setMe(f.player.A1);
+    const future = h.store.dispatch(drink("A", f.player.A2, 13), { at: new Date(h.clock.now + 3_600_000).toISOString() });
+    expect(future.ok && Date.parse(future.op.at)).toBeLessThanOrEqual(h.clock.now);
+
+    // The server agrees with the phone.
+    await h.store.flush();
+    expect(h.store.getState().rejected).toEqual([]);
+    const serverDerived = real.derive(server.state);
+    expect(serverDerived.drinkValues[late.drink_id]?.hole).toBe(12);
+    expect(serverDerived.drinkValues[on18.drink_id]?.hole).toBe(18);
   });
 
   it("a queued drink stays in the view when another phone completes the round before this one syncs", async (ctx) => {

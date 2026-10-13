@@ -31,3 +31,20 @@ export function useStickyTop(): number {
   }, []);
   return top;
 }
+
+/** An element's current height (0 while it isn't mounted). Pass it from a callback ref. */
+export function useElementHeight(el: HTMLElement | null): number {
+  const [height, setHeight] = useState(0);
+  useEffect(() => {
+    if (!el) return;
+    const update = () => setHeight(Math.round(el.getBoundingClientRect().height));
+    if (typeof ResizeObserver === "undefined") {
+      const raf = requestAnimationFrame(update);
+      return () => cancelAnimationFrame(raf);
+    }
+    const ro = new ResizeObserver(update); // fires once on observe
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return el ? height : 0;
+}

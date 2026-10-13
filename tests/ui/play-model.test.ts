@@ -8,6 +8,7 @@ import {
   clampHole,
   clampStrokes,
   DRINK_UNDO_MS,
+  DRINK_UNDO_REARM_MS,
   DRINK_UNDONE_MS,
   EMPTY_BURST,
   burstAfterLog,
@@ -225,6 +226,9 @@ describe("drive minimum", () => {
     const one = driveView(nine({ needing: ["c"], remaining: 1, level: "hard" }), nameOf);
     expect(one.text).toBe("Use Cy's drive NOW: 1 hole left on this nine.");
     expect(driveView(nine({ remaining: 1, level: "impossible" }), nameOf)).toMatchObject({ tone: "impossible", banner: true });
+    // The sticky banner gets the short copy (finding: teeshot-chips-below-fold).
+    expect(one.bannerText).toBe("Use Cy's drive NOW · 1 hole left");
+    expect(driveView(nine({ remaining: 1, level: "impossible" }), nameOf).bannerText).toBe("Too late: 1 hole left, 2 still need a drive (Bo and Cy).");
   });
 
   it("ok / done / missed", () => {
@@ -300,31 +304,68 @@ describe("drinks", () => {
     expect(chip.announce).toContain("Ghost beer!");
     expect(undoChipView(b, t0 + 8_000 + DRINK_UNDO_MS)).toBeNull();
 
-    // Undo pops the newest; the chip moves to the previous drink with a fresh window, and the
-    // undone row gets a brief "Undone" mark.
+    // Undo pops the newest; the undone row gets a brief "Undone" mark, and after a short pause the
+    // chip moves to the previous drink with what is left of the window (no fresh 10 s).
     const u = burstAfterUndo(b, t0 + 12_000)!;
     expect(u.removed.drinkId).toBe("d-Rob");
-    expect(undoChipView(u.burst, t0 + 12_000)).toMatchObject({ playerId: "p-Jimmy", count: 2, remainingMs: DRINK_UNDO_MS });
+    expect(undoChipView(u.burst, t0 + 12_000)).toBeNull();
+    const rearmed = t0 + 12_000 + DRINK_UNDO_REARM_MS;
+    expect(undoChipView(u.burst, rearmed)).toMatchObject({ playerId: "p-Jimmy", count: 2, remainingMs: t0 + 8_000 + DRINK_UNDO_MS - rearmed });
     expect(undoneMarkFor(u.burst, t0 + 12_000)).toBe("p-Rob");
     expect(undoneMarkFor(u.burst, t0 + 12_000 + DRINK_UNDONE_MS)).toBeNull();
-    // Too late: the window closed (plus a small grace for a tap on a chip that just timed out).
-    expect(burstAfterUndo(u.burst, t0 + 12_000 + DRINK_UNDO_MS + 500)).not.toBeNull();
-    expect(burstAfterUndo(u.burst, t0 + 12_000 + DRINK_UNDO_MS + 2_000)).toBeNull();
+    // Too late: the window (from the last LOG) closed, plus a small grace for a tap on a chip that
+    // just timed out.
+    expect(undoChipView(u.burst, t0 + 8_000 + DRINK_UNDO_MS)).toBeNull();
+    expect(burstAfterUndo(u.burst, t0 + 8_000 + DRINK_UNDO_MS + 500)).not.toBeNull();
+    expect(burstAfterUndo(u.burst, t0 + 8_000 + DRINK_UNDO_MS + 2_000)).toBeNull();
     expect(burstAfterUndo(EMPTY_BURST, t0)).toBeNull();
     // A log after the window, or on another hole, starts a new burst.
     expect(burstAfterLog(u.burst, d("Al"), t0 + 30_000).drinks.map((x) => x.name)).toEqual(["Al"]);
     expect(burstAfterLog(u.burst, { ...d("Al"), hole: 7 }, t0 + 13_000).drinks.map((x) => x.name)).toEqual(["Al"]);
     // A drink on a hole the team has since left says which hole it was on.
-    expect(undoChipView(u.burst, t0 + 12_000, 7)?.detail).toBe("🍺 −1 stroke · hole 6");
-    expect(undoChipView(u.burst, t0 + 12_000, 6)?.detail).toBe("🍺 −1 stroke");
+    expect(undoChipView(u.burst, rearmed, 7)?.detail).toBe("🍺 −1 stroke · hole 6");
+    expect(undoChipView(u.burst, rearmed, 6)?.detail).toBe("🍺 −1 stroke");
     // Undoing the last drink of a burst leaves no chip.
     const last = burstAfterUndo(burstAfterLog(EMPTY_BURST, d("Al"), t0), t0 + 1_000)!;
-    expect(undoChipView(last.burst, t0 + 1_000)).toBeNull();
+    expect(undoChipView(last.burst, t0 + 1_000 + DRINK_UNDO_REARM_MS)).toBeNull();
 
     // The chip keeps the drink feedback, including the banked mulligan.
     expect(drinkChipDetail({ type: "drink", value: 1 })).toBe("🍺 −1 stroke");
     expect(drinkChipDetail({ type: "shotgun", value: 1 })).toBe("🔫 Mulligan banked");
     expect(drinkChipDetail({ type: "shot", value: 2 })).toBe("👻 Mulligan banked");
+  });
+
+  it("a double tap on the drink Undo removes one drink, not two (finding: drink-undo-double-tap-removes-two)", () => {
+    const d = (n: number): BurstDrink => ({ opId: `op-${n}`, drinkId: `d-${n}`, playerId: "p-Rob", name: "Rob", type: "drink", value: 1, hole: 6 });
+    const t0 = 2_000_000;
+    // Two drinks for the same player: the chip sits in Rob's row.
+    let b = burstAfterLog(burstAfterLog(EMPTY_BURST, d(1), t0), d(2), t0 + 1_000);
+    expect(undoChipView(b, t0 + 1_500)).toMatchObject({ playerId: "p-Rob", count: 2 });
+    // First tap undoes drink 2. No chip under the finger right after it...
+    const first = burstAfterUndo(b, t0 + 2_000)!;
+    expect(first.removed.drinkId).toBe("d-2");
+    b = first.burst;
+    expect(undoChipView(b, t0 + 2_000)).toBeNull();
+    expect(undoChipView(b, t0 + 2_000 + DRINK_UNDO_REARM_MS - 1)).toBeNull();
+    expect(undoneMarkFor(b, t0 + 2_120)).toBe("p-Rob");
+    // ...and the second tap of the double tap (120 ms later) is ignored.
+    expect(burstAfterUndo(b, t0 + 2_120)).toBeNull();
+    expect(burstAfterUndo(b, t0 + 2_000 + DRINK_UNDO_REARM_MS - 1)).toBeNull();
+    // A deliberate tap once the chip is back undoes drink 1.
+    expect(undoChipView(b, t0 + 2_000 + DRINK_UNDO_REARM_MS)).toMatchObject({ playerId: "p-Rob", count: 1 });
+    expect(burstAfterUndo(b, t0 + 2_000 + DRINK_UNDO_REARM_MS)?.removed.drinkId).toBe("d-1");
+    // A new log brings the chip straight back (no pause).
+    const relog = burstAfterLog(b, d(3), t0 + 2_100);
+    expect(undoChipView(relog, t0 + 2_100)).toMatchObject({ count: 2 });
+    // Undo never restarts the window: drinks logged long ago can't be peeled off one by one.
+    let old = EMPTY_BURST;
+    for (let i = 0; i < 5; i++) old = burstAfterLog(old, d(10 + i), t0 + i * 1_000);
+    const lastLog = t0 + 4_000;
+    const late = burstAfterUndo(old, lastLog + 9_000)!;
+    expect(late.removed.drinkId).toBe("d-14");
+    expect(undoChipView(late.burst, lastLog + 9_000 + DRINK_UNDO_REARM_MS)).toMatchObject({ remainingMs: 200 });
+    expect(undoChipView(late.burst, lastLog + DRINK_UNDO_MS)).toBeNull();
+    expect(burstAfterUndo(late.burst, lastLog + 12_000)).toBeNull();
   });
 
   it("no-window roasts", () => {

@@ -1,7 +1,7 @@
 // Pure view-model helpers for the Play tab (team hole screen). No React, no store, no clock:
 // every rule the screen applies lives here so it can be unit tested (tests/ui/play-model.test.ts).
 import type { DrinkValue, DriveNineStatus, MulliganBank, StandingRow, TeamHoleLine } from "@/lib/engine/types";
-import type { DrinkType, HoleContest, RoundStatus, TeamRoundState, TripStatus, UUID } from "@/lib/types";
+import type { DrinkType, HoleContest, MulliganSource, RoundStatus, TeamRoundState, TripStatus, UUID } from "@/lib/types";
 import { formatToPar } from "@/lib/engine/format";
 import { noWindowRoast } from "@/lib/events/templates";
 
@@ -263,6 +263,8 @@ export interface DriveView {
   text: string;
   /** Show as the sticky red banner. */
   banner: boolean;
+  /** The banner's shorter copy (it sits over the first screen, so it gets two lines at most). */
+  bannerText?: string;
 }
 
 export function holesWord(n: number): string {
@@ -300,6 +302,7 @@ export function driveView(nine: DriveNineStatus, nameOf: (id: UUID) => string): 
     return { ...base, tone: "done", banner: false, text: `Everyone's drive has been used on the ${nineLabel}.` };
   }
   const left = `${holesWord(nine.remaining)} left on this nine`;
+  const leftShort = `${holesWord(nine.remaining)} left`;
   switch (nine.level) {
     case "impossible":
       return {
@@ -307,6 +310,7 @@ export function driveView(nine: DriveNineStatus, nameOf: (id: UUID) => string): 
         tone: "impossible",
         banner: true,
         text: `Too late: ${left} and ${nine.needing.length} still need a drive (${names}). Somebody's getting roasted.`,
+        bannerText: `Too late: ${leftShort}, ${nine.needing.length} still need a drive (${names}).`,
       };
     case "hard":
       return {
@@ -317,6 +321,7 @@ export function driveView(nine: DriveNineStatus, nameOf: (id: UUID) => string): 
           nine.needing.length === 1
             ? `Use ${names}'s drive NOW: ${left}.`
             : `Use drives from ${names} NOW: ${left}.`,
+        bannerText: nine.needing.length === 1 ? `Use ${names}'s drive NOW · ${leftShort}` : `Use drives from ${names} NOW · ${leftShort}`,
       };
     case "soft":
       return { ...base, tone: "soft", banner: false, text: `Needs a drive: ${names} · ${left}` };
@@ -401,11 +406,17 @@ export const DRINK_UNDO_MS = 10_000;
 export const DRINK_UNDONE_MS = 2_500;
 /** A tap that lands just as the chip times out still counts. */
 const UNDO_GRACE_MS = 1_000;
+/**
+ * After an Undo the chip stays away this long (the row says "Undone") and Undo taps are ignored, so
+ * the second tap of a double tap never lands on a fresh chip for the next-older drink.
+ */
+export const DRINK_UNDO_REARM_MS = 800;
 
 /**
  * Drinks logged in a row on this phone for one team. No toast: the Undo is an inline chip in the
  * row of the newest drink (a toast stack ended up on top of Save / On the tee and the tab bar).
- * Each log restarts the 10 s window; Undo removes the newest drink and gives the rest a fresh one.
+ * Each log restarts the 10 s window; Undo removes the newest drink, one per tap, and the rest keep
+ * what is left of that window (an undo never buys older drinks a fresh 10 s).
  */
 export interface DrinkUndoBurst {
   drinks: readonly BurstDrink[];
@@ -428,7 +439,13 @@ export function burstAfterLog(b: DrinkUndoBurst, drink: BurstDrink, now: number)
 export function burstAfterUndo(b: DrinkUndoBurst, now: number): { burst: DrinkUndoBurst; removed: BurstDrink } | null {
   const removed = b.drinks[b.drinks.length - 1];
   if (!removed || now - b.at > DRINK_UNDO_MS + UNDO_GRACE_MS) return null;
-  return { burst: { drinks: b.drinks.slice(0, -1), at: now, undone: { playerId: removed.playerId, at: now } }, removed };
+  if (rearming(b, now)) return null; // the second tap of a double tap
+  return { burst: { drinks: b.drinks.slice(0, -1), at: b.at, undone: { playerId: removed.playerId, at: now } }, removed };
+}
+
+/** Right after an Undo: no chip, and Undo taps are ignored. */
+function rearming(b: DrinkUndoBurst, now: number): boolean {
+  return !!b.undone && now - b.undone.at < DRINK_UNDO_REARM_MS;
 }
 
 export interface UndoChipView {
@@ -462,7 +479,7 @@ export function drinkChipDetail(d: Pick<BurstDrink, "type" | "value">): string {
 export function undoChipView(b: DrinkUndoBurst, now: number, targetHole?: number): UndoChipView | null {
   const last = b.drinks[b.drinks.length - 1];
   const elapsedMs = Math.max(0, now - b.at);
-  if (!last || elapsedMs >= DRINK_UNDO_MS) return null;
+  if (!last || elapsedMs >= DRINK_UNDO_MS || rearming(b, now)) return null;
   const fb = drinkFeedback(last.type, last.value, last.name, last.hole);
   return {
     playerId: last.playerId,
@@ -510,6 +527,49 @@ export function mulliganOptions(bank: MulliganBank | null | undefined): Mulligan
   const earned = bank?.available ?? 0;
   const groom = !!bank?.groom_available;
   return { earned, groom, any: earned > 0 || groom, usedTotal: bank?.used_total ?? 0 };
+}
+
+/**
+ * The newest mulligan this phone used for a team, for its 10-second Undo. Like the drinks', the
+ * Undo is an inline chip in the Mulligans card (no toast: one parked above the action bar sat on
+ * the stepper and turned taps on + into an Undo).
+ */
+export interface MulliganUndo {
+  opId: UUID;
+  mulliganId: UUID;
+  source: MulliganSource;
+  hole: number;
+  /** Date.now() of the use. */
+  at: number;
+  /** Date.now() of the Undo tap (the card says "back in the bank" for a moment), else null. */
+  undoneAt: number | null;
+}
+
+export type MulliganUndoView =
+  | { kind: "chip"; remainingMs: number; elapsedMs: number; detail: string; ariaLabel: string }
+  | { kind: "undone"; text: string };
+
+const mulliganName = (source: MulliganSource) => (source === "groom" ? "Groom's Mulligan" : "Mulligan");
+
+export function mulliganUndoView(u: MulliganUndo | null, now: number): MulliganUndoView | null {
+  if (!u) return null;
+  if (u.undoneAt !== null) {
+    return now - u.undoneAt < DRINK_UNDONE_MS ? { kind: "undone", text: `↩️ ${mulliganName(u.source)} back in the bank` } : null;
+  }
+  const elapsedMs = Math.max(0, now - u.at);
+  if (elapsedMs >= DRINK_UNDO_MS) return null;
+  return {
+    kind: "chip",
+    remainingMs: DRINK_UNDO_MS - elapsedMs,
+    elapsedMs,
+    detail: `${u.source === "groom" ? "👑" : "♻️"} ${mulliganName(u.source)} used · hole ${u.hole}`,
+    ariaLabel: `Undo the ${mulliganName(u.source)} on hole ${u.hole}`,
+  };
+}
+
+/** The mulligan Undo applies to `u` at `now` (one per use: a second tap of a double tap is ignored). */
+export function canUndoMulligan(u: MulliganUndo | null, now: number): u is MulliganUndo {
+  return !!u && u.undoneAt === null && now - u.at <= DRINK_UNDO_MS + UNDO_GRACE_MS;
 }
 
 // ---------------------------------------------------------------------------

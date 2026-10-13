@@ -10,7 +10,7 @@
 // comes from `now`, ids from ops.
 import type { ContestEntry, Drink, FeedEvent, FeedEventType, ISODate, Mulligan, TripSettings, TripState, UUID } from "../types";
 import { COMMISSIONER_ONLY_OPS, type Op, type OpType, type ScoreSetOp } from "../ops";
-import { PLAY_OPS } from "../reducer";
+import { isWeakDefault, PLAY_OPS } from "../reducer";
 import { derive } from "../engine";
 import type { Derived, DriveNineStatus, StandingRow } from "../engine/types";
 import { effectiveDrinkHole } from "../engine/windows";
@@ -525,8 +525,9 @@ function scoreChanges(ctx: Ctx, step: OpStep, actor: UUID | null, override: bool
     if (to === null || to === from) continue;
     const par = parOf(A, row.hole);
 
-    // "changed hole 6 from a 5 to a 4". A commissioner override already says exactly this.
-    if (from !== null && !override) {
+    // "changed hole 6 from a 5 to a 4". A commissioner override already says exactly this, and a
+    // real score replacing an untouched par default isn't an edit.
+    if (from !== null && !override && old && !isWeakDefault(old)) {
       const payload: ScoreEditPayload = { hole: row.hole, from, to, par, edit_count: row.edit_count };
       emit(ctx, {
         type: "score_edit",
@@ -987,9 +988,12 @@ function removals(ctx: Ctx, step: OpStep, actor: UUID | null): void {
     const was = B.contest_entries.find((x) => x.id === op.entry_id);
     const now = A.contest_entries.find((x) => x.id === op.entry_id);
     if (!was || !now || !isActive(was) || isActive(now)) return;
-    // Entries carry server times only: compare with this batch's server time.
+    // Entries carry server times only (created_at = when the submit synced). Compare the delete's
+    // client time (server-clock corrected on the phone), never this batch's arrival: an Undo that
+    // sat in a dead zone's outbox is still a quick undo. An undo stamped before the entry even
+    // reached the server (negative) is as quick as it gets.
     const view = ctx.d(B).contests.find((c) => c.hole === was.hole)?.entries.find((v) => v.entry.id === was.id);
-    post(was, was.player_id, was.player_id, elapsed(was.created_at, ctx.nowMs), {
+    post(was, was.player_id, was.player_id, elapsed(was.created_at, opAt), {
       kind: "contest_entry",
       hole: was.hole,
       detail: was.type,
@@ -1367,20 +1371,19 @@ function resultsView(d: Derived): { champions: UUID[]; standings: ResultsStandin
 
 /**
  * A batch applied to a FINAL trip (plays from the course synced after the finalize, or a
- * commissioner fix) changed the champion(s), a team's position or net, or a settle-up payment:
- * one loud results_changed post (pushed to everyone; people may already have paid). The FINAL
- * RESULTS post stays as history.
+ * commissioner fix) changed the champion(s), a team's position label or a settle-up payment:
+ * one loud results_changed post (pushed to everyone; people may already have paid). A net that
+ * moved without moving anybody's position or money posts nothing (the leaderboard shows it). The
+ * FINAL RESULTS post stays as history.
  */
 function resultsChanged(ctx: Ctx, steps: OpStep[], first: TripState, last: TripState): void {
-  const dFirst = ctx.d(first);
-  const dLast = ctx.d(last);
-  const before = resultsView(dFirst);
-  const after = resultsView(dLast);
-  const standingKey = (d: Derived) => d.standings.map((r) => `${r.team_id}:${r.pos}:${r.net}`).sort().join("|");
+  const before = resultsView(ctx.d(first));
+  const after = resultsView(ctx.d(last));
+  const positionKey = (rows: ResultsStandingRow[]) => rows.map((r) => `${r.team_id}:${r.pos_label}`).sort().join("|");
   const paymentKey = (ps: ResultsPayment[]) => ps.map((p) => `${p.from_player_id}>${p.to_player_id}:${p.amount_cents}`).sort().join("|");
   const changed =
     !sameIds(before.champions, after.champions) ||
-    standingKey(dFirst) !== standingKey(dLast) ||
+    positionKey(before.standings) !== positionKey(after.standings) ||
     paymentKey(before.payments) !== paymentKey(after.payments);
   if (!changed) return;
   const lastStep = steps[steps.length - 1];
@@ -1507,14 +1510,16 @@ export function pushTriggerFor(ev: FeedEvent, state: TripState, d: Derived): Pus
  * A score.set rejected as stale because a NEWER, DIFFERENT value is stored (last write wins by
  * client time): nothing changed on the scorecard, but the spec wants the dispute on the feed in
  * either sync order. A score_edit post with payload.kind "overruled" (from = the losing value,
- * to = the stored one), keyed by op id so it posts once. null when there is no such dispute.
+ * to = the stored one), keyed by the dispute (team, hole, losing value, winning value) so it posts
+ * once however many stale ops say the same thing (rejected ops cost nothing to send). null when
+ * there is no such dispute (a weak par default never wins one: it has no time).
  */
 export function overruledScoreEvent(state: TripState, op: ScoreSetOp, now: ISODate): FeedEvent | null {
   const row = state.hole_scores.find((r) => r.team_id === op.team_id && r.hole === op.hole);
   if (!row || row.strokes === null || row.strokes === op.strokes || row.strokes_at === null) return null;
   if (!(timeOf(row.strokes_at) > timeOf(op.at))) return null;
   if (!state.teams.some((t) => t.id === op.team_id && isActive(t))) return null;
-  const key = `overruled:${op.id}`;
+  const key = `overruled:${op.team_id}:${op.hole}:${op.strokes}:${row.strokes}`;
   if (state.feed_events.some((e) => e.dedupe_key === key)) return null;
   const payload: ScoreEditPayload = {
     hole: op.hole,

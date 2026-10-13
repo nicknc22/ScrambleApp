@@ -1,6 +1,6 @@
 // Pure view helpers for the Money tab (unit-tested in tests/ui/money-logic.test.ts).
 // Everything is integer cents; display with formatCents.
-import type { ContestKind, Player, PotKey, TripState, UUID } from "@/lib/types";
+import type { ContestKind, FeedEvent, ISODate, Player, PotKey, Trip, TripState, UUID } from "@/lib/types";
 import type { Derived, LedgerRow, Payment, PotView, StandingRow } from "@/lib/engine/types";
 
 export const CONTEST_EMOJI: Record<ContestKind, string> = { ctp: "🎯", ld: "💣" };
@@ -140,4 +140,25 @@ export function totalAntes(pots: readonly PotView[]): number {
 export function signedCents(cents: number, format: (c: number) => string): string {
   if (cents > 0) return `+${format(cents)}`;
   return format(cents);
+}
+
+/**
+ * When the results changed after the final whistle (a late sync from the course or a commissioner
+ * fix posted results_changed after this finalize): the newest such post's time, else null. People
+ * may already have paid off the old numbers, so the Money tab says so.
+ */
+export function resultsChangedSinceFinal(
+  trip: Pick<Trip, "status" | "finalized_at">,
+  events: readonly Pick<FeedEvent, "type" | "created_at" | "deleted_at">[],
+): ISODate | null {
+  if (trip.status !== "final" || !trip.finalized_at) return null;
+  const finalizedMs = Date.parse(trip.finalized_at);
+  let latest: ISODate | null = null;
+  for (const e of events) {
+    if (e.type !== "results_changed" || e.deleted_at !== null) continue;
+    const t = Date.parse(e.created_at);
+    if (!(t >= finalizedMs)) continue;
+    if (latest === null || t > Date.parse(latest)) latest = e.created_at;
+  }
+  return latest;
 }

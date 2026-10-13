@@ -1,11 +1,14 @@
 "use client";
 // Photo compression and photo-path helpers.
-// compressPhoto: 1600px longest side, JPEG q0.7 via browser-image-compression; if that fails
-// (e.g. HEIC on a browser that can't decode it in the worker), redraw through a canvas so the
-// result is always a JPEG. Last resort: a smaller, lower-quality canvas redraw. An uncompressed
-// original is never uploaded (a full-size phone JPEG can top the host's 4.5 MB request limit);
-// when nothing can shrink it, compressPhoto throws and the caller logs the action without the
-// photo (with a toast).
+// compressPhoto: 1600px longest side, JPEG q0.7 via browser-image-compression ON THE MAIN THREAD:
+// its web worker importScripts the library from cdn.jsdelivr.net, a third-party request the
+// service worker can't cache, and on a stalled mountain connection that worker just hangs. A
+// 1600px JPEG takes a few hundred ms on a phone, so no worker is needed. If the library fails or
+// takes longer than PHOTO_COMPRESS_TIMEOUT_MS (e.g. HEIC it can't decode), redraw through a canvas
+// so the result is always a JPEG. Last resort: a smaller, lower-quality canvas redraw. An
+// uncompressed original is never uploaded (a full-size phone JPEG can top the host's 4.5 MB
+// request limit); when nothing can shrink it, compressPhoto throws and the caller logs the action
+// without the photo (with a toast). Nothing here touches the network.
 import imageCompression from "browser-image-compression";
 import type { Op } from "../ops";
 
@@ -16,6 +19,8 @@ export const PHOTO_FALLBACK_DIMENSION = 1024;
 export const PHOTO_FALLBACK_QUALITY = 0.5;
 /** Largest photo the client will queue (the server takes 4 MB; Vercel refuses bodies over 4.5 MB). */
 export const PHOTO_MAX_BYTES = 4 * 1024 * 1024;
+/** The library gets this long before the canvas path takes over. */
+export const PHOTO_COMPRESS_TIMEOUT_MS = 6_000;
 export const PHOTO_KINDS = ["drinks", "ld", "ctp", "posts"] as const;
 
 const PHOTO_PATH_RE = /^trips\/[A-Za-z0-9_-]+\/(drinks|ld|ctp|posts)\/[A-Za-z0-9_-]+\.jpg$/;
@@ -50,8 +55,8 @@ export interface CompressDeps {
   compressLib?: (file: File, options: Parameters<typeof imageCompression>[1]) => Promise<Blob>;
   /** Canvas redraw fallback (injectable for tests). */
   redraw?: (file: Blob, opts?: RedrawOptions) => Promise<Blob>;
-  /** Max time for the web-worker attempt before falling back to the main thread. */
-  workerTimeoutMs?: number;
+  /** Max time for the library before falling back to the canvas (default PHOTO_COMPRESS_TIMEOUT_MS). */
+  timeoutMs?: number;
 }
 
 function asFile(blob: Blob): File {
@@ -99,40 +104,34 @@ export async function compressPhoto(file: Blob, deps: CompressDeps = {}): Promis
   if (!file || file.size === 0) throw new PhotoError("That photo is empty");
   const lib = deps.compressLib ?? ((f, o) => imageCompression(f, o));
   const redraw = deps.redraw ?? redrawToJpeg;
-  const options = {
-    maxWidthOrHeight: PHOTO_MAX_DIMENSION,
-    initialQuality: PHOTO_QUALITY,
-    fileType: "image/jpeg",
-  };
 
-  // 1) Web worker (the library falls back to the main thread itself when the worker can't load
-  //    its script offline; the timeout guards against a worker stuck on a dead network).
+  // 1) The library, main thread only (its worker would fetch the library from a CDN). The timeout
+  //    aborts it and hands over to the canvas.
   try {
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     const out = await withTimeout(
-      lib(asFile(file), { ...options, useWebWorker: true, signal: ctrl?.signal }),
-      deps.workerTimeoutMs ?? 20_000,
+      lib(asFile(file), {
+        maxWidthOrHeight: PHOTO_MAX_DIMENSION,
+        initialQuality: PHOTO_QUALITY,
+        fileType: "image/jpeg",
+        useWebWorker: false,
+        signal: ctrl?.signal,
+      }),
+      deps.timeoutMs ?? PHOTO_COMPRESS_TIMEOUT_MS,
       () => ctrl?.abort(),
     );
     if (usable(out)) return out;
   } catch {
     /* fall through */
   }
-  // 2) Main thread.
-  try {
-    const out = await withTimeout(lib(asFile(file), { ...options, useWebWorker: false }), 30_000);
-    if (usable(out)) return out;
-  } catch {
-    /* fall through */
-  }
-  // 3) Canvas redraw (HEIC -> JPEG where the browser can decode it).
+  // 2) Canvas redraw (HEIC -> JPEG where the browser can decode it).
   try {
     const out = await redraw(file);
     if (usable(out)) return out;
   } catch {
     /* fall through */
   }
-  // 4) Smaller and rougher, but it uploads.
+  // 3) Smaller and rougher, but it uploads.
   try {
     const out = await redraw(file, { maxDimension: PHOTO_FALLBACK_DIMENSION, quality: PHOTO_FALLBACK_QUALITY });
     if (usable(out)) return out;

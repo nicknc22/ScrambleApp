@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { compressPhoto, isPhotoPath, PHOTO_MAX_BYTES, PhotoError, photoPath, photoPathsOf, type RedrawOptions } from "@/lib/client/photos";
+import { describe, expect, it, vi } from "vitest";
+import {
+  compressPhoto,
+  isPhotoPath,
+  PHOTO_COMPRESS_TIMEOUT_MS,
+  PHOTO_MAX_BYTES,
+  PhotoError,
+  photoPath,
+  photoPathsOf,
+  type RedrawOptions,
+} from "@/lib/client/photos";
 import type { Op } from "@/lib/ops";
 
 const jpeg = (s = "jpeg") => new Blob([s], { type: "image/jpeg" });
@@ -24,7 +33,7 @@ describe("photo paths", () => {
 });
 
 describe("compressPhoto", () => {
-  it("uses browser-image-compression with the spec'd options (web worker first)", async () => {
+  it("uses browser-image-compression with the spec'd options, on the main thread (its web worker loads the library from a CDN)", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const out = await compressPhoto(jpeg("big"), {
       compressLib: async (_f, o) => {
@@ -33,10 +42,13 @@ describe("compressPhoto", () => {
       },
     });
     expect(await out.text()).toBe("small");
-    expect(calls[0]).toMatchObject({ maxWidthOrHeight: 1600, initialQuality: 0.7, fileType: "image/jpeg", useWebWorker: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ maxWidthOrHeight: 1600, initialQuality: 0.7, fileType: "image/jpeg", useWebWorker: false });
+    // No third-party script at runtime: no worker, no libURL pointing anywhere.
+    expect(calls[0].libURL).toBeUndefined();
   });
 
-  it("falls back to the main thread, then a canvas redraw (HEIC -> JPEG)", async () => {
+  it("falls back to a canvas redraw (HEIC -> JPEG) when the library can't decode it", async () => {
     const modes: unknown[] = [];
     let redraws = 0;
     const out = await compressPhoto(heic(), {
@@ -49,23 +61,30 @@ describe("compressPhoto", () => {
         return jpeg("redrawn");
       },
     });
-    expect(modes).toEqual([true, false]);
+    expect(modes).toEqual([false]);
     expect(redraws).toBe(1);
     expect(out.type).toBe("image/jpeg");
     expect(await out.text()).toBe("redrawn");
   });
 
-  it("a worker that hangs is abandoned after the timeout", async () => {
-    let aborted = false;
-    const out = await compressPhoto(jpeg(), {
-      workerTimeoutMs: 20,
-      compressLib: (_f, o) =>
-        o?.useWebWorker
-          ? new Promise((_, reject) => o.signal?.addEventListener("abort", () => ((aborted = true), reject(new Error("aborted")))))
-          : Promise.resolve(jpeg("main")),
-    });
-    expect(aborted).toBe(true);
-    expect(await out.text()).toBe("main");
+  it("a library call that hangs is aborted after ~6 s and the canvas takes over (a stalled connection can't hold up a log)", async () => {
+    expect(PHOTO_COMPRESS_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      let settled = false;
+      const p = compressPhoto(jpeg(), {
+        compressLib: (_f, o) => new Promise((_, reject) => o?.signal?.addEventListener("abort", () => ((aborted = true), reject(new Error("aborted"))))),
+        redraw: async () => jpeg("canvas"),
+      }).finally(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(PHOTO_COMPRESS_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(aborted).toBe(true);
+      expect(await (await p).text()).toBe("canvas");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("never returns a non-JPEG from the library", async () => {

@@ -17,16 +17,7 @@ describe("HoleHeader", () => {
     f.drink("A", "A1", 2); // open hole 2, not scored yet: banked
     const d = derive(f.state);
     const html = renderToStaticMarkup(
-      <HoleHeader
-        hole={2}
-        holeRow={d.holes[1]}
-        teeSet={f.state.trip.settings.tee_set}
-        team={d.teamById[f.team.A]}
-        isMyTeam
-        standing={d.standings.find((r) => r.team_id === f.team.A)}
-        canSwitch={false}
-        onSwitch={() => {}}
-      />,
+      <HoleHeader hole={2} holeRow={d.holes[1]} teeSet={f.state.trip.settings.tee_set} standing={d.standings.find((r) => r.team_id === f.team.A)} />,
     );
     expect(html).toContain(">To par</dt>");
     expect(html).not.toContain(">Net</dt>");

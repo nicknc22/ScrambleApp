@@ -618,26 +618,50 @@ describe("score.set", () => {
     expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 6, edit_count: 2 });
   });
 
-  it("if_empty (an untouched par default) fills an empty hole only: never overwrites, never rejected", () => {
+  it("if_empty (an untouched par default) is a WEAK fill: never overwrites, never rejected, and any real score replaces it", () => {
     const f = live();
     f.teeOff("A", 6);
     const A = f.team.A;
-    // Empty hole: fills like a normal score.
-    let s = ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, by: f.player.A1 })).state;
-    expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 4, edit_count: 0, updated_by: f.player.A1 });
-    // A teammate's real score is never clobbered by a par default, whether it's newer or older.
-    s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 7, by: f.player.A2 })).state;
+    // Empty hole: filled, but with no LWW time (strokes_at null): it's only a default.
+    let s = ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, at: at(300), by: f.player.A1 })).state;
+    expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 4, strokes_at: null, edit_count: 0, updated_by: f.player.A1 });
+    // Another default on a filled hole is a silent no-op (weak or real, the hole is taken).
+    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, if_empty: true, at: at(310), by: f.player.A2 }));
+    // A teammate's real score entered BEFORE the default (offline phone syncing late) still
+    // replaces it: no conflict, and replacing a default isn't an edit.
+    s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 7, at: at(290), by: f.player.A2 })).state;
+    expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 7, strokes_at: at(290), edit_count: 0, updated_by: f.player.A2 });
+    // Now it's real: defaults never touch it, whether they're newer or older...
     noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, by: f.player.A1 }));
     noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, at: at(1) }));
-    expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 7, edit_count: 1 });
+    // ...and real vs real is plain LWW again.
+    rejected(s, mk("score.set", { team_id: A, hole: 6, strokes: 6, at: at(280) }), "conflict");
+    s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 6, at: at(320) })).state;
+    expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 6, edit_count: 1 });
+
+    // Same value as the default: the row becomes real (gets a time), still no edit.
+    const d2 = ok(s, mk("score.set", { team_id: A, hole: 7, strokes: 4, if_empty: true, at: at(400) })).state;
+    const same = ok(d2, mk("score.set", { team_id: A, hole: 7, strokes: 4, at: at(399) })).state;
+    expect(scoreOf(same, A, 7)).toMatchObject({ strokes: 4, strokes_at: at(399), edit_count: 0 });
+
     // A row with only a tee shot has no strokes yet: filled. The implicit window still applies.
     const t = ok(s, mk("teeshot.set", { team_id: A, hole: 7, player_id: f.player.A3 })).state;
     const filled = ok(t, mk("score.set", { team_id: A, hole: 7, strokes: 5, if_empty: true })).state;
-    expect(scoreOf(filled, A, 7)).toMatchObject({ strokes: 5, tee_shot_player_id: f.player.A3 });
+    expect(scoreOf(filled, A, 7)).toMatchObject({ strokes: 5, strokes_at: null, tee_shot_player_id: f.player.A3 });
     expect(filled.team_round_state.find((rs) => rs.team_id === A)!.open_hole).toBe(7);
-    // The commissioner's override ignores the flag.
-    const fixed = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, if_empty: true, as_commissioner: true }), commish()).state;
-    expect(scoreOf(fixed, A, 6)).toMatchObject({ strokes: 5, edit_count: 2 });
+    // The commissioner's override ignores the flag: a real, timed score.
+    const fixed = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, if_empty: true, at: at(330), as_commissioner: true }), commish()).state;
+    expect(scoreOf(fixed, A, 6)).toMatchObject({ strokes: 5, strokes_at: at(330), edit_count: 2 });
+    const fill = ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, at: at(340), as_commissioner: true }), commish()).state;
+    expect(scoreOf(fill, A, 6)).toMatchObject({ strokes: 4, strokes_at: at(340) });
+
+    // The client view converges the same way (queued ops re-applied with side "server").
+    const view = ok(
+      ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, at: at(300) }), client()).state,
+      mk("score.set", { team_id: A, hole: 6, strokes: 7, at: at(290) }),
+      server(),
+    ).state;
+    expect(scoreOf(view, A, 6)).toMatchObject({ strokes: 7, edit_count: 0 });
   });
 
   it("a commissioner override beats LWW (e.g. a phone whose clock is in the future)", () => {

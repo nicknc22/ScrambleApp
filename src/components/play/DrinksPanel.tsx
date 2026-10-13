@@ -8,7 +8,8 @@
 import { useState } from "react";
 import type { DrinkType, Player, UUID } from "@/lib/types";
 import { Avatar, BottomSheet, Card, IconCamera, PlayerName, cx } from "@/components/ui";
-import { DRINK_EMOJI, DRINK_LABEL, DRINK_UNDO_MS, type PlayerDrinkCount, type UndoChipView } from "./model";
+import { DRINK_EMOJI, DRINK_LABEL, type PlayerDrinkCount, type UndoChipView } from "./model";
+import { InlineUndoChip } from "./InlineUndoChip";
 
 const TYPES: DrinkType[] = ["drink", "shotgun", "shot"];
 
@@ -32,6 +33,7 @@ export function DrinksPanel({
   onLog,
   undo,
   undonePlayerId,
+  savingPhotoFor = [],
   onUndo,
 }: {
   members: Player[];
@@ -50,6 +52,8 @@ export function DrinksPanel({
   undo: UndoChipView | null;
   /** Row that just had its drink undone ("Undone" mark). */
   undonePlayerId: UUID | null;
+  /** Rows with a photo drink still saving (the photo is compressing; the drink logs right after). */
+  savingPhotoFor?: readonly UUID[];
   onUndo: () => void;
 }) {
   const [photoFor, setPhotoFor] = useState<Player | null>(null);
@@ -92,7 +96,16 @@ export function DrinksPanel({
               <div className="flex min-h-12 items-center gap-2.5">
                 <Avatar player={p} teamSortOrder={teamSortOrder} size="md" showCrown={false} />
                 {undo && undo.playerId === p.id ? (
-                  <UndoChip key={`${undo.drink.drinkId}:${undo.count}`} view={undo} onUndo={onUndo} />
+                  <InlineUndoChip
+                    key={`${undo.drink.drinkId}:${undo.count}`}
+                    ariaLabel={undo.ariaLabel}
+                    detail={undo.detail}
+                    remainingMs={undo.remainingMs}
+                    elapsedMs={undo.elapsedMs}
+                    onUndo={onUndo}
+                    testId="drink-undo"
+                    count={undo.count}
+                  />
                 ) : (
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-lg leading-tight font-black">
@@ -101,6 +114,10 @@ export function DrinksPanel({
                     {undonePlayerId === p.id ? (
                       <div className="text-sm font-black text-flag-dark" data-testid="drink-undone">
                         ↩️ Drink undone
+                      </div>
+                    ) : savingPhotoFor.includes(p.id) ? (
+                      <div className="animate-pulse text-sm font-black text-ink" data-testid="drink-photo-saving">
+                        📷 Saving photo…
                       </div>
                     ) : (
                       <div className="text-sm font-bold text-muted">
@@ -161,43 +178,6 @@ export function DrinksPanel({
         }}
       />
     </Card>
-  );
-}
-
-/**
- * "↩ Undo" + what was logged ("🍺 −1 stroke", "🔫 Mulligan banked") + seconds left, with a bar that
- * drains over the 10 seconds. Keyed by the drink, so each log (or undo) restarts it.
- */
-function UndoChip({ view, onUndo }: { view: UndoChipView; onUndo: () => void }) {
-  const seconds = Math.max(1, Math.ceil(view.remainingMs / 1000));
-  // The bar is a CSS animation: start it once, part-way through after a remount (tab switch).
-  const [startOffset] = useState(view.elapsedMs);
-  return (
-    <button
-      type="button"
-      onClick={onUndo}
-      aria-label={view.ariaLabel}
-      className="btn relative h-12 min-w-0 flex-1 flex-col items-stretch justify-center gap-0.5 overflow-hidden rounded-[14px]! border-ink bg-ink px-2.5! pb-1 text-left text-white shadow-hard-sm active:bg-muted"
-      data-testid="drink-undo"
-      data-count={view.count}
-    >
-      <span className="flex items-center gap-1.5 leading-none">
-        <span className="text-lg leading-none" aria-hidden="true">
-          ↩
-        </span>
-        <span className="text-[15px] font-black tracking-wide uppercase">Undo</span>
-        <span className="num ml-auto shrink-0 rounded-full bg-hazard px-1.5 text-[13px] leading-[18px] font-black text-ink" aria-hidden="true">
-          {seconds}
-        </span>
-      </span>
-      <span className="truncate text-[11px] leading-tight font-extrabold opacity-90">{view.detail}</span>
-      <span className="absolute inset-x-0 bottom-0 h-1 bg-white/25" aria-hidden="true">
-        <span
-          className="toast-countdown block h-full w-full bg-hazard"
-          style={{ ["--toast-dur" as string]: `${DRINK_UNDO_MS}ms`, animationDelay: `-${startOffset}ms` }}
-        />
-      </span>
-    </button>
   );
 }
 

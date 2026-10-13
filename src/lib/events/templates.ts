@@ -287,11 +287,18 @@ const REMOVED: V<RemovedC> = [
 ];
 
 interface ResultsC { what: string }
+/** The champion or the money moved: people may already have paid. */
 const RESULTS_CHANGED: V<ResultsC> = [
   (c) => `Stop the Venmos. ${c.what}`,
   (c) => `Hold the trophy. ${c.what}`,
   (c) => `Plot twist after the final whistle. ${c.what}`,
   (c) => `The scorecard wasn't as locked as we said. ${c.what}`,
+];
+/** Only a position moved (same champion, same settle-up): no alarm. */
+const RESULTS_SHUFFLED: V<ResultsC> = [
+  (c) => `Leaderboard shuffle after the final whistle. ${c.what}`,
+  (c) => `Late paperwork from the course. ${c.what}`,
+  (c) => `The stragglers finally synced. ${c.what}`,
 ];
 
 interface DriveC { team: string; names: string; nine: string; rem: number; holes: string; need: string; short: number }
@@ -408,6 +415,7 @@ export const TEMPLATE_VARIANT_COUNTS: Readonly<Record<string, number>> = {
   "score_edit:overruled": SCORE_OVERRULED.length,
   removed: REMOVED.length,
   results_changed: RESULTS_CHANGED.length,
+  "results_changed:standings": RESULTS_SHUFFLED.length,
   "drive_warning:hard": DRIVE_HARD.length,
   "drive_warning:impossible": DRIVE_IMPOSSIBLE.length,
   drive_miss: DRIVE_MISS.length,
@@ -764,13 +772,16 @@ function renderResultsChanged(ev: FeedEvent, p: Record<string, unknown>, state: 
       .sort()
       .join("|");
   const afterPays = rows(p.payments_after);
-  if (pays(p.payments_before) !== pays(p.payments_after)) {
+  const moneyMoved = pays(p.payments_before) !== pays(p.payments_after);
+  if (moneyMoved) {
     const total = afterPays.reduce((sum, x) => sum + num(x.amount_cents), 0);
     parts.push(
       afterPays.length === 0
         ? "Settle-up changed: nobody owes anybody now. Refunds, gentlemen."
         : `Settle-up changed (${afterPays.length} ${plural(afterPays.length, "payment", "payments")}, ${formatCents(total)}): check the Money tab before you Venmo.`,
     );
+  } else if (sameChamps) {
+    parts.push("Money's unchanged.");
   }
   const late = ids(p.late_op_ids).length;
   parts.push(
@@ -778,11 +789,15 @@ function renderResultsChanged(ev: FeedEvent, p: Record<string, unknown>, state: 
       ? `${late} ${plural(late, "play", "plays")} from the course synced after the final whistle.`
       : "A commissioner fix after the final whistle.",
   );
-  parts.push("Commissioner: Reopen the round to review.");
+  // Only a position moved: say so calmly (no "stop paying", no call to reopen).
+  const alarm = moneyMoved || !sameChamps;
+  if (alarm) parts.push("Commissioner: Reopen the round to review.");
   return {
     emoji: "🚨",
     title: "RESULTS CHANGED",
-    body: pick(ev.id, "results", RESULTS_CHANGED)({ what: parts.join(" ") }),
+    body: alarm
+      ? pick(ev.id, "results", RESULTS_CHANGED)({ what: parts.join(" ") })
+      : pick(ev.id, "results_standings", RESULTS_SHUFFLED)({ what: parts.join(" ") }),
     tone: "alert",
   };
 }

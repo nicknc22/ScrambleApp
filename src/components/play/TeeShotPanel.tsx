@@ -1,41 +1,40 @@
 "use client";
 // "Whose tee shot?" — one chip per teammate, tap the selected chip again to clear. Directly under
 // it: the drive-minimum status for the nine (per-player counts, soft/hard/impossible/missed).
-// Compact on purpose: it is the first card under the hole, and a foursome's two rows of chips must
-// clear the action bar on a small phone without scrolling.
+// Compact on purpose: it is the first card under the hole, and a foursome's two rows of chips and
+// the stepper under them must fit the first screen of a phone. The status is always one short
+// line (two at most), never a box; while the red sticky drive banner says it, it isn't repeated.
 import type { Player, UUID } from "@/lib/types";
 import type { DriveNineStatus } from "@/lib/engine/types";
 import { Card, Chip, IconCheck, displayName, cx } from "@/components/ui";
 import type { DriveTone, DriveView } from "./model";
 
 const TONE: Record<DriveTone, string> = {
-  done: "border-fairway bg-fairway-soft text-ink",
-  ok: "border-line bg-sand text-ink",
-  soft: "border-ink bg-hazard text-ink",
-  hard: "border-flag-dark bg-flag text-white",
-  impossible: "border-flag-dark bg-flag text-white",
-  missed: "border-flag bg-flag-soft text-ink",
+  done: "text-fairway-dark",
+  ok: "text-muted",
+  soft: "bg-hazard text-ink",
+  hard: "bg-flag text-white",
+  impossible: "bg-flag text-white",
+  missed: "bg-flag-soft text-ink",
 };
 
 const ICON: Record<DriveTone, string> = { done: "✅", ok: "🏌️", soft: "⚠️", hard: "🚨", impossible: "💀", missed: "🚩" };
 
 export function DriveStatusLine({ view, className }: { view: DriveView; className?: string }) {
-  if (view.tone === "ok") {
-    // Nothing urgent yet (the chips' red 0s already show who needs a drive): one quiet line.
-    return (
-      <p className={cx("truncate px-1 text-[13px] leading-5 font-bold text-muted", className)} data-testid="drive-status" data-tone={view.tone}>
-        {ICON.ok} {view.text}
-      </p>
-    );
-  }
+  const quiet = view.tone === "ok" || view.tone === "done";
   return (
     <p
-      className={cx("flex items-start gap-2 rounded-xl border-2 px-3 py-2 text-[15px] leading-snug font-extrabold", TONE[view.tone], className)}
+      className={cx(
+        "px-1 text-[13px] leading-[18px]",
+        // Nothing urgent (the chips' red 0s already show who needs a drive): one quiet line.
+        quiet ? "truncate font-bold" : "line-clamp-2 rounded-lg px-2 py-0.5 font-extrabold",
+        TONE[view.tone],
+        className,
+      )}
       data-testid="drive-status"
       data-tone={view.tone}
     >
-      <span aria-hidden="true">{ICON[view.tone]}</span>
-      <span className="min-w-0">{view.text}</span>
+      <span aria-hidden="true">{ICON[view.tone]}</span> {view.text}
     </p>
   );
 }
@@ -58,9 +57,9 @@ export function TeeShotPanel({
   onSelect: (playerId: UUID | null) => void;
 }) {
   return (
-    <Card padded={false} className="space-y-2 border-ink px-3 pt-2 pb-2.5" data-testid="teeshot-panel">
+    <Card padded={false} className="space-y-1.5 border-ink px-3 pt-1 pb-1.5" data-testid="teeshot-panel">
       <div className="flex items-baseline justify-between gap-2 px-1">
-        <h2 className="text-lg leading-tight font-black uppercase">Whose tee shot?</h2>
+        <h2 className="text-base leading-tight font-black uppercase">Whose tee shot?</h2>
         <span className="shrink-0 text-xs font-black tracking-wide text-muted uppercase">Drives · {nine?.nine === 2 ? "back" : "front"} 9</span>
       </div>
       <div className="grid grid-cols-2 gap-2" role="group" aria-label={`Whose tee shot was used on hole ${hole}`}>
