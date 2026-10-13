@@ -46,7 +46,8 @@ export interface SqlDb extends Db {
 /** An open connection (pool) you own and must close. */
 export interface DbConnection extends SqlDb {
   readonly driver: "pglite" | "postgres";
-  close(): Promise<void>;
+  /** Close the pool. postgres: in-flight queries get up to timeoutSec (default 5) before they're cut off. */
+  close(timeoutSec?: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ interface Runner {
 interface Driver extends Runner {
   readonly name: "pglite" | "postgres";
   transaction<T>(fn: (r: Runner) => Promise<T>): Promise<T>;
-  close(): Promise<void>;
+  close(timeoutSec?: number): Promise<void>;
 }
 
 async function pgliteDriver(dataDir: string): Promise<Driver> {
@@ -216,7 +217,7 @@ async function postgresDriver(url: string): Promise<Driver> {
     ...runner(sql),
     transaction: async <T>(fn: (r: Runner) => Promise<T>): Promise<T> =>
       (await sql.begin((t) => fn(runner(t as unknown as Unsafe)))) as T,
-    close: () => sql.end({ timeout: 5 }),
+    close: (timeoutSec = 5) => sql.end({ timeout: timeoutSec }),
   };
 }
 
@@ -310,7 +311,7 @@ function connection(driver: Driver): DbConnection {
     query: handle.query,
     exec: handle.exec,
     tx: handle.tx,
-    close: () => driver.close(),
+    close: (timeoutSec) => driver.close(timeoutSec),
   };
 }
 
@@ -334,18 +335,68 @@ export async function openDb(): Promise<DbConnection> {
       "Server misconfigured: DATABASE_URL is not set. Add the Supabase transaction pooler URL (port 6543) in Vercel → Settings → Environment Variables, then redeploy.",
     );
   }
-  const badUrl = url ? databaseUrlProblem(url) : null;
-  if (badUrl) throw new ConfigError(badUrl);
-  const conn = url ? await connectPostgres(url) : await connectPglite(pgliteDir());
-  try {
-    await runMigrations(conn);
-  } catch (e) {
-    await conn.close().catch(() => {});
-    const problem = url ? databaseConnectProblem(e, url) : null;
-    if (problem) throw new ConfigError(problem.message, { holdMs: problem.holdMs, cause: e });
-    throw e;
+  if (!url) {
+    const conn = await connectPglite(pgliteDir());
+    try {
+      await runMigrations(conn);
+    } catch (e) {
+      await conn.close().catch(() => {});
+      throw e;
+    }
+    return conn;
   }
-  return conn;
+  const badUrl = databaseUrlProblem(url);
+  if (badUrl) throw new ConfigError(badUrl);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await openPostgres(url);
+    } catch (e) {
+      // Supabase's pooler refuses the first login after a password change once ("recently
+      // changed, retry the connection"); the next one goes through.
+      if (attempt === 1 && passwordJustChanged(e)) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        continue;
+      }
+      const problem = databaseConnectProblem(e, url);
+      if (problem) throw new ConfigError(problem.message, { holdMs: problem.holdMs, cause: e });
+      throw e;
+    }
+  }
+}
+
+/** How long the first connect + migrations may take (a server that hangs up before answering makes postgres.js retry forever). */
+let firstOpenDeadlineMs = 15_000;
+
+/** Tests: shorten the first-open deadline (null restores the default). */
+export function setDbOpenDeadlineForTests(ms: number | null): void {
+  firstOpenDeadlineMs = ms ?? 15_000;
+}
+
+async function openPostgres(url: string): Promise<DbConnection> {
+  const conn = await connectPostgres(url);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(Object.assign(new Error(`no answer within ${firstOpenDeadlineMs} ms`), { code: "FIRST_OPEN_TIMEOUT" })),
+      firstOpenDeadlineMs,
+    );
+  });
+  try {
+    await Promise.race([runMigrations(conn), deadline]);
+    return conn;
+  } catch (e) {
+    // Cut it off now: a connection that never got past startup would otherwise keep reconnecting
+    // (postgres.js retries a pending startup on every hang-up) for the whole end timeout.
+    void conn.close(0).catch(() => {});
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function passwordJustChanged(e: unknown): boolean {
+  const err = e as { hint?: unknown; message?: unknown } | null;
+  return /recently changed/i.test(`${String(err?.hint ?? "")} ${String(err?.message ?? "")}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -356,66 +407,101 @@ export async function openDb(): Promise<DbConnection> {
 const SETTINGS = "Vercel → Settings → Environment Variables";
 const BAD_URL =
   "Server misconfigured: DATABASE_URL isn't a valid connection string. Copy the Transaction pooler string again from Supabase → Connect and replace [YOUR-PASSWORD] (brackets too) with your database password. " +
-  "If the password has symbols like @ / ? # % [ ], reset it to letters and numbers in Supabase → Project Settings → Database first. " +
+  "If the password has symbols like / ? # %, reset it to letters and numbers in Supabase → Project Settings → Database first. " +
   `Paste it into ${SETTINGS}, then redeploy.`;
 
 /** A DATABASE_URL that can't possibly work (null = looks fine). Checked before connecting. */
 export function databaseUrlProblem(url: string): string | null {
   let u: URL;
-  let password: string;
   try {
     u = new URL(url);
-    password = decodeURIComponent(u.password);
+    decodeURIComponent(u.password); // a stray "%" in the password throws here, and in postgres.js
   } catch {
     return BAD_URL;
   }
   if (!/^postgres(ql)?:$/.test(u.protocol)) return BAD_URL;
-  if (/YOUR[-_ ]?PASSWORD/i.test(password) || /^\[.*\]$/.test(password)) {
+  if (/^\[?YOUR[-_ ]?PASSWORD\]?$/i.test(decodeURIComponent(u.password))) {
     return `Server misconfigured: DATABASE_URL still has the [YOUR-PASSWORD] placeholder. Replace it (brackets included) with your Supabase database password in ${SETTINGS}, then redeploy.`;
   }
-  // postgres.js takes the host from after the FIRST "@" up to the first "/" or "?", so a
-  // password containing @ / ? (or # anywhere) silently connects somewhere else.
-  const authority = url.slice(url.indexOf("://") + 3).split(/[?/]/)[0];
-  const ats = authority.split("@").length - 1;
-  if (url.includes("#") || ats !== (u.username || u.password ? 1 : 0)) return BAD_URL;
+  // A "#" cuts the string short, and a "/" in the password pushes the rest of it (with the real
+  // host) into the database name. ("@" is fine: the host is what follows the LAST "@".)
+  if (u.hash || u.pathname.includes("@")) return BAD_URL;
+  // postgres.js reads a host list from after the FIRST "@": a "," there means an "@" and a ","
+  // in the password, which it would split into bogus hosts.
+  const authority = url.slice(url.indexOf("://") + 3).split(/[?/#]/)[0];
+  const firstAt = authority.indexOf("@");
+  if (firstAt !== authority.lastIndexOf("@") && authority.slice(firstAt + 1).includes(",")) return BAD_URL;
   return null;
 }
 
-/** A connect/login failure that a settings change fixes, in plain English (null = something else). */
+/** A connect/login failure that a settings change (or a paused project) explains, in plain English. null = something else. */
 export function databaseConnectProblem(e: unknown, url: string): { message: string; holdMs: number } | null {
-  const err = e as { code?: unknown; message?: unknown } | null;
+  const err = e as { code?: unknown; message?: unknown; severity?: unknown; hint?: unknown } | null;
   const code = typeof err?.code === "string" ? err.code : "";
   const msg = typeof err?.message === "string" ? err.message : "";
+  // Supabase's pooler (Supavisor ≥ 2.9) prefixes its errors with a stable code: "(ENOTFOUND) tenant/user ... not found".
+  const pooler = /^\((E[A-Z0-9_]+)\)/.exec(msg)?.[1] ?? "";
   let host = "";
   let port = "";
+  let user = "";
+  let password = "";
   try {
     const u = new URL(url);
     host = u.hostname;
     port = u.port;
+    user = decodeURIComponent(u.username);
+    password = decodeURIComponent(u.password);
   } catch {
     // databaseUrlProblem already vetted it
   }
-  // Wrong logins are held for a bit: Supabase's pooler locks a project out after a burst of
-  // failed logins, and every request would otherwise try again.
-  if (/circuit breaker|too many authentication/i.test(msg)) {
+
+  if (passwordJustChanged(e)) {
+    return { message: "Supabase is still picking up your new database password. Try again in a few seconds.", holdMs: 0 };
+  }
+  // Wrong logins are held for a bit: the pooler locks a project out after a burst of failed
+  // logins, and every request would otherwise try again.
+  if (/too many authentication/i.test(msg)) {
     return {
       message: `Supabase is temporarily refusing database logins after too many wrong passwords. Fix the password in DATABASE_URL (${SETTINGS}), redeploy, and give it a few minutes.`,
       holdMs: 60_000,
     };
   }
-  if (code === "28P01" || /password authentication failed/i.test(msg)) {
+  // The pooler is up but can't reach the database behind it: a paused, restoring or restarting
+  // project (free projects pause after a week without use).
+  if (
+    ["EAUTHQUERY", "EAUTHSECRETS", "ECHECKOUTTIMEOUT", "EDBHANDLEREXITED", "ECIRCUITBREAKER"].includes(pooler) ||
+    code === "08006" ||
+    code === "57P03" ||
+    /failed to retrieve (database credentials|authentication secrets)|failed attempts to connect to the database|upstream database|failed to connect to database|database system is starting up/i.test(
+      msg,
+    )
+  ) {
+    return {
+      message:
+        "Supabase can't reach your database right now: the project is probably paused or restarting. Open the Supabase dashboard and press Restore project if it's paused, then give it a couple of minutes.",
+      holdMs: 10_000,
+    };
+  }
+  if (code === "28P01" || code === "SASL_SIGNATURE_MISMATCH" || /password authentication failed/i.test(msg)) {
     return {
       message:
         "Server misconfigured: Supabase rejected the database password in DATABASE_URL. Put your database password in place of [YOUR-PASSWORD] (no brackets). " +
-        `Lost it? Reset it in Supabase → Project Settings → Database (letters and numbers only), paste it into DATABASE_URL in ${SETTINGS}, then redeploy.`,
+        `Lost it, or it has symbols like / ? # %? Reset it in Supabase → Project Settings → Database (letters and numbers only), paste it into DATABASE_URL in ${SETTINGS}, then redeploy.`,
       holdMs: 30_000,
     };
   }
-  if (/tenant or user not found/i.test(msg)) {
+  if (pooler === "ENOTFOUND" || pooler === "ENOIDENTIFIER" || /tenant or user not found|tenant\/user .* not found|no tenant identifier/i.test(msg)) {
     return {
       message:
         "Server misconfigured: Supabase doesn't recognize the user name or host in DATABASE_URL. Copy the Transaction pooler string again from Supabase → Connect " +
-        `(the user name looks like postgres.<project-ref> and the host ends in pooler.supabase.com), put your password in, paste it into ${SETTINGS}, then redeploy.`,
+        `(the user name looks like postgres.<project-ref>, and the host, aws-0 or aws-1 and the region, must match exactly), put your password in, paste it into ${SETTINGS}, then redeploy.`,
+      holdMs: 30_000,
+    };
+  }
+  if (pooler === "EADDRNOTALLOWED") {
+    return {
+      message:
+        "Supabase's Network Restrictions are blocking the app's server (Vercel has no fixed address). In Supabase → Project Settings → Database → Network Restrictions, allow all IP addresses.",
       holdMs: 30_000,
     };
   }
@@ -425,7 +511,7 @@ export function databaseConnectProblem(e: unknown, url: string): { message: stri
       holdMs: 30_000,
     };
   }
-  const network = ["ENOTFOUND", "ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL", "ECONNREFUSED", "CONNECT_TIMEOUT", "ETIMEDOUT"];
+  const network = ["ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL", "ECONNREFUSED", "CONNECT_TIMEOUT", "ETIMEDOUT"];
   if (/^db\.[a-z0-9]+\.supabase\.co$/i.test(host) && network.includes(code)) {
     return {
       message:
@@ -444,6 +530,23 @@ export function databaseConnectProblem(e: unknown, url: string): { message: stri
     return {
       message: `Can't reach the database at ${host}:${port || "5432"}. Check the host and port (6543) in DATABASE_URL, and that the Supabase project isn't paused (Supabase dashboard → Restore project).`,
       holdMs: 0,
+    };
+  }
+  if (code === "FIRST_OPEN_TIMEOUT") {
+    return {
+      message: `The database at ${host}:${port || "5432"} took the connection but never answered. Check that DATABASE_URL is Supabase's Transaction pooler string (port 6543) and that the project isn't paused.`,
+      holdMs: 10_000,
+    };
+  }
+  // Any other refusal at login (the pooler's wording keeps changing): pass its text along, minus
+  // anything from the URL's credentials.
+  if (err?.severity === "FATAL" && msg) {
+    let said = msg;
+    for (const secret of [password, user]) if (secret.length >= 3) said = said.split(secret).join("…");
+    said = said.replace(/postgres\.[a-z0-9]{8,}/gi, "postgres.…").slice(0, 200);
+    return {
+      message: `Supabase refused the database connection: "${said}". If it keeps saying that, copy the Transaction pooler string again from Supabase → Connect into DATABASE_URL (${SETTINGS}) and redeploy.`,
+      holdMs: 10_000,
     };
   }
   return null;

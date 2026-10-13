@@ -15,6 +15,7 @@ import { POST as createTripRoute } from "@/app/api/trips/route";
 import { GET as stateRoute } from "@/app/api/t/[code]/state/route";
 import { POST as uploadRoute } from "@/app/api/t/[code]/upload/route";
 import { GET as photoRoute } from "@/app/api/photos/[...path]/route";
+import { GET as keepaliveRoute } from "@/app/api/cron/keepalive/route";
 import {
   DELETE as commLock,
   GET as commCheck,
@@ -655,5 +656,18 @@ describe("realtime broadcast", () => {
     expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain("authorization");
     expect(isJwtKey(LEGACY_SERVICE_KEY)).toBe(true);
     expect(isJwtKey(FAKE_SB_SECRET)).toBe(false);
+  });
+});
+
+describe("GET /api/cron/keepalive (daily Vercel cron)", () => {
+  it("touches the database and answers ok; vercel.json schedules it once a day (the Hobby limit)", async () => {
+    const spy = vi.spyOn(db, "query");
+    const res = await keepaliveRoute();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(spy.mock.calls.map((c) => c[0])).toContain("select count(*) from trips");
+    spy.mockRestore();
+    const vercel = JSON.parse(fs.readFileSync(path.join(process.cwd(), "vercel.json"), "utf8")) as { crons: Array<{ path: string; schedule: string }> };
+    expect(vercel.crons).toEqual([{ path: "/api/cron/keepalive", schedule: expect.stringMatching(/^\d+ \d+ \* \* \*$/) }]);
   });
 });
