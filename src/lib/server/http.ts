@@ -112,7 +112,9 @@ export function withErrors<A extends unknown[]>(handler: (...args: A) => Promise
     } catch (e) {
       if (e instanceof ConfigError) {
         // Missing server configuration (e.g. DATABASE_URL on Vercel): say exactly what's wrong.
-        console.error(`CONFIG ERROR: ${e.message}`);
+        const cause = e.cause as { code?: unknown; message?: unknown } | undefined;
+        const detail = cause ? ` (driver said: ${String(cause.code ?? "")} ${String(cause.message ?? "")})` : "";
+        console.error(`CONFIG ERROR: ${e.message}${detail}`);
         return errorJson(500, e.message, { code: "not_configured" });
       }
       console.error("API error:", e);

@@ -87,9 +87,12 @@ export function isVercel(): boolean {
  * code "not_configured" and this message (it names the variable), instead of a generic error.
  */
 export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
+  /** Keep answering with this error for this long before trying again (ms; 0 = retry next request). */
+  readonly holdMs: number;
+  constructor(message: string, opts: { holdMs?: number; cause?: unknown } = {}) {
+    super(message, opts.cause === undefined ? undefined : { cause: opts.cause });
     this.name = "ConfigError";
+    this.holdMs = opts.holdMs ?? 0;
   }
 }
 

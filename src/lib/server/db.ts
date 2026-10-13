@@ -334,14 +334,119 @@ export async function openDb(): Promise<DbConnection> {
       "Server misconfigured: DATABASE_URL is not set. Add the Supabase transaction pooler URL (port 6543) in Vercel → Settings → Environment Variables, then redeploy.",
     );
   }
+  const badUrl = url ? databaseUrlProblem(url) : null;
+  if (badUrl) throw new ConfigError(badUrl);
   const conn = url ? await connectPostgres(url) : await connectPglite(pgliteDir());
   try {
     await runMigrations(conn);
   } catch (e) {
     await conn.close().catch(() => {});
+    const problem = url ? databaseConnectProblem(e, url) : null;
+    if (problem) throw new ConfigError(problem.message, { holdMs: problem.holdMs, cause: e });
     throw e;
   }
   return conn;
+}
+
+// ---------------------------------------------------------------------------
+// DATABASE_URL mistakes, explained (the messages reach the person setting up the app: the home
+// page shows them when "Create the trip" fails). Never echo the user name or password.
+// ---------------------------------------------------------------------------
+
+const SETTINGS = "Vercel → Settings → Environment Variables";
+const BAD_URL =
+  "Server misconfigured: DATABASE_URL isn't a valid connection string. Copy the Transaction pooler string again from Supabase → Connect and replace [YOUR-PASSWORD] (brackets too) with your database password. " +
+  "If the password has symbols like @ / ? # % [ ], reset it to letters and numbers in Supabase → Project Settings → Database first. " +
+  `Paste it into ${SETTINGS}, then redeploy.`;
+
+/** A DATABASE_URL that can't possibly work (null = looks fine). Checked before connecting. */
+export function databaseUrlProblem(url: string): string | null {
+  let u: URL;
+  let password: string;
+  try {
+    u = new URL(url);
+    password = decodeURIComponent(u.password);
+  } catch {
+    return BAD_URL;
+  }
+  if (!/^postgres(ql)?:$/.test(u.protocol)) return BAD_URL;
+  if (/YOUR[-_ ]?PASSWORD/i.test(password) || /^\[.*\]$/.test(password)) {
+    return `Server misconfigured: DATABASE_URL still has the [YOUR-PASSWORD] placeholder. Replace it (brackets included) with your Supabase database password in ${SETTINGS}, then redeploy.`;
+  }
+  // postgres.js takes the host from after the FIRST "@" up to the first "/" or "?", so a
+  // password containing @ / ? (or # anywhere) silently connects somewhere else.
+  const authority = url.slice(url.indexOf("://") + 3).split(/[?/]/)[0];
+  const ats = authority.split("@").length - 1;
+  if (url.includes("#") || ats !== (u.username || u.password ? 1 : 0)) return BAD_URL;
+  return null;
+}
+
+/** A connect/login failure that a settings change fixes, in plain English (null = something else). */
+export function databaseConnectProblem(e: unknown, url: string): { message: string; holdMs: number } | null {
+  const err = e as { code?: unknown; message?: unknown } | null;
+  const code = typeof err?.code === "string" ? err.code : "";
+  const msg = typeof err?.message === "string" ? err.message : "";
+  let host = "";
+  let port = "";
+  try {
+    const u = new URL(url);
+    host = u.hostname;
+    port = u.port;
+  } catch {
+    // databaseUrlProblem already vetted it
+  }
+  // Wrong logins are held for a bit: Supabase's pooler locks a project out after a burst of
+  // failed logins, and every request would otherwise try again.
+  if (/circuit breaker|too many authentication/i.test(msg)) {
+    return {
+      message: `Supabase is temporarily refusing database logins after too many wrong passwords. Fix the password in DATABASE_URL (${SETTINGS}), redeploy, and give it a few minutes.`,
+      holdMs: 60_000,
+    };
+  }
+  if (code === "28P01" || /password authentication failed/i.test(msg)) {
+    return {
+      message:
+        "Server misconfigured: Supabase rejected the database password in DATABASE_URL. Put your database password in place of [YOUR-PASSWORD] (no brackets). " +
+        `Lost it? Reset it in Supabase → Project Settings → Database (letters and numbers only), paste it into DATABASE_URL in ${SETTINGS}, then redeploy.`,
+      holdMs: 30_000,
+    };
+  }
+  if (/tenant or user not found/i.test(msg)) {
+    return {
+      message:
+        "Server misconfigured: Supabase doesn't recognize the user name or host in DATABASE_URL. Copy the Transaction pooler string again from Supabase → Connect " +
+        `(the user name looks like postgres.<project-ref> and the host ends in pooler.supabase.com), put your password in, paste it into ${SETTINGS}, then redeploy.`,
+      holdMs: 30_000,
+    };
+  }
+  if (code === "3D000") {
+    return {
+      message: `Server misconfigured: the database name at the end of DATABASE_URL is wrong (it should end in /postgres). Fix it in ${SETTINGS}, then redeploy.`,
+      holdMs: 30_000,
+    };
+  }
+  const network = ["ENOTFOUND", "ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL", "ECONNREFUSED", "CONNECT_TIMEOUT", "ETIMEDOUT"];
+  if (/^db\.[a-z0-9]+\.supabase\.co$/i.test(host) && network.includes(code)) {
+    return {
+      message:
+        "Server misconfigured: DATABASE_URL uses Supabase's direct connection (db.<ref>.supabase.co), which Vercel can't reach. " +
+        `Use the Transaction pooler string from Supabase → Connect instead (host ends in pooler.supabase.com, port 6543) in ${SETTINGS}, then redeploy.`,
+      holdMs: 0,
+    };
+  }
+  if (code === "ENOTFOUND") {
+    return {
+      message: `Server misconfigured: the database host "${host}" in DATABASE_URL doesn't exist. Copy the Transaction pooler string again from Supabase → Connect into ${SETTINGS}, then redeploy.`,
+      holdMs: 0,
+    };
+  }
+  if (network.includes(code)) {
+    return {
+      message: `Can't reach the database at ${host}:${port || "5432"}. Check the host and port (6543) in DATABASE_URL, and that the Supabase project isn't paused (Supabase dashboard → Restore project).`,
+      holdMs: 0,
+    };
+  }
+  return null;
 }
 
 /** A fresh in-memory PGlite with migrations applied. Close it when done. */
@@ -358,6 +463,8 @@ export async function createTestDb(): Promise<DbConnection> {
 interface Holder {
   conn?: Promise<DbConnection>;
   override?: Db | null;
+  /** While a failed open is being held (ConfigError.holdMs): when to try again (epoch ms). */
+  retryAt?: number;
 }
 
 const G = globalThis as typeof globalThis & { __scrambleDb?: Holder };
@@ -365,12 +472,21 @@ const holder: Holder = (G.__scrambleDb ??= {});
 
 /** The connection (opened + migrated once per process). */
 export function getConnection(): Promise<DbConnection> {
+  if (holder.conn && holder.retryAt !== undefined && Date.now() >= holder.retryAt) {
+    holder.conn = undefined;
+    holder.retryAt = undefined;
+  }
   if (!holder.conn) {
     const p = openDb();
     holder.conn = p;
-    // A failed open (DB unreachable) is retried on the next request instead of cached forever.
-    p.catch(() => {
-      if (holder.conn === p) holder.conn = undefined;
+    holder.retryAt = undefined;
+    // A failed open (DB unreachable) is retried on the next request instead of cached forever;
+    // a rejected login is answered from memory for a little while (see databaseConnectProblem).
+    p.catch((e: unknown) => {
+      if (holder.conn !== p) return;
+      const holdMs = e instanceof ConfigError ? e.holdMs : 0;
+      if (holdMs > 0) holder.retryAt = Date.now() + holdMs;
+      else holder.conn = undefined;
     });
   }
   return holder.conn;
@@ -406,6 +522,7 @@ export function setDbForTests(db: Db | null): void {
 export async function closeDb(): Promise<void> {
   const p = holder.conn;
   holder.conn = undefined;
+  holder.retryAt = undefined;
   if (p) await (await p.catch(() => null))?.close();
 }
 
