@@ -289,7 +289,7 @@ test.describe("course editor + commissioner tools", () => {
         },
         { timeout: 20_000 },
       )
-      .toEqual({ drink: [18, "shotgun", teamB.id], ctp: [4.5, "ok"] });
+      .toEqual({ drink: [18, "shotgun", teamB.id], ctp: [4.5, "overridden"] }); // commissioner-typed entries are official
 
     // ---- Finalize: the check lists the blank hole and the flagged drive ----------------------
     await page.getByTestId("finalize-round").click();
