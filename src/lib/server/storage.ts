@@ -1,44 +1,51 @@
-// Photo storage. Paths are always `trips/<trip_id>/<kind>/<uuid>.jpg` (unguessable, immutable).
+// Photo storage. Paths are always `trips/<trip_id>/<kind>/<uuid>.jpg` (unguessable, immutable;
+// validated by the shared src/lib/photos.ts, the same rules the reducer applies to ops).
 //   Supabase configured (URL + service key) → public bucket "photos" via supabase-js.
-//   Otherwise → files under UPLOADS_DIR, served by GET /api/photos/[...path].
+//   Otherwise → files under UPLOADS_DIR, served by GET /api/photos/[...path]. Never on Vercel (no
+//   writable disk): there missing Storage config is a ConfigError, not a silently lost photo.
 // Photo URL on the client = meta.photo_base_url + path.
+// Uploads through the API (savePhotoUpload) are JPEG-only, at most 4 MB each and count against a
+// per-trip quota recorded in photo_uploads; demo seed photos go straight through putPhoto.
 import fs from "node:fs/promises";
 import nodePath from "node:path";
 import crypto from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { supabaseConfigured, supabaseServiceRoleKey, supabaseUrl, uploadsDir } from "./env";
+import { isTripPhotoPath, parsePhotoPath, PHOTO_KINDS, type PhotoKind, type PhotoPathParts } from "@/lib/photos";
+import type { Db } from "./db";
+import { ConfigError, isVercel, supabaseConfigured, supabaseServiceRoleKey, supabaseUrl, uploadsDir } from "./env";
+
+export { isTripPhotoPath, parsePhotoPath, PHOTO_KINDS, type PhotoKind, type PhotoPathParts };
 
 export const PHOTO_BUCKET = "photos";
-export const PHOTO_KINDS = ["drinks", "ld", "ctp", "posts"] as const;
-export type PhotoKind = (typeof PHOTO_KINDS)[number];
-/** Upload size cap (phones send ~300 KB after compression). */
-export const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+/**
+ * Upload size cap. Vercel refuses request bodies over 4.5 MB before the handler even runs, so the
+ * app's own limit sits under that (phones send ~300 KB after compression).
+ */
+export const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
 
-const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
-const PHOTO_PATH_RE = new RegExp(`^trips/(${UUID})/(drinks|ld|ctp|posts)/(${UUID})\\.jpg$`);
+/** Per-trip upload budgets. A real round is ~200 photos; a public demo trip gets a sliver. */
+export const PHOTO_QUOTA = {
+  real: { files: 800, bytes: 600 * 1024 * 1024 },
+  demo: { files: 80, bytes: 40 * 1024 * 1024 },
+} as const;
 
-export interface PhotoPathParts {
-  tripId: string;
-  kind: PhotoKind;
-  id: string;
-}
-
-export function parsePhotoPath(path: unknown): PhotoPathParts | null {
-  if (typeof path !== "string") return null;
-  const m = PHOTO_PATH_RE.exec(path);
-  return m ? { tripId: m[1], kind: m[2] as PhotoKind, id: m[3] } : null;
-}
-
-/** `path` is a well-formed photo path belonging to this trip. */
-export function isTripPhotoPath(path: unknown, tripId: string): path is string {
-  const p = parsePhotoPath(path);
-  return !!p && p.tripId === tripId;
+/** JPEG: the SOI marker FF D8 followed by another marker (FF C0..FE: APPn, DQT, SOF, COM...). */
+export function isJpeg(bytes: Uint8Array): boolean {
+  return bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff && bytes[3] >= 0xc0 && bytes[3] <= 0xfe;
 }
 
 export class PhotoPathError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PhotoPathError";
+  }
+}
+
+/** The trip is out of photo space (count or bytes). */
+export class PhotoQuotaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PhotoQuotaError";
   }
 }
 
@@ -141,6 +148,7 @@ export async function putPhoto(tripId: string, path: string, bytes: Uint8Array, 
   if (!isTripPhotoPath(path, tripId)) throw new PhotoPathError("Bad photo path");
   if (bytes.byteLength === 0) throw new PhotoPathError("Empty photo");
   if (bytes.byteLength > MAX_PHOTO_BYTES) throw new PhotoPathError("Photo too large");
+  if (!isJpeg(bytes)) throw new PhotoPathError("Not a JPEG");
 
   if (usesSupabaseStorage()) {
     const client = await supabase();
@@ -154,6 +162,12 @@ export async function putPhoto(tripId: string, path: string, bytes: Uint8Array, 
     return;
   }
 
+  if (isVercel()) {
+    // The deployment's disk is read-only (and thrown away): a local fallback can't work there.
+    throw new ConfigError(
+      "Server misconfigured: photo storage needs NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. Add them in Vercel → Settings → Environment Variables, then redeploy.",
+    );
+  }
   const file = localPhotoFile(path);
   if (!file) throw new PhotoPathError("Bad photo path");
   await fs.mkdir(nodePath.dirname(file), { recursive: true });
@@ -161,6 +175,70 @@ export async function putPhoto(tripId: string, path: string, bytes: Uint8Array, 
   const tmp = `${file}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   await fs.writeFile(tmp, bytes);
   await fs.rename(tmp, file);
+}
+
+/** The upload budget for a trip. */
+export function photoQuotaFor(trip: { is_demo: boolean }): { files: number; bytes: number } {
+  return trip.is_demo ? PHOTO_QUOTA.demo : PHOTO_QUOTA.real;
+}
+
+/**
+ * Store a photo uploaded through the API: within the trip's quota (PhotoQuotaError otherwise),
+ * then recorded in photo_uploads. Re-uploading a path that is already stored (a retry) is always
+ * allowed. Concurrent uploads can overshoot the cap by a photo or two; that's fine.
+ */
+export async function savePhotoUpload(db: Db, trip: { id: string; is_demo: boolean }, path: string, bytes: Uint8Array): Promise<void> {
+  if (!isTripPhotoPath(path, trip.id)) throw new PhotoPathError("Bad photo path");
+  const quota = photoQuotaFor(trip);
+  const [used] = await db.query<{ files: number; bytes: number; same: number }>(
+    `select count(*)::int as files, coalesce(sum(bytes), 0)::bigint as bytes, count(*) filter (where path = $2)::int as same
+       from photo_uploads where trip_id = $1`,
+    [trip.id, path],
+  );
+  if (!used?.same && (Number(used?.files ?? 0) >= quota.files || Number(used?.bytes ?? 0) + bytes.byteLength > quota.bytes)) {
+    throw new PhotoQuotaError(`This trip is out of photo space (${quota.files} photos max).`);
+  }
+  await putPhoto(trip.id, path, bytes, "image/jpeg");
+  await db.query(
+    `insert into photo_uploads (trip_id, path, bytes) values ($1, $2, $3)
+     on conflict (path) do update set bytes = excluded.bytes`,
+    [trip.id, path, bytes.byteLength],
+  );
+}
+
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const LIST_PAGE = 100;
+
+/**
+ * Delete every stored photo of a trip (demo cleanup: a deleted trip's rows go with it, its files
+ * don't). Best effort: never throws.
+ */
+export async function removeTripPhotos(tripId: string): Promise<void> {
+  if (!UUID_RE.test(tripId)) return;
+  try {
+    if (usesSupabaseStorage()) {
+      const bucket = (await supabase()).storage.from(PHOTO_BUCKET);
+      for (const kind of PHOTO_KINDS) {
+        const prefix = `trips/${tripId}/${kind}`;
+        // Each pass removes what it listed, so the next list starts over at what's left.
+        for (let pass = 0; pass < 100; pass++) {
+          const { data, error } = await bucket.list(prefix, { limit: LIST_PAGE });
+          if (error) throw new Error(error.message);
+          if (!data?.length) break;
+          const removed = await bucket.remove(data.map((f) => `${prefix}/${f.name}`));
+          if (removed.error) throw new Error(removed.error.message);
+          if (data.length < LIST_PAGE) break;
+        }
+      }
+      return;
+    }
+    const root = uploadsRoot();
+    const dir = nodePath.resolve(root, "trips", tripId);
+    if (!dir.startsWith(root + nodePath.sep)) return;
+    await fs.rm(/*turbopackIgnore: true*/ dir, { recursive: true, force: true });
+  } catch (e) {
+    console.warn(`[storage] couldn't remove the photos of trip ${tripId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

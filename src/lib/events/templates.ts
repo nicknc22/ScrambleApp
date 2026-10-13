@@ -99,9 +99,9 @@ function loggedForOthers(state: TripState, drinkers: UUID[], loggers: (UUID | nu
   drinkers.forEach((drinker, i) => {
     const by = loggers[i];
     if (!by || by === drinker) return;
-    const list = forWhom.get(by) ?? [];
-    if (!list.includes(drinker)) list.push(drinker);
-    forWhom.set(by, list);
+    const whom = forWhom.get(by) ?? [];
+    if (!whom.includes(drinker)) whom.push(drinker);
+    forWhom.set(by, whom);
   });
   return [...forWhom]
     .map(([by, whom]) => ` Logged by ${playerName(state, by)} for ${list(whom.map((id) => playerName(state, id)))}.`)

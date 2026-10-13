@@ -8,6 +8,9 @@ import { applyOpsToTrip } from "@/lib/server/apply";
 import { JACK_FROST_HOLES } from "@/lib/course";
 import type { Trip } from "@/lib/types";
 import { GET as recapRoute } from "@/app/api/t/[code]/recap/route";
+import { ImageResponse } from "next/og";
+import sharp from "sharp";
+import { RECAP_HEIGHT, RECAP_WIDTH, RecapImage, sanitizeOgText, type RecapModel } from "@/components/awards/recap";
 
 let db: DbConnection;
 const params = <T,>(p: T) => ({ params: Promise.resolve(p) });
@@ -103,5 +106,51 @@ describe("GET /api/t/<code>/recap", () => {
     const res = await recapRoute(new Request(`http://localhost/api/t/${trip.code}/recap`), params({ code: trip.code }));
     expect(res.status).toBe(200);
     expect(pngSize(new Uint8Array(await res.arrayBuffer()))).toEqual({ width: 1080, height: 1350 });
+  }, 60_000);
+});
+
+describe("recap card layout", () => {
+  /** Raw RGB pixels of the rendered card. */
+  async function renderPixels(model: RecapModel) {
+    const png = Buffer.from(await new ImageResponse(<RecapImage model={model} />, { width: RECAP_WIDTH, height: RECAP_HEIGHT }).arrayBuffer());
+    const { data, info } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const dark = (x: number, y: number) => {
+      const i = (y * info.width + x) * info.channels;
+      // Ink (#0b0f0c, luminance ~14) only: the fairway green background is ~96.
+      return 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2] < 45;
+    };
+    return { dark, width: info.width, height: info.height };
+  }
+
+  it("keeps a long tied winner line inside its award tile (finding walkthrough/recap-award-text-clipped)", async () => {
+    const tie = sanitizeOgText("The Groom's Last Stand & The Shank Redemption & Fore Play", 200);
+    const model: RecapModel = {
+      appName: "Scramble",
+      tripName: "Recap",
+      dateLabel: "",
+      courseName: "",
+      final: true,
+      champion: null,
+      standings: [],
+      awards: [
+        { title: "Mulligan Merchant", winners: tie, value: "3 mulligans", awarded: true },
+        { title: "Worst hole", winners: "Fore Play", value: "hole 5: 9", awarded: true },
+      ],
+    };
+    const { dark, height } = await renderPixels(model);
+    // The first tile spans x 44..530 (49% of the 992px content box): its right border is 526..530,
+    // its right padding 510..526. Find the tile's height from the border column...
+    let best = { from: 0, len: 0 };
+    for (let y = 0, run = 0; y < height; y++) {
+      run = dark(528, y) ? run + 1 : 0;
+      if (run > best.len) best = { from: y - run + 1, len: run };
+    }
+    expect(best.len).toBeGreaterThan(50);
+    // ...then nothing may be drawn in the padding: text running into the border is clipped there.
+    const inked: string[] = [];
+    for (let y = best.from + 4; y < best.from + best.len - 4; y++) {
+      for (let x = 512; x <= 523; x++) if (dark(x, y)) inked.push(`${x},${y}`);
+    }
+    expect(inked).toEqual([]);
   }, 60_000);
 });

@@ -3,7 +3,8 @@
 //   DATABASE_URL set   → Supabase Postgres via postgres.js (porsager), prepare:false for the
 //                        Supavisor transaction pooler.
 //   DATABASE_URL unset → PGlite (embedded Postgres in WASM) at PGLITE_DIR (default .data/pglite;
-//                        "memory://" for an in-memory database).
+//                        "memory://" for an in-memory database). Never on Vercel (read-only
+//                        disk): there a missing DATABASE_URL is a ConfigError.
 //
 // Both run the same SQL ($1-style params) and return rows of identical shape:
 //   timestamptz → ISO string ("2026-10-24T16:50:00.000Z"), jsonb → parsed objects,
@@ -20,7 +21,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
-import { databaseUrl, pgliteDir } from "./env";
+import { ConfigError, databaseUrl, isVercel, pgliteDir } from "./env";
 import { runMigrations } from "./migrate";
 
 export type Isolation = "read committed" | "repeatable read" | "serializable";
@@ -326,6 +327,13 @@ export async function connectPostgres(url: string): Promise<DbConnection> {
 /** Open the database the environment points at and apply pending migrations. */
 export async function openDb(): Promise<DbConnection> {
   const url = databaseUrl();
+  if (!url && isVercel()) {
+    // PGlite would try to write under the read-only deployment dir and fail with an opaque
+    // ENOENT/EROFS on every request. Say what's actually wrong.
+    throw new ConfigError(
+      "Server misconfigured: DATABASE_URL is not set. Add the Supabase transaction pooler URL (port 6543) in Vercel → Settings → Environment Variables, then redeploy.",
+    );
+  }
   const conn = url ? await connectPostgres(url) : await connectPglite(pgliteDir());
   try {
     await runMigrations(conn);

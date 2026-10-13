@@ -1,11 +1,15 @@
 "use client";
 // Contest review: the queue (flagged, weak GPS, out of range, AI-suspicious) and every entry by
-// hole. Approve, flag, set the official distance, or delete.
+// hole. Approve, flag, set the official distance, or delete. Plus "Add entry": a typed-in
+// distance for anyone (day-of fallback: a dead phone, measuring closed, another team's player).
 import { useState } from "react";
 import { useClientState, useTripStore } from "@/lib/client/react";
+import { newId } from "@/lib/ids";
 import type { ContestEntryView } from "@/lib/engine/types";
-import { Badge, BottomSheet, Button, EmptyState, PlayerName, TeamPill, cx, useConfirm, useToast } from "@/components/ui";
+import type { UUID } from "@/lib/types";
+import { Badge, BottomSheet, Button, Chip, EmptyState, IconPlus, PlayerName, TeamPill, cx, displayName, useConfirm, useToast } from "@/components/ui";
 import {
+  addEntryInput,
   entryStatusLabel,
   feetFromParts,
   formatDistance,
@@ -20,9 +24,10 @@ import { useCommishDispatch } from "./shared";
 
 const KIND_LABEL = { ctp: "Closest to pin", ld: "Long drive" } as const;
 
-export function ContestsPanel() {
+export function ContestsPanel({ focusEntryId }: { focusEntryId?: string } = {}) {
   const derived = useClientState((s) => s.derived);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(focusEntryId ?? null);
+  const [adding, setAdding] = useState(false);
   if (!derived) return null;
 
   const queue = reviewQueue(derived.contests);
@@ -31,6 +36,11 @@ export function ContestsPanel() {
 
   return (
     <div className="space-y-5" data-testid="commish-contests">
+      {derived.contests.length > 0 && (
+        <Button variant="primary" size="lg" full onClick={() => setAdding(true)} leading={<IconPlus size={22} strokeWidth={3} />} data-testid="commish-add-entry">
+          Add an entry
+        </Button>
+      )}
       <section className="space-y-2">
         <h3 className="flex items-center gap-2 text-lg font-black uppercase">
           Review queue
@@ -79,7 +89,103 @@ export function ContestsPanel() {
       </section>
 
       {current && <EntrySheet key={current.view.entry.id} item={current} onClose={() => setSelected(null)} />}
+      {adding && <AddEntrySheet onClose={() => setAdding(false)} />}
     </div>
+  );
+}
+
+/** A contest entry the commissioner types in for anyone: no GPS, no photo, the distance as given. */
+function AddEntrySheet({ onClose }: { onClose: () => void }) {
+  const derived = useClientState((s) => s.derived);
+  const dispatch = useCommishDispatch();
+  const toast = useToast();
+  const [hole, setHole] = useState<number | null>(derived?.contests[0]?.hole ?? null);
+  const [playerId, setPlayerId] = useState<UUID | null>(null);
+  const [ft, setFt] = useState("");
+  const [inches, setInches] = useState("");
+  const [yd, setYd] = useState("");
+  if (!derived) return null;
+  const contest = derived.contests.find((c) => c.hole === hole) ?? null;
+  const type = contest?.type ?? null;
+  const distance = type === "ctp" ? feetFromParts(ft, inches) : type === "ld" ? yardsFromText(yd) : null;
+  const player = playerId ? (derived.playerById[playerId] ?? null) : null;
+  const draft = { hole, type, playerId, distance };
+  const ready = addEntryInput(draft, "") !== null;
+  const existing = contest && playerId ? (contest.entries.find((v) => v.player_id === playerId) ?? null) : null;
+
+  const add = () => {
+    const input = addEntryInput(draft, newId());
+    if (!input || !contest || distance === null) return;
+    if (!dispatch(input)) return;
+    toast.success(`${displayName(player)}: ${formatDistance(distance, contest.type === "ctp" ? "ft" : "yd")} on hole ${contest.hole}. The feed knows.`, {
+      emoji: "📏",
+      title: "Entry added",
+    });
+    onClose();
+  };
+
+  return (
+    <BottomSheet
+      open
+      onClose={onClose}
+      title="Add an entry"
+      size="tall"
+      footer={
+        <Button variant="primary" size="xl" full disabled={!ready} onClick={add} data-testid="commish-add-entry-save">
+          {!player ? "Pick a player" : distance === null ? "Enter the distance" : `Add ${formatDistance(distance, type === "ctp" ? "ft" : "yd")}`}
+        </Button>
+      }
+    >
+      <div className="space-y-5 pt-1 pb-2" data-testid="commish-add-entry-sheet">
+        <p className="text-[15px] font-bold text-muted">
+          For a shot the app never measured: a dead phone, measuring already closed, or someone on another team. No GPS, no photo: the
+          distance you type is official. Posts a Commissioner override.
+        </p>
+        <section className="space-y-2">
+          <h3 className="text-sm font-extrabold tracking-wider uppercase">Hole</h3>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Contest hole">
+            {derived.contests.map((c) => (
+              <Chip key={c.hole} tone="ink" selected={hole === c.hole} onClick={() => setHole(c.hole)}>
+                {c.hole} · {c.type === "ctp" ? "CTP" : "Long drive"}
+              </Chip>
+            ))}
+          </div>
+        </section>
+        <section className="space-y-2">
+          <h3 className="text-sm font-extrabold tracking-wider uppercase">Who</h3>
+          {derived.teams.map((t) => (
+            <div key={t.id} className="space-y-1.5">
+              <TeamPill team={t} size="sm" />
+              <div className="flex flex-wrap gap-2" role="group" aria-label={`${t.name} players`}>
+                {(derived.membersOfTeam[t.id] ?? []).map((p) => (
+                  <Chip key={p.id} selected={playerId === p.id} onClick={() => setPlayerId(p.id)}>
+                    <PlayerName player={p} />
+                  </Chip>
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
+        {type && (
+          <section className="space-y-2 rounded-2xl border-2 border-ink p-3">
+            <h4 className="text-sm font-extrabold tracking-wider uppercase">{type === "ctp" ? "Distance to the pin" : "Drive"}</h4>
+            {type === "ctp" ? (
+              <div className="flex items-end gap-2">
+                <NumBox label="Feet" value={ft} onChange={setFt} max={3} />
+                <NumBox label="Inches" value={inches} onChange={setInches} max={2} />
+              </div>
+            ) : (
+              <NumBox label="Yards" value={yd} onChange={setYd} max={3} />
+            )}
+          </section>
+        )}
+        {existing && (
+          <p className="rounded-xl border-2 border-ink bg-hazard-soft px-3 py-2 text-[15px] font-bold" role="status">
+            Replaces {displayName(player)}&apos;s {formatDistance(existing.distance, existing.unit)} on hole {contest?.hole}, like a re-measure.
+          </p>
+        )}
+      </div>
+    </BottomSheet>
   );
 }
 

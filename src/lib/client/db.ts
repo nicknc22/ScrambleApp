@@ -19,7 +19,7 @@ export interface OutboxRow {
   /** Times this op was put on the wire (any outcome). >0 means it may already be on the server. */
   attempts: number;
   last_error: string | null;
-  /** Photo paths this op references; it waits for those uploads first. */
+  /** Photo paths this op references (the op never waits for them; the blobs upload on their own). */
   photo_paths: string[];
 }
 

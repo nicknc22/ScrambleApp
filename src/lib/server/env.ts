@@ -69,6 +69,22 @@ export function isProduction(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
+/** Running on Vercel (the platform sets VERCEL=1): no writable disk, so no local fallbacks. */
+export function isVercel(): boolean {
+  return !!read("VERCEL");
+}
+
+/**
+ * A required piece of server configuration is missing. Route handlers turn it into a 500 with
+ * code "not_configured" and this message (it names the variable), instead of a generic error.
+ */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigError";
+  }
+}
+
 /** Server-side Supabase (Storage uploads + Realtime broadcast) is usable. */
 export function supabaseConfigured(): boolean {
   return !!supabaseUrl() && !!supabaseServiceRoleKey();

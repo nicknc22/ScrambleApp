@@ -3,7 +3,7 @@
 // backoff, so a slow photo never holds up a score:
 //   ops (flushOutbox): send every pending op in seq order (batches of <= 100). Ops never wait for
 //      photos: an op referencing a photo carries its deterministic storage path and the image
-//      backfills (other phones show "Uploading…" until it lands).
+//      backfills (until it lands, other phones get a 404 for it, which the SW never caches).
 //      applied/duplicate -> dropped from the outbox; rejected -> dropped and surfaced;
 //      network error / 5xx / timeout -> keep everything, mark offline, exponential backoff;
 //      on success adopt the response snapshot (the store re-applies whatever is still pending).

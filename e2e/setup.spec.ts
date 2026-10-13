@@ -124,6 +124,26 @@ test("commissioner sets up the trip from scratch and starts the round", async ({
   await expect(page.getByTestId("team-name").first()).toHaveText(picked);
   await expect(page.getByTestId("team-zone").first()).toContainText("12:50 PM");
 
+  // Type Team 2's name, then tap a tee-time chip straight away: the blur saves the name and the
+  // "Saved" row must not shove the chips down mid-tap (the tee time used to be silently lost).
+  await page.getByTestId("team-zone").filter({ hasText: "Team 2" }).getByTestId("edit-team").click();
+  const sheet2 = page.getByRole("dialog");
+  await sheet2.getByTestId("team-name-input").fill("Fore Play");
+  await sheet2.getByRole("button", { name: "1:00 PM" }).click();
+  await expect(sheet2.getByTestId("tee-time-input")).toHaveValue("13:00");
+  await expect(sheet2.getByTestId("team-name-status")).toContainText("Saved");
+  await sheet2.getByTestId("team-done").click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const team2 = page.getByTestId("team-zone").filter({ hasText: "Fore Play" });
+  await expect(team2).toContainText("1:00 PM");
+  await expect
+    .poll(async () => {
+      const res = await page.request.get(`/api/t/${code}/state`);
+      const body = (await res.json()) as { state: { teams: { name: string; tee_time: string | null }[] } };
+      return body.state.teams.find((t) => t.name === "Fore Play")?.tee_time ?? null;
+    })
+    .toBe("13:00");
+
   // ---- Pots: $20 team match, $5 per contest hole, 70/30 ----
   await section(page, /Pots/).click();
   await page.getByTestId("team-ante").fill("20");
@@ -230,19 +250,34 @@ test("every setup section fits a 360px phone, settings save, and Setup is commis
     [/Roster/, "setup-roster"],
     [/Teams/, "setup-teams"],
     [/Pots/, "setup-pots"],
-    [/Settings/, "setup-settings"],
+    [/settings/i, "setup-settings"],
     [/Round/, "setup-round"],
   ] as const) {
     await section(page, name).click();
     await expect(page.getByTestId(testId)).toBeVisible();
     await expectNoHorizontalOverflow(page);
   }
+  // All six section tabs fit the 360px bar: none clipped or scrolled away, no label cut off.
+  const fit = await page.getByTestId("setup-tabs").evaluate((bar) => {
+    const box = bar.getBoundingClientRect();
+    return [...bar.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => {
+      const r = tab.getBoundingClientRect();
+      const label = tab.querySelector<HTMLElement>("span:not([aria-hidden])")!;
+      return {
+        label: label.textContent,
+        inside: r.left >= box.left - 0.5 && r.right <= box.right + 0.5 && r.right <= window.innerWidth,
+        cut: label.scrollWidth > label.clientWidth,
+      };
+    });
+  });
+  expect(fit.map((t) => t.label)).toEqual(["Roster", "Teams", "Course", "Pots", "Trip", "Round"]);
+  expect(fit.filter((t) => !t.inside || t.cut)).toEqual([]);
   // Round: Gus isn't on a team, so Start is blocked and says why.
   await expect(page.locator('[data-testid="preflight-item"][data-level="block"]').filter({ hasText: "1 not on a team" })).toBeVisible();
   await expect(page.getByTestId("start-round")).toBeDisabled();
 
   // Settings: a change shows the save bar; saving persists it.
-  await section(page, /Settings/).click();
+  await section(page, /settings/i).click();
   await page.getByTestId("setting-app-name").fill("Last Swing Before the Ring");
   await expect(page.getByTestId("settings-save-bar")).toBeVisible();
   await expectNoHorizontalOverflow(page);

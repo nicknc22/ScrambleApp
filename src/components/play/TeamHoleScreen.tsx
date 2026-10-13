@@ -19,6 +19,7 @@ import {
   drinksOnHole,
   driveView,
   hasUnsavedDraft,
+  isOwnMove,
   mulliganOptions,
   needsOverride,
   nextAction,
@@ -31,6 +32,7 @@ import {
   unscoredHoles,
   viewingHole,
   type AdvanceConfirm,
+  type LocalMove,
 } from "./model";
 import { usePlayActions } from "./usePlayActions";
 import { useStickyTop } from "./useStickyTop";
@@ -112,14 +114,17 @@ export function TeamHoleScreen({
     const t = setTimeout(() => setMoveGuard(false), HOLE_MOVE_GUARD_MS);
     return () => clearTimeout(t);
   }, [moveGuard, seen]);
-  // performance.now() of this phone's last write that can move the team's hole: moves within a
-  // moment of it are this phone's own (it already said so), anything else came from another phone.
-  const localMoveAt = useRef(Number.NEGATIVE_INFINITY);
+  // This phone's last write that can move the team: its own moves aren't announced again (it
+  // already said so); any other move came from another phone.
+  const localMove = useRef<LocalMove | null>(null);
+  const expectMove = (to: LocalMove["to"]) => {
+    localMove.current = { to, at: performance.now() };
+  };
   const shown = useRef({ hole: currentHole, finished });
   useEffect(() => {
     if (shown.current.hole === currentHole && shown.current.finished === finished) return;
     shown.current = { hole: currentHole, finished };
-    if (performance.now() - localMoveAt.current < 2000) return;
+    if (isOwnMove(localMove.current, currentHole, finished, performance.now())) return;
     const kept = pin !== null && hasUnsavedDraft(drafts, lines, pin) ? pin : null;
     const notice = teamMoveNotice({ to: currentHole, finished, keptHole: kept, keptValue: kept !== null ? (drafts[kept] ?? null) : null });
     if (notice) toast.show({ id: "tee-open", tone: kept !== null ? "roast" : "info", duration: kept !== null ? 6000 : 3500, ...notice });
@@ -185,7 +190,7 @@ export function TeamHoleScreen({
   };
 
   const save = () => {
-    localMoveAt.current = performance.now(); // a score on hole N+1 opens it
+    expectMove(hole); // a score on hole N+1 opens it
     if (actions.saveScore(hole, draft.value)) clearDraft(hole);
   };
 
@@ -214,7 +219,7 @@ export function TeamHoleScreen({
     if (choice === "confirm" && p.c.saveFirst !== null && !actions.saveScore(p.from, p.c.saveFirst, { announce: false })) return;
     // Skipping drops an unsaved stepper value too (otherwise it would hold the screen on that hole).
     clearDraft(p.from);
-    localMoveAt.current = performance.now();
+    expectMove(p.to);
     const done = p.to === "complete" ? actions.completeRound() : actions.teeOff(p.to);
     if (done) {
       setPin(null);
@@ -225,7 +230,7 @@ export function TeamHoleScreen({
   const onTee = () => {
     if (teeCta === null) return;
     if (teeCta === 1 && (rs?.open_hole ?? null) === null) {
-      localMoveAt.current = performance.now();
+      expectMove(1);
       if (actions.teeOff(1)) setPin(null);
       return;
     }
@@ -354,7 +359,7 @@ export function TeamHoleScreen({
           driveView={drive}
           disabled={disabled}
           onSelect={(pid) => {
-            localMoveAt.current = performance.now(); // a tee shot on hole N+1 opens it
+            expectMove(hole); // a tee shot on hole N+1 opens it
             actions.setTeeShot(hole, pid);
           }}
         />

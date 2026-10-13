@@ -40,6 +40,13 @@ export interface StandingView {
   to_par: string;
   /** Raw net to par, for coloring (null before the team has scored). */
   to_par_value: number | null;
+  /**
+   * Drinks on holes without a score yet (normally the open hole): not in drinks / credit / net
+   * until the hole is scored. "+1 🍺 banked" marker; null when there are none.
+   */
+  banked: string | null;
+  banked_drinks: number;
+  banked_credit: number;
   ghost_beers: number;
   started: boolean;
   /** At position 1 among teams that have scored. */
@@ -52,6 +59,7 @@ export interface StandingView {
 export function standingsView(standings: readonly StandingRow[], myTeamId: UUID | null): StandingView[] {
   return standings.map((r) => {
     const started = r.thru > 0;
+    const bankedDrinks = r.pending_drinks ?? 0;
     return {
       team_id: r.team_id,
       pos_label: r.pos_label,
@@ -62,6 +70,9 @@ export function standingsView(standings: readonly StandingRow[], myTeamId: UUID 
       net: started ? String(r.net) : DASH,
       to_par: started ? formatToPar(r.net_to_par) : DASH,
       to_par_value: started ? r.net_to_par : null,
+      banked: bankedDrinks > 0 ? `+${bankedDrinks} 🍺 banked` : null,
+      banked_drinks: bankedDrinks,
+      banked_credit: r.pending_credit ?? 0,
       ghost_beers: r.ghost_beers,
       started,
       leader: started && r.pos === 1,
@@ -118,15 +129,16 @@ export interface CardSum {
   par_played: number;
   /** Sum of strokes entered; null when no hole in range has strokes. */
   strokes: number | null;
+  /** Drinks / credit on SCORED holes (like the leaderboard's Drk / Cred, so TOT matches its row). */
   drinks: number;
   credit: number;
-  /**
-   * strokes - credit (matches the leaderboard's net: credit on an unscored open hole counts, so
-   * OUT + IN = TOT). null when the range has neither strokes nor credit.
-   */
+  /** Sum of hole nets over scored holes (= the leaderboard's net for TOT). null when none is scored. */
   net: number | null;
   /** Holes with strokes entered. */
   played: number;
+  /** Drinks / credit on holes without a score yet ("banked": they join the net once scored). */
+  banked_drinks: number;
+  banked_credit: number;
 }
 
 export function sumLines(lines: readonly TeamHoleLine[], label: CardSum["label"]): CardSum {
@@ -136,14 +148,19 @@ export function sumLines(lines: readonly TeamHoleLine[], label: CardSum["label"]
   let played = 0;
   let drinks = 0;
   let credit = 0;
+  let bankedDrinks = 0;
+  let bankedCredit = 0;
   for (const l of lines) {
     par += l.par;
-    drinks += l.drinks;
-    credit += l.credit;
     if (l.strokes !== null) {
       strokes += l.strokes;
       parPlayed += l.par;
       played += 1;
+      drinks += l.drinks;
+      credit += l.credit;
+    } else {
+      bankedDrinks += l.drinks;
+      bankedCredit += l.credit;
     }
   }
   return {
@@ -153,8 +170,10 @@ export function sumLines(lines: readonly TeamHoleLine[], label: CardSum["label"]
     strokes: played > 0 ? strokes : null,
     drinks,
     credit,
-    net: played > 0 ? strokes - credit : credit > 0 ? -credit : null,
+    net: played > 0 ? strokes - credit : null,
     played,
+    banked_drinks: bankedDrinks,
+    banked_credit: bankedCredit,
   };
 }
 

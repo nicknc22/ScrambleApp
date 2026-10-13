@@ -3,9 +3,10 @@
 // drink or contest entry, move drinks between holes, fix a team's round state, and see
 // drive-minimum misses. Every change goes through store.dispatch with as_commissioner where the op
 // isn't commissioner-only by type; the server posts a "Commissioner override" to the feed.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useClientState } from "@/lib/client/react";
 import { Card, SectionHeader, cx } from "@/components/ui";
+import { useHeaderHeight } from "../shared";
 import { driveFlags, reviewQueue } from "./commishModel";
 import { ContestsPanel } from "./ContestsPanel";
 import { DrinksPanel } from "./DrinksPanel";
@@ -13,7 +14,16 @@ import { FlagsPanel } from "./FlagsPanel";
 import { RoundsPanel } from "./RoundsPanel";
 import { ScoresPanel } from "./ScoresPanel";
 
-type ToolTab = "scores" | "drinks" | "contests" | "rounds" | "flags";
+export type ToolTab = "scores" | "drinks" | "contests" | "rounds" | "flags";
+
+/** Open a panel on a specific team / hole / entry (e.g. a Fix link in the finalize check). A new seq re-applies it. */
+export interface ToolFocus {
+  tab: ToolTab;
+  teamId?: string;
+  hole?: number;
+  entryId?: string;
+  seq: number;
+}
 
 const TABS: ReadonlyArray<{ value: ToolTab; label: string; emoji: string }> = [
   { value: "scores", label: "Scores", emoji: "🔢" },
@@ -23,11 +33,31 @@ const TABS: ReadonlyArray<{ value: ToolTab; label: string; emoji: string }> = [
   { value: "flags", label: "Drives", emoji: "🚗" },
 ];
 
-export function CommissionerTools() {
+export function CommissionerTools({ focus = null }: { focus?: ToolFocus | null }) {
   const view = useClientState((s) => s.view);
   const derived = useClientState((s) => s.derived);
   const isCommissioner = useClientState((s) => s.isCommissioner);
-  const [tab, setTab] = useState<ToolTab>("scores");
+  const headerH = useHeaderHeight();
+  const [tab, setTab] = useState<ToolTab>(focus?.tab ?? "scores");
+  // The focus target applies to the panel it opened, until the commissioner picks another tab.
+  const [target, setTarget] = useState<ToolFocus | null>(focus);
+  const seq = focus?.seq ?? 0;
+  const [appliedSeq, setAppliedSeq] = useState(seq);
+  if (focus && seq !== appliedSeq) {
+    setAppliedSeq(seq);
+    setTab(focus.tab);
+    setTarget(focus);
+  }
+  const at = (t: ToolTab) => (target?.tab === t ? target : null);
+  const sectionRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (seq === 0) return;
+    try {
+      sectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    } catch {
+      /* ignore */
+    }
+  }, [seq]);
 
   if (!view || !derived) return null;
   if (!isCommissioner) {
@@ -50,7 +80,13 @@ export function CommissionerTools() {
   const drinks = view.drinks.filter((d) => d.deleted_at === null).length;
 
   return (
-    <section className="space-y-4" data-testid="commish-tools" aria-label="Commissioner tools">
+    <section
+      ref={sectionRef}
+      className="space-y-4"
+      data-testid="commish-tools"
+      aria-label="Commissioner tools"
+      style={{ scrollMarginTop: headerH + 80 }}
+    >
       <SectionHeader title="Commissioner tools" subtitle="Fix anything. Everyone sees it." />
       <div className="rounded-2xl border-2 border-ink bg-ink px-4 py-3 text-white">
         <p className="loud text-[clamp(1.3rem,6.4vw,1.5rem)]">⚖️ Transparency mode</p>
@@ -70,7 +106,10 @@ export function CommissionerTools() {
               role="tab"
               aria-selected={active}
               aria-label={badge > 0 ? `${t.label} (${badge})` : t.label}
-              onClick={() => setTab(t.value)}
+              onClick={() => {
+                setTab(t.value);
+                setTarget(null);
+              }}
               className={cx(
                 "relative flex min-h-[60px] min-w-0 flex-col items-center justify-center gap-0.5 rounded-xl border-2 px-0.5 transition-transform active:scale-[0.96]",
                 active ? "border-ink bg-ink text-white shadow-hard-sm" : "border-ink bg-paper text-ink",
@@ -96,10 +135,11 @@ export function CommissionerTools() {
         })}
       </div>
       <div role="tabpanel" aria-label={tab}>
-        {tab === "scores" && <ScoresPanel />}
+        {/* Keyed by the focus seq: a new Fix link re-opens the panel on its target. */}
+        {tab === "scores" && <ScoresPanel key={seq} focusTeamId={at("scores")?.teamId} focusHole={at("scores")?.hole} />}
         {tab === "drinks" && <DrinksPanel />}
-        {tab === "contests" && <ContestsPanel />}
-        {tab === "rounds" && <RoundsPanel />}
+        {tab === "contests" && <ContestsPanel key={seq} focusEntryId={at("contests")?.entryId} />}
+        {tab === "rounds" && <RoundsPanel key={seq} focusTeamId={at("rounds")?.teamId} />}
         {tab === "flags" && <FlagsPanel />}
       </div>
     </section>

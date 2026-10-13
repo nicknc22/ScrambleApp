@@ -32,7 +32,7 @@ export const POST = withErrors(async (request: Request, ctx: { params: Promise<{
   const { code } = await ctx.params;
   const t = await loadTripOr404(code);
   if (t instanceof Response) return t;
-  if (!isCommissioner(request, t.trip.id)) {
+  if (!isCommissioner(request, t.trip.id, t.pinHash)) {
     return errorJson(403, "Commissioner only. Unlock in Settings first.", { code: "forbidden" });
   }
   const body = await readJsonObject(request);

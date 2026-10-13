@@ -42,8 +42,26 @@ describe("standingsView", () => {
     const rows = standingsView(d.standings, null);
     expect(rows.every((r) => !r.leader && !r.started)).toBe(true);
     const a = rows.find((r) => r.team_id === f.team.A)!;
-    expect(a).toMatchObject({ pos_label: DASH, thru_label: DASH, gross: DASH, net: DASH, to_par: DASH, credit: "-2", drinks: "1" });
+    // Round net = sum of hole nets over SCORED holes: the drink is banked until hole 1 has a score.
+    expect(a).toMatchObject({ pos_label: DASH, thru_label: DASH, gross: DASH, net: DASH, to_par: DASH, credit: "0", drinks: "0" });
+    expect(a).toMatchObject({ banked: "+1 🍺 banked", banked_drinks: 1, banked_credit: 2 });
+    expect(rows.find((r) => r.team_id === f.team.B)!).toMatchObject({ banked: null, banked_drinks: 0, banked_credit: 0 });
     expect(leaderHeadline(d).kind).toBe("none");
+  });
+
+  it("drinks on the open, unscored hole are banked, not in Drk / Cred / Net, until the hole is scored (finding: two net definitions)", () => {
+    const f = makeTrip({ teams: [3, 3] });
+    f.teeOff("A", 1).teeOff("B", 1);
+    f.score("A", 1, 4, "A1").score("B", 1, 4, "B1");
+    f.teeOff("A", 2);
+    f.drink("A", "A1", 2);
+    f.drink("A", "A2", 2); // threesome: 1 + 1 on hole 2, not scored yet
+    let a = standingsView(derive(f.state).standings, null).find((r) => r.team_id === f.team.A)!;
+    expect(a).toMatchObject({ gross: "4", drinks: "0", credit: "0", net: "4", to_par: "E", banked: "+2 🍺 banked", banked_credit: 2 });
+    // Scoring hole 2 moves the banked drinks into the net.
+    f.score("A", 2, 5, "A2");
+    a = standingsView(derive(f.state).standings, null).find((r) => r.team_id === f.team.A)!;
+    expect(a).toMatchObject({ gross: "9", drinks: "2", credit: "-2", net: "7", to_par: "-1", banked: null, banked_drinks: 0 });
   });
 
   it("leaderHeadline handles a solo leader and a tie", () => {
@@ -74,7 +92,7 @@ describe("positionDeltas", () => {
 });
 
 describe("scorecard", () => {
-  it("OUT / IN / TOT add up and match the leaderboard net (credit on an unscored hole counts)", () => {
+  it("OUT / IN / TOT add up and match the leaderboard row (credit on an unscored hole is banked)", () => {
     const f = makeTrip({ teams: [3, 3] });
     f.teeOff("A", 1);
     f.score("A", 1, 5, "A1");
@@ -91,20 +109,27 @@ describe("scorecard", () => {
     const { front, back, total } = scorecardSections(d.teamHoles[f.team.A]);
     expect(front.lines.map((l) => l.hole)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(back.lines).toHaveLength(9);
-    expect(front.sum).toMatchObject({ label: "OUT", strokes: 37, drinks: 3, credit: 4, net: 33, played: 9 });
-    expect(back.sum).toMatchObject({ label: "IN", strokes: 4, drinks: 1, credit: 1, net: 3, played: 1 });
-    expect(total).toMatchObject({ label: "TOT", strokes: 41, drinks: 4, credit: 5, net: 36, played: 10 });
+    expect(front.sum).toMatchObject({ label: "OUT", strokes: 37, drinks: 3, credit: 4, net: 33, played: 9, banked_drinks: 0 });
+    expect(back.sum).toMatchObject({ label: "IN", strokes: 4, drinks: 0, credit: 0, net: 4, played: 1, banked_drinks: 1, banked_credit: 1 });
+    expect(total).toMatchObject({ label: "TOT", strokes: 41, drinks: 3, credit: 4, net: 37, played: 10, banked_drinks: 1, banked_credit: 1 });
+    // The hole row itself still shows the open hole's drink (its net is "–" until it's scored).
+    expect(back.lines[1]).toMatchObject({ hole: 11, strokes: null, drinks: 1, credit: 1, net: null });
     const row = d.standings.find((r) => r.team_id === f.team.A)!;
     expect(total.net).toBe(row.net);
+    expect(total.drinks).toBe(row.drinks);
+    expect(total.credit).toBe(row.credit);
+    expect([total.banked_drinks, total.banked_credit]).toEqual([row.pending_drinks, row.pending_credit]);
     expect(total.par).toBe(d.holes.reduce((s, h) => s + h.par, 0));
   });
 
-  it("empty card has null strokes and net", () => {
+  it("empty card has null strokes and net (even with a banked drink)", () => {
     const f = makeTrip({ teams: [2, 2] });
-    const d = derive(f.state);
-    const { total } = scorecardSections(d.teamHoles[f.team.A]);
+    let { total } = scorecardSections(derive(f.state).teamHoles[f.team.A]);
     expect(total.strokes).toBeNull();
     expect(total.net).toBeNull();
+    f.teeOff("A", 1).drink("A", "A1", 1);
+    ({ total } = scorecardSections(derive(f.state).teamHoles[f.team.A]));
+    expect(total).toMatchObject({ strokes: null, net: null, drinks: 0, credit: 0, banked_drinks: 1, banked_credit: 2 });
   });
 
   it("scoreShape", () => {

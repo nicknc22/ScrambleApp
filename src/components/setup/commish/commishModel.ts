@@ -1,6 +1,8 @@
 // Pure helpers for the commissioner's live-round tools (unit-tested in tests/ui/course-commish.test.ts).
-import type { ContestEntry, Drink, Player, RoundStatus, Team, TeamRoundState, TripState, UUID } from "@/lib/types";
+import type { ContestEntry, ContestKind, Drink, DrinkType, Player, RoundStatus, Team, TeamRoundState, TripState, UUID } from "@/lib/types";
 import type { ContestEntryView, ContestHoleSummary, Derived } from "@/lib/engine/types";
+import type { OpInput } from "@/lib/ops";
+import { contestScore } from "@/lib/engine/contests";
 import { formatFeetInches } from "@/lib/engine/format";
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,27 @@ export function reviewQueue(contests: readonly ContestHoleSummary[]): ReviewItem
   return reviewItems(contests)
     .filter((i) => i.needsReview)
     .sort((a, b) => a.hole - b.hole || a.view.entry.created_at.localeCompare(b.view.entry.created_at));
+}
+
+/**
+ * Queue items whose ruling can move money, for the finalize check: entries that don't count yet
+ * (flagged, out of range) but would take or tie the hole if approved, and AI-suspicious entries
+ * that currently lead it. Informational items (weak-GPS note on a drive that already counts, a
+ * suspicious entry that isn't winning) can't change a pot and stay out.
+ */
+export function pendingRulings(contests: readonly ContestHoleSummary[]): ReviewItem[] {
+  const out: ReviewItem[] = [];
+  for (const c of contests) {
+    const best = c.entries.filter((v) => v.valid).reduce((min, v) => Math.min(min, contestScore(c.type, v.distance)), Number.POSITIVE_INFINITY);
+    for (const v of c.entries) {
+      const reasons = reviewReasons(v);
+      if (reasons.length === 0) continue;
+      const wouldTake = !v.valid && Number.isFinite(v.distance) && contestScore(c.type, v.distance) <= best;
+      const suspiciousLeader = v.valid && v.suspicious && v.rank === 1;
+      if (wouldTake || suspiciousLeader) out.push({ view: v, hole: c.hole, reasons, needsReview: true });
+    }
+  }
+  return out.sort((a, b) => a.hole - b.hole || a.view.entry.created_at.localeCompare(b.view.entry.created_at));
 }
 
 export function entryStatusLabel(e: Pick<ContestEntry, "status">): string {
@@ -131,6 +154,72 @@ export function drinkRows(state: Pick<TripState, "drinks" | "players" | "teams">
 
 export const DRINK_EMOJI: Record<Drink["type"], string> = { drink: "🍺", shotgun: "🥫", shot: "🥃" };
 export const DRINK_LABEL: Record<Drink["type"], string> = { drink: "Drink", shotgun: "Shotgun", shot: "Shot" };
+
+// ---------------------------------------------------------------------------
+// Commissioner adds (day-of fallback: a dead phone, the cart kept paper)
+// ---------------------------------------------------------------------------
+
+/** Where an added drink most likely belongs: the team's open hole (18 once done), else hole 1. */
+export function defaultAddHole(rs: Pick<TeamRoundState, "status" | "open_hole"> | null | undefined): number {
+  if (!rs || rs.status === "not_started" || rs.open_hole === null) return 1;
+  return rs.open_hole;
+}
+
+export interface AddDrinkDraft {
+  teamId: UUID | null;
+  playerId: UUID | null;
+  hole: number | null;
+  type: DrinkType;
+}
+
+/**
+ * drink.log for a drink the commissioner adds after the fact: any team, player, hole and type,
+ * window open or not (as_commissioner skips the window check and the drink cap). null until complete.
+ */
+export function addDrinkInput(d: AddDrinkDraft, drinkId: UUID): OpInput | null {
+  if (!d.teamId || !d.playerId || d.hole === null || !Number.isInteger(d.hole) || d.hole < 1 || d.hole > 18) return null;
+  return {
+    type: "drink.log",
+    drink_id: drinkId,
+    team_id: d.teamId,
+    player_id: d.playerId,
+    hole: d.hole,
+    drink_type: d.type,
+    photo_path: null,
+    as_commissioner: true,
+  };
+}
+
+export interface AddEntryDraft {
+  hole: number | null;
+  type: ContestKind | null;
+  playerId: UUID | null;
+  /** ctp: decimal feet; ld: whole yards (feetFromParts / yardsFromText). */
+  distance: number | null;
+}
+
+/**
+ * contest.submit for an entry the commissioner types in for anyone (no GPS, no photo): the distance
+ * as given. Replaces that player's current entry on the hole, like a re-measure. null until complete.
+ */
+export function addEntryInput(d: AddEntryDraft, entryId: UUID): OpInput | null {
+  if (d.hole === null || !d.type || !d.playerId || d.distance === null || !Number.isFinite(d.distance) || d.distance < 0) return null;
+  return {
+    type: "contest.submit",
+    entry_id: entryId,
+    hole: d.hole,
+    player_id: d.playerId,
+    contest_type: d.type,
+    distance_value: d.distance,
+    angle_deg: null,
+    lat: null,
+    lng: null,
+    gps_accuracy_m: null,
+    low_accuracy: false,
+    photo_path: null,
+    as_commissioner: true,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Drive minimum

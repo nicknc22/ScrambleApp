@@ -1,6 +1,7 @@
 "use client";
 import type { Team } from "@/lib/types";
 import { Badge, IconMenu, TeamPill, cx } from "@/components/ui";
+import { GpsSimBanner } from "./GpsSimulator";
 import { SyncIssuesChip } from "./SyncIssues";
 import { TripOfflineBadge } from "./TripOfflineBadge";
 
@@ -73,6 +74,7 @@ export function TripHeader({
         </button>
       </div>
       <TripOfflineBadge variant="bar" />
+      <GpsSimBanner />
     </header>
   );
 }

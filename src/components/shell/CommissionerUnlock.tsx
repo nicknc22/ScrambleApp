@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useTripStore } from "@/lib/client/react";
+import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
 import { PinPad, useToast } from "@/components/ui";
 
 export const COMMISH_ON_TOAST = "Commissioner powers: ON. Everything you touch gets posted.";
@@ -53,6 +54,8 @@ export function CommissionerUnlock({ onUnlocked }: { onUnlocked?: () => void }) 
         if (error) setError(null);
       }}
       onSubmit={submit}
+      minLength={PIN_MIN_LENGTH}
+      maxLength={PIN_MAX_LENGTH}
       busy={busy}
       error={error}
       submitLabel="Unlock powers"

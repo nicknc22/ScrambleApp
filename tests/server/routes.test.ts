@@ -3,11 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, setDbForTests, type DbConnection } from "@/lib/server/db";
+import { createTestDb, openDb, setDbForTests, type DbConnection } from "@/lib/server/db";
 import { hashPin, resetPinThrottle } from "@/lib/server/auth";
 import { createTrip } from "@/lib/server/trips";
 import { broadcastTripChanged, realtimeMeta } from "@/lib/server/realtime";
-import { photoBaseUrl, putPhoto, readLocalPhoto } from "@/lib/server/storage";
+import { MAX_PHOTO_BYTES, PHOTO_QUOTA, photoBaseUrl, putPhoto, readLocalPhoto } from "@/lib/server/storage";
+import { ConfigError } from "@/lib/server/env";
 import { newId } from "@/lib/ids";
 import type { Snapshot, Trip } from "@/lib/types";
 import { POST as createTripRoute } from "@/app/api/trips/route";
@@ -62,15 +63,25 @@ afterAll(async () => {
   fs.rmSync(uploads, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // Local mode: no Supabase, uploads in a temp dir.
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "APP_SECRET", "ANTHROPIC_API_KEY", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY"]) {
+  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "APP_SECRET", "ANTHROPIC_API_KEY", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VERCEL"]) {
     vi.stubEnv(k, "");
   }
   vi.stubEnv("UPLOADS_DIR", uploads);
   vi.stubEnv("COMMISSIONER_PIN_HASH", "");
-  resetPinThrottle();
+  await resetPinThrottle();
 });
+
+/** Every "name=value" a response sets, by name. */
+function setCookies(res: Response): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const sc of res.headers.getSetCookie()) {
+    const pair = sc.split(";")[0];
+    out.set(pair.slice(0, pair.indexOf("=")), pair);
+  }
+  return out;
+}
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -90,6 +101,9 @@ describe("POST /api/trips", () => {
     expect(body.url).toBe(`/t/${body.code}`);
     const cookie = cookiePair(res);
     expect(res.headers.get("set-cookie")).toMatch(/HttpOnly; SameSite=Lax; Max-Age=43200/);
+    // ...and the creating phone is a trusted device for this trip (60 days).
+    expect([...setCookies(res).keys()]).toEqual([cookie.split("=")[0], expect.stringMatching(/^scramble_dev_/)]);
+    expect(res.headers.getSetCookie()[1]).toMatch(/Max-Age=5184000/);
 
     // The trip exists, uses the env hash, and the cookie makes us commissioner.
     const st = await stateRoute(jsonReq(`/api/t/${body.code}/state`, "GET"), params({ code: body.code }));
@@ -111,13 +125,15 @@ describe("POST /api/trips", () => {
     err.mockRestore();
   });
 
-  it("throttles repeated wrong PINs with 429", async () => {
+  it("throttles repeated wrong PINs with 429 (in the database)", async () => {
     vi.stubEnv("COMMISSIONER_PIN_HASH", pinHash);
     for (let i = 0; i < 8; i++) {
       expect((await createTripRoute(jsonReq("/api/trips", "POST", { pin: "0000" }))).status).toBe(401);
     }
     const res = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "2468" }));
     expect(res.status).toBe(429);
+    const rows = await db.query<{ n: number }>("select count(*)::int as n from pin_failures where trip_id is null");
+    expect(rows[0].n).toBe(8);
   });
 
   it("without COMMISSIONER_PIN_HASH in dev: the trip's PIN is the one given; defaults the names", async () => {
@@ -233,6 +249,11 @@ describe("/api/t/[code]/commissioner", () => {
     const lock = await commLock(jsonReq(url, "DELETE", undefined, { cookie }), p);
     expect(lock.status).toBe(200);
     expect(lock.headers.get("set-cookie")).toMatch(/Max-Age=0/);
+    // Locking clears both cookies: a borrowed phone doesn't stay a trusted device.
+    expect(lock.headers.getSetCookie()).toEqual([
+      expect.stringMatching(/^scramble_comm_[^=]+=; .*Max-Age=0/),
+      expect.stringMatching(/^scramble_dev_[^=]+=; .*Max-Age=0/),
+    ]);
     const cleared = cookiePair(lock);
     expect(await (await commCheck(jsonReq(url, "GET", undefined, { cookie: cleared }), p)).json()).toEqual({ is_commissioner: false });
   });
@@ -252,6 +273,76 @@ describe("/api/t/[code]/commissioner", () => {
     // The PIN change must not leak into the snapshot
     const text = await (await stateRoute(jsonReq(`/api/t/${t.code}/state`, "GET"), p)).text();
     expect(text).not.toContain("scrypt$");
+  });
+
+  it("a PIN change revokes every commissioner cookie issued for the old PIN (except the changer's new one)", async () => {
+    const t = await trip();
+    const url = `/api/t/${t.code}/commissioner`;
+    const p = params({ code: t.code });
+    // Nick unlocks on a friend's phone and forgets to lock it...
+    const friend = cookiePair(await commUnlock(jsonReq(url, "POST", { pin: "2468" }), p));
+    const nick = cookiePair(await commUnlock(jsonReq(url, "POST", { pin: "2468" }), p));
+    expect(await (await commCheck(jsonReq(url, "GET", undefined, { cookie: friend }), p)).json()).toEqual({ is_commissioner: true });
+    // ...then changes the PIN from his own phone.
+    const changed = await commChangePin(jsonReq(url, "PUT", { pin: "2468", new_pin: "97531" }, { cookie: nick }), p);
+    expect(changed.status).toBe(200);
+    const fresh = cookiePair(changed);
+    expect(await (await commCheck(jsonReq(url, "GET", undefined, { cookie: friend }), p)).json()).toEqual({ is_commissioner: false });
+    expect(await (await commCheck(jsonReq(url, "GET", undefined, { cookie: nick }), p)).json()).toEqual({ is_commissioner: false });
+    expect(await (await commCheck(jsonReq(url, "GET", undefined, { cookie: fresh }), p)).json()).toEqual({ is_commissioner: true });
+  });
+
+  it("accepts a 12-digit PIN end to end (the unlock pad allows 12 too)", async () => {
+    const t = await trip();
+    const url = `/api/t/${t.code}/commissioner`;
+    const p = params({ code: t.code });
+    expect((await commChangePin(jsonReq(url, "PUT", { pin: "2468", new_pin: "555123456789" }), p)).status).toBe(200);
+    expect((await commUnlock(jsonReq(url, "POST", { pin: "55512345" }), p)).status).toBe(401);
+    expect((await commUnlock(jsonReq(url, "POST", { pin: "555123456789" }), p)).status).toBe(200);
+    expect((await commChangePin(jsonReq(url, "PUT", { pin: "555123456789", new_pin: "5551234567890" }), p)).status).toBe(400);
+  });
+
+  it("griefers can't lock out the commissioner's trusted device; everyone else gets 429 even with the right PIN", async () => {
+    const t = await trip();
+    const url = `/api/t/${t.code}/commissioner`;
+    const p = params({ code: t.code });
+    // The commissioner unlocked on his phone once: it's now a trusted device.
+    const first = await commUnlock(jsonReq(url, "POST", { pin: "2468" }, { "x-forwarded-for": "203.0.113.9" }), p);
+    const device = [...setCookies(first).entries()].find(([k]) => k.startsWith("scramble_dev_"))![1];
+
+    // Five friends x 8 wrong guesses (and a scripted guesser rotating IPs).
+    for (let f = 0; f < 5; f++) {
+      for (let i = 0; i < 8; i++) await commUnlock(jsonReq(url, "POST", { pin: String(1000 + f * 8 + i) }, { "x-forwarded-for": `198.51.100.${f}` }), p);
+    }
+    // A stranger with the right PIN: throttled before the PIN is even checked (no oracle, no cookie).
+    const stranger = await commUnlock(jsonReq(url, "POST", { pin: "2468" }, { "x-forwarded-for": "192.0.2.77" }), p);
+    expect(stranger.status).toBe(429);
+    expect(stranger.headers.get("set-cookie")).toBeNull();
+    const strangerWrong = await commUnlock(jsonReq(url, "POST", { pin: "9999" }, { "x-forwarded-for": "192.0.2.78" }), p);
+    expect(strangerWrong.status).toBe(429);
+
+    // His session expired; his phone (same clubhouse IP as a griefer, even) still unlocks.
+    const back = await commUnlock(jsonReq(url, "POST", { pin: "2468" }, { cookie: device, "x-forwarded-for": "198.51.100.0" }), p);
+    expect(back.status).toBe(200);
+    expect(await (await commCheck(jsonReq(url, "GET", undefined, { cookie: cookiePair(back) }), p)).json()).toEqual({ is_commissioner: true });
+    // ...and can change the PIN.
+    const changed = await commChangePin(jsonReq(url, "PUT", { pin: "2468", new_pin: "86420" }, { cookie: device }), p);
+    expect(changed.status).toBe(200);
+    // The old PIN's device cookie is revoked with the PIN; the response re-trusts this phone.
+    expect((await commUnlock(jsonReq(url, "POST", { pin: "86420" }, { cookie: device }), p)).status).toBe(429);
+    const retrusted = [...setCookies(changed).entries()].find(([k]) => k.startsWith("scramble_dev_"))![1];
+    expect((await commUnlock(jsonReq(url, "POST", { pin: "86420" }, { cookie: retrusted }), p)).status).toBe(200);
+  });
+
+  it("a trusted device still has its own wrong-PIN limit", async () => {
+    const t = await trip();
+    const url = `/api/t/${t.code}/commissioner`;
+    const p = params({ code: t.code });
+    const device = [...setCookies(await commUnlock(jsonReq(url, "POST", { pin: "2468" }), p)).entries()].find(([k]) => k.startsWith("scramble_dev_"))![1];
+    for (let i = 0; i < 8; i++) {
+      expect((await commUnlock(jsonReq(url, "POST", { pin: String(3000 + i) }, { cookie: device, "x-forwarded-for": `10.9.${i}.1` }), p)).status).toBe(401);
+    }
+    expect((await commUnlock(jsonReq(url, "POST", { pin: "2468" }, { cookie: device, "x-forwarded-for": "10.9.99.1" }), p)).status).toBe(429);
   });
 
   it("throttles PIN guessing per client with 429, other clients unaffected", async () => {
@@ -322,11 +413,49 @@ describe("uploads and local photos", () => {
     expect((await upload(t.code, good, JPEG, "text/html")).status).toBe(415);
     expect((await upload(t.code, good, new TextEncoder().encode("<html>"))).status).toBe(415);
     expect((await upload(t.code, good, new Uint8Array(0))).status).toBe(400);
-    const big = new Uint8Array(8 * 1024 * 1024 + 1);
-    big.set(JPEG.slice(0, 3));
+    // 4 MB max: Vercel refuses bodies over 4.5 MB before the handler runs.
+    expect(MAX_PHOTO_BYTES).toBe(4 * 1024 * 1024);
+    const big = new Uint8Array(MAX_PHOTO_BYTES + 1);
+    big.set(JPEG.slice(0, 4));
     expect((await upload(t.code, good, big)).status).toBe(413);
+    // FF D8 FF and then not a JPEG marker: junk with a JPEG-looking prefix.
+    expect((await upload(t.code, good, new Uint8Array([0xff, 0xd8, 0xff, 0x00, 1, 2, 3]))).status).toBe(415);
     expect((await upload("nosuchtrip9", good, JPEG)).status).toBe(404);
     expect(await readLocalPhoto(good)).toBeNull();
+  });
+
+  it("caps photos per trip (800; 80 on a demo trip), but a retry of a stored path always goes through", async () => {
+    const t = await trip();
+    const p = (kind = "drinks") => `trips/${t.id}/${kind}/${newId()}.jpg`;
+    const first = p();
+    expect((await upload(t.code, first, JPEG)).status).toBe(200);
+    const recorded = await db.query<{ path: string; bytes: number }>("select path, bytes from photo_uploads where trip_id = $1", [t.id]);
+    expect(recorded).toEqual([{ path: first, bytes: JPEG.length }]);
+    // Fill the trip up to the cap.
+    await db.query(
+      `insert into photo_uploads (trip_id, path, bytes)
+       select $1::uuid, 'trips/' || $1::text || '/posts/' || gen_random_uuid() || '.jpg', 1000 from generate_series(1, $2::int)`,
+      [t.id, PHOTO_QUOTA.real.files - 1],
+    );
+    const full = await upload(t.code, p(), JPEG);
+    expect(full.status).toBe(413); // permanent for the phone's outbox: it stops retrying
+    expect(await full.json()).toMatchObject({ code: "photo_quota" });
+    expect((await upload(t.code, first, JPEG)).status).toBe(200); // idempotent retry
+    // Other trips are unaffected.
+    const other = await trip("Other");
+    expect((await upload(other.code, `trips/${other.id}/posts/${newId()}.jpg`, JPEG)).status).toBe(200);
+
+    const demo = await createTrip(db, { name: "Demo", app_name: "Scramble", pin_hash: pinHash, is_demo: true });
+    for (let i = 0; i < PHOTO_QUOTA.demo.files; i++) {
+      await db.query("insert into photo_uploads (trip_id, path, bytes) values ($1, $2, 10)", [demo.id, `trips/${demo.id}/posts/${newId()}.jpg`]);
+    }
+    expect((await upload(demo.code, `trips/${demo.id}/posts/${newId()}.jpg`, JPEG)).status).toBe(413);
+  });
+
+  it("caps bytes per trip too", async () => {
+    const t = await createTrip(db, { name: "Demo bytes", app_name: "Scramble", pin_hash: pinHash, is_demo: true });
+    await db.query("insert into photo_uploads (trip_id, path, bytes) values ($1, $2, $3)", [t.id, `trips/${t.id}/posts/${newId()}.jpg`, PHOTO_QUOTA.demo.bytes - 10]);
+    expect((await upload(t.code, `trips/${t.id}/posts/${newId()}.jpg`, JPEG)).status).toBe(413);
   });
 
   it("accepts a missing content type when the bytes are JPEG", async () => {
@@ -350,6 +479,45 @@ describe("uploads and local photos", () => {
     vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "service");
     expect((await getPhoto(p)).status).toBe(404);
     expect(photoBaseUrl()).toBe("https://abc.supabase.co/storage/v1/object/public/photos/");
+  });
+});
+
+describe("missing production config fails loudly (Vercel)", () => {
+  it("no DATABASE_URL on Vercel: a 500 that names DATABASE_URL instead of an opaque crash", async () => {
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("DATABASE_URL", "");
+    vi.stubEnv("PGLITE_DIR", "memory://"); // if the guard ever regresses, don't litter the repo
+    await expect(openDb()).rejects.toBeInstanceOf(ConfigError);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    setDbForTests(null);
+    try {
+      const res = await stateRoute(jsonReq("/api/t/whatever/state", "GET"), params({ code: "whatever12" }));
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.code).toBe("not_configured");
+      expect(body.error).toMatch(/DATABASE_URL/);
+      expect(err).toHaveBeenCalledWith(expect.stringMatching(/DATABASE_URL/));
+    } finally {
+      setDbForTests(db);
+      err.mockRestore();
+    }
+  });
+
+  it("no Supabase Storage on Vercel: uploads answer a clear 500 instead of writing to a read-only disk", async () => {
+    const t = await trip();
+    vi.stubEnv("VERCEL", "1");
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const p = `trips/${t.id}/drinks/${newId()}.jpg`;
+    const res = await uploadRoute(
+      new Request(`${BASE}/api/t/${t.code}/upload?path=${encodeURIComponent(p)}`, { method: "POST", headers: { "content-type": "image/jpeg" }, body: JPEG }),
+      params({ code: t.code }),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("not_configured");
+    expect(body.error).toMatch(/SUPABASE_SERVICE_ROLE_KEY/);
+    expect(fs.existsSync(path.join(uploads, p))).toBe(false);
+    err.mockRestore();
   });
 });
 

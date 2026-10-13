@@ -6,13 +6,14 @@ import { formatToPar } from "@/lib/engine/format";
 import type { TeamHoleLine } from "@/lib/engine/types";
 import type { Player, Team } from "@/lib/types";
 import { BottomSheet, Button, Chip, EmptyState, PlayerName, StatTile, Stepper, cx, displayName, useToast } from "@/components/ui";
+import { holesLabel, scoreGaps } from "../model";
 import { TeamChips, useCommishDispatch } from "./shared";
 
-export function ScoresPanel() {
+export function ScoresPanel({ focusTeamId, focusHole }: { focusTeamId?: string; focusHole?: number } = {}) {
   const derived = useClientState((s) => s.derived);
   const view = useClientState((s) => s.view);
-  const [teamId, setTeamId] = useState<string | null>(null);
-  const [hole, setHole] = useState<number | null>(null);
+  const [teamId, setTeamId] = useState<string | null>(focusTeamId ?? null);
+  const [hole, setHole] = useState<number | null>(focusHole ?? null);
 
   if (!derived || !view) return null;
   const teams = derived.teams;
@@ -23,6 +24,7 @@ export function ScoresPanel() {
   const rs = view.team_round_state.find((r) => r.team_id === team.id) ?? null;
   const members = derived.membersOfTeam[team.id] ?? [];
   const line = hole !== null ? (lines.find((l) => l.hole === hole) ?? null) : null;
+  const gap = scoreGaps(view).find((g) => g.team.id === team.id) ?? null;
 
   return (
     <div className="space-y-3" data-testid="commish-scores">
@@ -34,6 +36,12 @@ export function ScoresPanel() {
           <StatTile label="Net" value={standing.thru > 0 ? standing.net : "–"} tone="fairway" />
           <StatTile label="To par" value={standing.thru > 0 ? formatToPar(standing.net_to_par) : "–"} tone="ink" />
         </div>
+      )}
+      {gap && (
+        <p className="rounded-xl border-2 border-flag bg-flag-soft px-3 py-2 text-[15px] font-extrabold" role="status" data-testid="commish-score-gap">
+          ⚠️ {team.name} played past {holesLabel(gap.holes)} with no score. A blank hole plays as even par and its drinks don&apos;t
+          count.
+        </p>
       )}
       <p className="text-sm font-bold text-muted">Tap a hole to fix it. Big number = strokes, small = net after drink credit.</p>
       <div className="grid grid-cols-6 gap-1.5" role="list" aria-label={`${team.name} scorecard`}>

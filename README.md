@@ -47,14 +47,14 @@ Budget about 30 minutes. Both free tiers are plenty.
 ### 2. Secrets you generate on your laptop
 
 ```bash
-npm run hash-pin -- 2468        # your commissioner PIN (4-12 digits) -> COMMISSIONER_PIN_HASH
+npm run hash-pin -- 246813      # your commissioner PIN (4-12 digits; use 6+) -> COMMISSIONER_PIN_HASH
 npm run vapid-keys              # Web Push keys -> VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY
 openssl rand -base64 32         # optional APP_SECRET (signs the commissioner cookie)
 ```
 
-`hash-pin` prints one line like `scrypt:<salt>:<hash>`. Paste it as is (it has no `$`, so nothing needs escaping).
+`hash-pin` prints one line like `scrypt:<salt>:<hash>`. Paste it as is (it has no `$`, so nothing needs escaping). Pick at least 6 digits: wrong PINs are throttled (8 per phone per 10 minutes, 100 per trip per day), but anyone with the link can keep guessing for days, and a 4-digit PIN only has 10,000 options. Whatever you pick, the unlock pad takes up to 12 digits.
 
-For AI roasts, team names and the closest-to-pin judge, create an API key at [console.anthropic.com](https://console.anthropic.com) (`ANTHROPIC_API_KEY`). Expect a few dollars for the round. Everything works without it.
+For AI roasts, team names and the closest-to-pin judge, create an API key at [console.anthropic.com](https://console.anthropic.com) (`ANTHROPIC_API_KEY`). Expect a few dollars for the round: the judge is capped at 60 photo checks per trip (3 per player per hole) and never looks at the same photo twice, and roasts have their own cap in Settings. Everything works without it.
 
 ### 3. Vercel (hosting)
 
@@ -65,23 +65,28 @@ For AI roasts, team names and the closest-to-pin judge, create an API key at [co
 
 | Variable | Required | What it is |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | Supabase transaction pooler URL (port 6543). Unset = local PGlite (dev only). |
+| `DATABASE_URL` | yes | Supabase transaction pooler URL (port 6543). Unset = local PGlite, which only works on a laptop: on Vercel every request fails with "Server misconfigured: DATABASE_URL is not set". |
 | `NEXT_PUBLIC_SUPABASE_URL` | yes | `https://<project>.supabase.co` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | Supabase anon key. Phones use it only to listen for "something changed" broadcasts. |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server only: photo uploads and Realtime broadcasts. Without it photos land on the function's disk, which Vercel throws away. |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server only: photo uploads and Realtime broadcasts. Without it, photo uploads on Vercel fail with "Server misconfigured: photo storage needs ..." (scores and drinks still sync), and phones poll every few seconds instead of getting live pushes. |
 | `COMMISSIONER_PIN_HASH` | yes | From `npm run hash-pin -- <pin>`. Required to create a trip in production; also the starting PIN of each new trip. |
-| `ANTHROPIC_API_KEY` | no | AI judge, roasts and team names. Unset = AI silently off. `AI_JUDGE_MODEL` / `AI_FAST_MODEL` override the defaults (`claude-sonnet-5-5`, `claude-haiku-5-5`). |
+| `ANTHROPIC_API_KEY` | no | AI judge, roasts and team names. Unset = AI silently off. |
+| `AI_JUDGE_MODEL` | no | Model for the closest-to-pin judge (needs image input). Default `claude-sonnet-5-5`. |
+| `AI_FAST_MODEL` | no | Model for roasts and team names. Default `claude-haiku-5-5`. |
+| `DEMO_AI` | no | `1` lets demo trips use the AI. Off by default, so "Try the demo" (open to anyone with the URL) can't spend your API credit; that's why the demo never shows AI roasts or judge posts. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | no | From `npm run vapid-keys`. Unset = push notifications off. |
-| `VAPID_SUBJECT` | no | A `mailto:you@example.com` contact for push services. |
+| `VAPID_SUBJECT` | no | A `mailto:you@yourdomain.com` contact for push services. Set a real address: the `example.com` default can get pushes rejected. |
 | `APP_SECRET` | no | Cookie-signing secret. Falls back to a hash of the service key. |
+| `NEXT_PUBLIC_APP_VERSION` | no | Version shown in Settings (default `0.1.0`). Vercel's commit SHA is shown next to it automatically. |
 | `PGLITE_DIR`, `UPLOADS_DIR` | no | Local dev only: where PGlite and photos live (default `.data/pglite`, `.data/uploads`). |
 
 ### 4. Create the real trip
 
 1. Open your Vercel URL on your phone → **Commissioner → Create the trip**. Name it, enter your PIN. You land in **Setup**.
-2. Fill in the roster (nickname, Venmo handle, groom flag), drag players into teams, set tee times, set the pots, and place the tee and green points on the satellite map (at minimum the four par 5 tees, or long drive can't measure). Optional: `DATABASE_URL=... npm run osm-import -- --code <code>` tries to prefill points from OpenStreetMap.
-3. Send `https://<your-app>/t/<code>` to the group chat. Everyone taps their name and adds it to their Home Screen.
-4. On Saturday, **Setup → Start round** when the first group is on the tee.
+2. Fill in the roster (nickname, Venmo handle, groom flag), drag players into teams, set tee times and set the pots.
+3. **Course:** Jack Frost National is mapped in OpenStreetMap, so in **Setup → Course** tap **Try OpenStreetMap import**: it fills in the tee and green points for you. Then check the four par 5 tee points on the satellite map (holes 4, 9, 12 and 18): long drive measures from them, so drag any that sit off the actual tee box. (From a terminal, `DATABASE_URL=... npm run osm-import -- --code <code>` does the same import.)
+4. Send `https://<your-app>/t/<code>` to the group chat. Everyone taps their name and adds it to their Home Screen.
+5. On Saturday, **Setup → Start round** when the first group is on the tee.
 
 ## Testing
 
@@ -112,7 +117,7 @@ Use a throwaway trip so you exercise exactly what Saturday uses. Check each box:
 - [ ] **Finalize + awards (1 min).** **Setup → Finalize round.** Check the Awards, open the gallery, download one photo and the zip, share the recap card.
 - [ ] **Reset.** Don't reuse the dry run for Saturday: create the real trip fresh (section 4 above) and open its link once so the Home Screen icon goes there. In **Settings → GPS simulator**, tap **Turn off** so your phone uses real GPS on Saturday.
 
-Short on time? **Try the demo** gives you a round already in progress; **Settings → Demo mode → Replay as full round** jumps straight to awards and settle-up.
+Short on time? **Try the demo** gives you a round already in progress; **Settings → Demo mode → Replay as full round** jumps straight to awards and settle-up. Demo trips never call the AI (unless the server sets `DEMO_AI=1`), so check the AI judge and roasts on your dry-run trip, not the demo.
 
 ## Day-of fallback
 
@@ -124,8 +129,11 @@ Short on time? **Try the demo** gives you a round already in progress; **Setting
 
 ## Verify on a real iPhone before Saturday
 
+Nothing below can be tested from a laptop or a simulator. Do it on your own iPhone against the deployed URL.
+
 - **Venmo deep link:** Pay with Venmo should open the Venmo app with recipient, amount and note prefilled. If it doesn't, the Money tab still shows the handle and amount with a copy button.
 - **Push notifications** only work in the Home Screen app on iOS 16.4 or later, after you allow them from a tap inside the app. Check that a lead change actually pings another phone.
+- **AI (if you set `ANTHROPIC_API_KEY`):** on the dry-run trip (not the demo), a closest-to-pin entry with a photo should get an "AI JUDGE" feed post within about 10 seconds, and a double bogey or worse should eventually draw a roast. Nothing showing up usually means the key is wrong or out of credit.
 - **Camera:** taking a photo from the drink, contest and post buttons works, and iPhone HEIC photos arrive as JPEGs (they're converted on the phone).
 - **GPS accuracy:** stand in an open area and Measure drive; it wants 12 m or better. Under trees or next to buildings it may need the 3-try weak-GPS fallback.
 - **Offline launch:** with airplane mode on, open the Home Screen app from cold. It should show the last state, not a Safari error page.
@@ -145,10 +153,13 @@ All of the game settings live in the trip's Setup and change without a redeploy.
 
 - **"Trip creation is locked: the server has no COMMISSIONER_PIN_HASH set."** Add `COMMISSIONER_PIN_HASH` in Vercel and redeploy.
 - **"The server's COMMISSIONER_PIN_HASH is mangled."** An old `scrypt$...` hash got eaten by a `.env` file. Run `npm run hash-pin -- <pin>` again and paste the new `scrypt:...` value.
-- **Wrong PIN, now "Easy, tiger."** Too many wrong PINs from one phone. Wait 10 minutes. You can change a trip's PIN in Setup → Settings.
+- **Wrong PIN, now "Easy, tiger."** Too many wrong PINs: 8 from one phone in 10 minutes (30 a day), or 30 in 10 minutes (100 a day) from everyone on the trip together. Wait it out. The phone you created the trip on, and any phone where you've unlocked before, is a trusted device: other people's wrong guesses never lock it out. You can change a trip's PIN in Setup → Settings; that also signs out every other phone that had commissioner powers.
+- **"Server misconfigured: DATABASE_URL is not set."** Add `DATABASE_URL` in Vercel and redeploy. (The local PGlite fallback can't run on Vercel.)
+- **"Server misconfigured: photo storage needs ..."** Add `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in Vercel and redeploy.
+- **"This trip is out of photo space."** Each trip takes up to 800 photos (4 MB each at most; phones send about 300 KB). Demo trips take 80.
 - **Server errors on every request / can't connect to the database.** Use the transaction pooler URL on port 6543, check the password (URL-encode special characters), and make sure the Supabase project isn't paused (free projects pause after a week of no use: open the dashboard to wake it).
 - **Live updates take ~20 seconds.** Realtime isn't connected, so phones are polling. Check all three Supabase variables, redeploy, and in Supabase **Project Settings → Realtime** make sure public channels are allowed. Scores still sync either way.
-- **Photos disappear or show as broken.** `SUPABASE_SERVICE_ROLE_KEY` is missing, so photos were saved on Vercel's temporary disk. Set it and redeploy (new photos will go to the `photos` bucket).
+- **Photos show as broken.** Check that `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are both set (without them Vercel refuses uploads, see above) and that the `photos` bucket in Supabase Storage is public. Redeploy after fixing; photos still queued on the phones upload on their next try.
 - **No push notifications.** The phone must use the Home Screen app (iOS 16.4+), have notifications allowed in iOS Settings, and not be muted in the app's Settings. Both VAPID keys must be set.
 - **No roasts or AI judge.** `ANTHROPIC_API_KEY` is missing, roasts are off in Setup → Settings, or the 40-roast cap is used up. AI failures are silent by design: check the Vercel function logs.
 - **The app looks out of date after a deploy.** The service worker serves the cached shell first. Close the app completely and reopen it.

@@ -4,15 +4,19 @@
 //   code of a real trip     → 403 (demo tools never touch real trips)
 //   unknown code            → 404
 // mode: "partial" (round live, teams on 15/12/7), "full" (all 18 + finalized), "setup" (not started).
-// Demo trips' commissioner PIN is 0000. Light per-process rate limit (429). After the response:
-// a Realtime "changed" broadcast (other phones on a reset demo refetch) and pruning of week-old demos.
+// Demo trips' commissioner PIN is 0000. Rate limits (429): a light per-process one per client, and
+// a global hourly cap in the database (this endpoint is public, and every demo writes ~100
+// transactions and a few photos). After the response: a Realtime "changed" broadcast (other phones
+// on a reset demo refetch) and pruning of demos older than 48 hours (rows and photos).
 import { after } from "next/server";
 import { clientKey, commissionerCookie } from "@/lib/server/auth";
 import { getDb } from "@/lib/server/db";
 import {
+  claimDemoSlot,
   createDemoTrip,
   DEMO_MODES,
   DemoError,
+  demoPinHash,
   demoRateLimit,
   isDemoMode,
   pruneDemoTrips,
@@ -54,12 +58,17 @@ export const POST = withErrors(async (request: Request) => {
     if (!code) return badRequest("That's not a trip code.");
   }
 
-  const wait = demoRateLimit(clientKey(request));
+  const client = clientKey(request);
+  const wait = demoRateLimit(client);
   if (wait > 0) {
     return errorJson(429, "Easy, tiger. That's a lot of fake golf. Try again in a minute.", { code: "throttled", retry_after: wait });
   }
-
   const db = getDb();
+  const globalWait = await claimDemoSlot(db, client);
+  if (globalWait > 0) {
+    return errorJson(429, "The demo course is slammed. Try again in a bit.", { code: "throttled", retry_after: globalWait });
+  }
+
   let result: DemoResult;
   try {
     result = code ? await resetDemoTrip(db, code, { mode }) : await createDemoTrip(db, { mode });
@@ -74,6 +83,6 @@ export const POST = withErrors(async (request: Request) => {
 
   return json(
     { code: result.code, trip_id: tripId, url: result.url, mode: result.mode },
-    { status: code ? 200 : 201, headers: { "Set-Cookie": commissionerCookie(request, tripId) } },
+    { status: code ? 200 : 201, headers: { "Set-Cookie": commissionerCookie(request, tripId, await demoPinHash()) } },
   );
 });

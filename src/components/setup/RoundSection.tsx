@@ -1,10 +1,13 @@
 "use client";
 // Round: pre-flight checklist and Start round (setup), the commissioner's live tools and
 // Finalize (live), Reopen (final). Start/finalize fire their own fanfare locally.
+import { useState } from "react";
 import { useClientState } from "@/lib/client/react";
-import { Button, Card, IconChevronRight, SectionHeader, cx, useConfirm, useFanfare, useToast } from "@/components/ui";
-import { CommissionerTools } from "@/components/setup/commish/CommissionerTools";
-import { liveTeams, livePlayers, membersByTeam, preflight, unfinishedTeams, type CheckItem, type SetupSection } from "./model";
+import { Button, Card, ConfirmSheet, IconChevronRight, SectionHeader, cx, useConfirm, useFanfare, useToast } from "@/components/ui";
+import { CommissionerTools, type ToolFocus } from "@/components/setup/commish/CommissionerTools";
+import { pendingRulings } from "@/components/setup/commish/commishModel";
+import { FinalizeSummary, finalizeIssueCount, type FinalizeFix, type FinalizeIssues } from "./FinalizeSummary";
+import { liveTeams, livePlayers, membersByTeam, preflight, scoreGaps, unfinishedTeams, type CheckItem, type SetupSection } from "./model";
 import { useSetupDispatch } from "./shared";
 
 const LEVEL_ICON: Record<CheckItem["level"], string> = { ok: "✅", warn: "⚠️", block: "⛔" };
@@ -118,41 +121,38 @@ function LiveRound() {
   const confirm = useConfirm();
   const fanfare = useFanfare();
   const toast = useToast();
+  const [finalizing, setFinalizing] = useState(false);
+  // Which Commissioner Tools panel to open (a Fix link in the finalize check); seq re-fires it.
+  const [focus, setFocus] = useState<ToolFocus | null>(null);
   if (!view) return null;
   const final = view.trip.status === "final";
   const unfinished = unfinishedTeams(view);
   const teams = liveTeams(view);
   const complete = teams.length - unfinished.length;
   const leader = derived?.leaderTeamIds.length ? derived.teamById[derived.leaderTeamIds[0]] : null;
+  const issues: FinalizeIssues = { unfinished, gaps: scoreGaps(view), rulings: derived ? pendingRulings(derived.contests) : [] };
+  const issueCount = finalizeIssueCount(issues);
+  const loose = [
+    issues.gaps.length > 0 ? `${issues.gaps.length} team${issues.gaps.length === 1 ? "" : "s"} missing a score` : null,
+    issues.rulings.length > 0 ? `${issues.rulings.length} ruling${issues.rulings.length === 1 ? "" : "s"} pending` : null,
+  ].filter((x): x is string => x !== null);
 
-  const finalize = async () => {
-    const ok = await confirm({
-      title: "Finalize the round?",
-      emoji: "🏁",
-      tone: "hazard",
-      confirmLabel: "Finalize it",
-      body: (
-        <span>
-          Pots lock, settle-up goes official and Awards unlock.
-          {unfinished.length > 0 ? (
-            <span className="mt-2 block text-left text-base">
-              <span className="block font-black text-flag">Still out there:</span>
-              {unfinished.map((u) => (
-                <span key={u.team.id} className="block">
-                  • {u.team.name}: {u.label}
-                </span>
-              ))}
-            </span>
-          ) : (
-            <span className="mt-2 block text-base text-fairway-dark">Every team tapped Round complete.</span>
-          )}
-        </span>
-      ),
-    });
-    if (!ok) return;
+  const finalize = () => {
+    setFinalizing(false);
     if (dispatch({ type: "trip.finalize" }, "Can't finalize")) {
       fanfare.show({ emoji: "🏁", title: "It's final", subtitle: "Pens down. Pay your debts. Awards are up.", tone: "hype", key: "round-finalized" });
     }
+  };
+
+  const fix = (f: FinalizeFix) => {
+    setFinalizing(false);
+    const next: Omit<ToolFocus, "seq"> =
+      f.kind === "round"
+        ? { tab: "rounds", teamId: f.teamId }
+        : f.kind === "score"
+          ? { tab: "scores", teamId: f.teamId, hole: f.hole }
+          : { tab: "contests", entryId: f.entryId };
+    setFocus((prev) => ({ ...next, seq: (prev?.seq ?? 0) + 1 }));
   };
 
   const reopen = async () => {
@@ -189,7 +189,7 @@ function LiveRound() {
         </p>
       </section>
 
-      <CommissionerTools />
+      <CommissionerTools focus={focus} />
 
       <Card tone={final ? "sand" : "hazard"} className="space-y-3">
         {final ? (
@@ -205,15 +205,36 @@ function LiveRound() {
             <p className="text-lg leading-tight font-black">When the last putt drops</p>
             <p className="text-[15px] font-bold">
               {unfinished.length === 0
-                ? "Every team is done. Lock it in."
+                ? issueCount === 0
+                  ? "Every team is done. Lock it in."
+                  : "Every team is done."
                 : `${unfinished.length} team${unfinished.length === 1 ? "" : "s"} still playing: ${unfinished.map((u) => u.team.name).join(", ")}.`}
+              {loose.length > 0 && <span className="block text-flag-dark">Before pots lock: {loose.join(", ")}.</span>}
             </p>
-            <Button variant="hazard" size="xl" full onClick={finalize} data-testid="finalize-round" leading={<span aria-hidden="true">🏁</span>}>
+            <Button
+              variant="hazard"
+              size="xl"
+              full
+              onClick={() => setFinalizing(true)}
+              data-testid="finalize-round"
+              leading={<span aria-hidden="true">🏁</span>}
+            >
               Finalize round
             </Button>
           </>
         )}
       </Card>
+
+      <ConfirmSheet
+        open={finalizing && !final}
+        title="Finalize the round?"
+        emoji="🏁"
+        tone="hazard"
+        confirmLabel={issueCount > 0 ? "Finalize anyway" : "Finalize it"}
+        body={<FinalizeSummary issues={issues} playerById={derived?.playerById ?? {}} onFix={fix} />}
+        onConfirm={finalize}
+        onCancel={() => setFinalizing(false)}
+      />
     </>
   );
 }

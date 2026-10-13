@@ -136,8 +136,30 @@ test.describe("leaderboard", () => {
     await expect(hole1).toContainText("AV"); // Ace Ventura's tee shot
     await expect(card.getByTestId("card-ghosts")).toContainText("1 ghost beer");
     await expect(card.getByTestId("card-sum-tot")).toContainText("-2");
+    await expect(card.getByTestId("card-banked")).toHaveCount(0);
     await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
     await expect(card).toHaveCount(0);
+
+    // A drink on Charlie's open, unscored hole 2 is "banked": a small marker under the name, not in
+    // Drk / Cred / Net until hole 2 has a score. The row still fits 360px.
+    await sync(page.request, s.code, [
+      op({ type: "tee.open", team_id: s.team.C, hole: 2 }, s.player.C1),
+      op(
+        { type: "drink.log", drink_id: randomUUID(), team_id: s.team.C, player_id: s.player.C2, hole: 2, drink_type: "drink", photo_path: null },
+        s.player.C1,
+      ),
+    ]);
+    const charlie = page.locator(`[data-testid="standings-row"][data-team-id="${s.team.C}"]`);
+    await expect(charlie.getByTestId("standings-banked")).toHaveText("+1 🍺 banked", { timeout: 20_000 });
+    await expect(charlie).toHaveAttribute("aria-label", /gross 4, 0 drinks, credit 0, net 4, net to par E, plus 1 banked drink \(-2\) on an unscored hole/);
+    await expect(rows.filter({ has: page.getByTestId("standings-banked") })).toHaveCount(1);
+    const banked = (await charlie.getByTestId("standings-banked").boundingBox())!;
+    expect(banked.x + banked.width).toBeLessThanOrEqual(360);
+    await expectNoHorizontalOverflow(page);
+    await charlie.click();
+    await expect(card.getByTestId("card-banked")).toContainText("+1 🍺 banked (−2)");
+    await expect(card.getByTestId("card-sum-tot")).toContainText("4");
+    await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
 
     // Sub-tabs.
     await page.getByRole("tab", { name: /^Drinkers/ }).click();

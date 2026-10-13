@@ -20,11 +20,15 @@ import { setAiClientForTests, type AiClient, type AiResponse } from "@/lib/serve
 import { setPushSenderForTests, type PushSender } from "@/lib/server/push";
 import {
   JUDGE_SYSTEM_PROMPT,
+  MAX_JUDGE_CALLS_PER_PLAYER_HOLE,
+  MAX_JUDGE_CALLS_PER_TRIP,
   ctpEntriesToJudge,
   imageMediaType,
   isSuspicious,
+  judgeEntries,
   judgeEntry,
   judgeHook,
+  judgeUploadedPhoto,
   parseJudgeVerdict,
   type JudgeDeps,
 } from "@/lib/server/judge";
@@ -34,6 +38,7 @@ import type { Op, OpType, SyncResponse } from "@/lib/ops";
 import type { ContestEntry, FeedEvent, Trip } from "@/lib/types";
 import type Anthropic from "@anthropic-ai/sdk";
 import { POST as syncRoute } from "@/app/api/t/[code]/sync/route";
+import { POST as uploadRoute } from "@/app/api/t/[code]/upload/route";
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -84,10 +89,10 @@ async function photo(s: Setup): Promise<string> {
   return p;
 }
 
-function submitOp(s: Setup, label: string, feet: number, photoPath: string | null, entryId = newId()) {
+function submitOp(s: Setup, label: string, feet: number, photoPath: string | null, entryId = newId(), hole = CTP_HOLE) {
   return mk("contest.submit", {
     entry_id: entryId,
-    hole: CTP_HOLE,
+    hole,
     player_id: s.player[label],
     contest_type: "ctp",
     distance_value: feet,
@@ -165,7 +170,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "AI_JUDGE_MODEL", "AI_FAST_MODEL"]) {
+  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "AI_JUDGE_MODEL", "AI_FAST_MODEL", "VERCEL"]) {
     vi.stubEnv(k, "");
   }
   vi.stubEnv("UPLOADS_DIR", uploads);
@@ -226,6 +231,12 @@ describe("verdict parsing and the suspicious rule", () => {
     const b = submitOp(s, "A1", 5, null);
     const ld = { ...submitOp(s, "A1", 250, "trips/x/ld/y.jpg"), contest_type: "ld" as const };
     expect(ctpEntriesToJudge([a, b, ld, mk("tee.open", { team_id: newId(), hole: 1 })])).toEqual([a.entry_id]);
+  });
+
+  it("keeps every photo submission of a big batch (no silent per-batch cap)", () => {
+    const s = { trip: { id: newId() }, player: { A1: newId() } } as unknown as Setup;
+    const ops = Array.from({ length: 8 }, (_, i) => submitOp(s, "A1", 5 + i, `trips/x/ctp/${i}.jpg`));
+    expect(ctpEntriesToJudge(ops)).toEqual(ops.map((o) => o.entry_id));
   });
 });
 
@@ -380,6 +391,172 @@ describe("judgeEntry", () => {
     expect(await judgeEntry(s.trip.id, junk, { ...deps, client: null })).toEqual({ status: "skipped", reason: "ai_off" });
     expect(await judgeEntry(s.trip.id, newId(), deps)).toEqual({ status: "skipped", reason: "no_entry" });
     expect(await feedOf(s, "ai_judge")).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cost caps, batches, photo reuse
+// ---------------------------------------------------------------------------
+
+const judgeCalls = () => calls.filter((c) => c.params.system === JUDGE_SYSTEM_PROMPT);
+
+describe("cost caps", () => {
+  it("stops at the per-trip cap: no AI call once the trip has used its judge budget", async () => {
+    const s = await setup();
+    const id = await submit(s, "A1", 10);
+    await db.query(
+      "insert into ai_log (trip_id, kind, meta) select $1::uuid, 'judge', '{}'::jsonb from generate_series(1, $2::int)",
+      [s.trip.id, MAX_JUDGE_CALLS_PER_TRIP],
+    );
+    expect(await judgeEntry(s.trip.id, id, deps)).toEqual({ status: "skipped", reason: "cap" });
+    expect(calls).toHaveLength(0);
+    expect(await feedOf(s, "ai_judge")).toHaveLength(0);
+  });
+
+  it("a player re-submitting fresh photos on one hole gets 3 judge calls, then no more (others still get judged)", async () => {
+    const s = await setup();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    judgeReply = () => text("No."); // the model refuses: every call still costs, and counts
+    for (let i = 0; i < MAX_JUDGE_CALLS_PER_PLAYER_HOLE; i++) {
+      const id = await submit(s, "A1", 10 + i);
+      expect(await judgeEntry(s.trip.id, id, deps)).toEqual({ status: "skipped", reason: "ai_failed" });
+    }
+    const again = await submit(s, "A1", 20);
+    expect(await judgeEntry(s.trip.id, again, deps)).toEqual({ status: "skipped", reason: "cap" });
+    expect(judgeCalls()).toHaveLength(MAX_JUDGE_CALLS_PER_PLAYER_HOLE);
+
+    judgeReply = verdict({ estimate_ft: 12, confidence: "high", suspicious: false, roast: "Fine." });
+    const teammate = await submit(s, "A2", 11);
+    expect(await judgeEntry(s.trip.id, teammate, deps)).toMatchObject({ status: "written", reused: false });
+    const log = await db.query<{ meta: Record<string, unknown> }>("select meta from ai_log where trip_id = $1 and kind = 'judge' order by created_at", [s.trip.id]);
+    expect(log.at(-1)!.meta).toMatchObject({ entry_id: teammate, player_id: s.player.A2, hole: CTP_HOLE });
+  });
+
+  it("never pays twice for one photo: a re-measure that kept its photo reuses the verdict, and a new lie still gets flagged", async () => {
+    const s = await setup();
+    await subscribeAll(s);
+    const shot = await photo(s);
+    const first = submitOp(s, "A1", 10, shot);
+    await applyOpsToTrip({ db, trip: s.trip, ops: [first], isCommissioner: false });
+    expect(await judgeEntry(s.trip.id, first.entry_id, deps)).toMatchObject({ status: "written", suspicious: false, estimate_ft: 12, reused: false });
+
+    // A straight re-measure on the same photo carries the verdict over in the reducer: nothing to do.
+    const remeasure = submitOp(s, "A1", 9, shot);
+    await applyOpsToTrip({ db, trip: s.trip, ops: [remeasure], isCommissioner: false });
+    expect(await judgeEntry(s.trip.id, remeasure.entry_id, deps)).toEqual({ status: "skipped", reason: "already_judged" });
+    // Pulled, then re-entered with the same photo and a new claim: 3 ft (the AI said ~12).
+    await applyOpsToTrip({ db, trip: s.trip, ops: [mk("contest.delete", { entry_id: remeasure.entry_id, by: s.player.A1 })], isCommissioner: false });
+    const edit = submitOp(s, "A1", 3, shot);
+    await applyOpsToTrip({ db, trip: s.trip, ops: [edit], isCommissioner: false });
+    expect((await entryOf(s, edit.entry_id)).ai_estimate_ft).toBeNull();
+    const res = await judgeEntry(s.trip.id, edit.entry_id, deps);
+    expect(res).toMatchObject({ status: "written", suspicious: true, estimate_ft: 12, confidence: "high", reused: true });
+    expect(judgeCalls()).toHaveLength(1);
+    expect(await entryOf(s, edit.entry_id)).toMatchObject({ ai_estimate_ft: 12, ai_confidence: "high", ai_suspicious: true, ai_roast: null });
+    const events = await feedOf(s, "ai_judge");
+    expect(events.map((e) => [e.payload.entry_id, e.payload.suspicious])).toEqual([
+      [first.entry_id, false],
+      [edit.entry_id, true],
+    ]);
+    expect(pushed.length).toBeGreaterThan(0); // the new flag is news
+  });
+
+  it("the same entry is never judged twice at once (upload route vs sync hook race)", async () => {
+    const s = await setup();
+    const id = await submit(s, "A1", 10);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    judgeReply = async () => {
+      await gate;
+      return verdict({ estimate_ft: 12, confidence: "high", suspicious: false, roast: "Fine." })();
+    };
+    const a = judgeEntry(s.trip.id, id, deps);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await judgeEntry(s.trip.id, id, deps)).toEqual({ status: "skipped", reason: "in_progress" });
+    release();
+    expect(await a).toMatchObject({ status: "written" });
+    expect(judgeCalls()).toHaveLength(1);
+  });
+});
+
+describe("batches", () => {
+  it("judges every photo entry of a batch flushed after a dead zone (8 entries on two holes)", async () => {
+    const s = await setup([4, 4]);
+    const ops: Op[] = [];
+    for (const hole of [CTP_HOLE, 8]) {
+      for (const label of ["A1", "A2", "B1", "B2"]) ops.push(submitOp(s, label, 5 + ops.length, await photo(s), newId(), hole));
+    }
+    const out = await applyOpsToTrip({ db, trip: s.trip, ops, isCommissioner: false });
+    expect(out.results.every((r) => r.status === "applied")).toBe(true);
+    const results = await judgeHook({ trip: out.snapshot.state.trip, events: out.events, ops: out.applied, results: out.results, state: out.snapshot.state }, deps);
+    expect(results.map((r) => r.status)).toEqual(Array(8).fill("written"));
+    const judged = new Set((await feedOf(s, "ai_judge")).map((e) => e.payload.entry_id));
+    expect(judged).toEqual(new Set(ops.map((o) => (o as OpOf<"contest.submit">).entry_id)));
+    expect(judgeCalls()).toHaveLength(8);
+  });
+
+  it("doesn't start new judgments past the time budget (they're logged, not hung)", async () => {
+    const s = await setup([4, 4]);
+    const ids = [await submit(s, "A1", 5), await submit(s, "A2", 6), await submit(s, "B1", 7)];
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    judgeReply = async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return verdict({ estimate_ft: 12, confidence: "high", suspicious: false, roast: "Fine." })();
+    };
+    const res = await judgeEntries(s.trip.id, ids, { ...deps, concurrency: 1, budgetMs: 30 });
+    expect(res.map((r) => (r.status === "skipped" ? r.reason : r.status))).toEqual(["written", "budget", "budget"]);
+  });
+});
+
+describe("a closest-to-pin photo that arrives after its entry", () => {
+  const uploadReq = (s: Setup, p: string) =>
+    uploadRoute(
+      new Request(`http://localhost:3000/api/t/${s.trip.code}/upload?path=${encodeURIComponent(p)}`, {
+        method: "POST",
+        headers: { "content-type": "image/jpeg" },
+        body: JPEG,
+      }),
+      { params: Promise.resolve({ code: s.trip.code }) },
+    );
+
+  it("gets judged from the upload route, after the response", async () => {
+    const s = await setup();
+    const p = `trips/${s.trip.id}/ctp/${newId()}.jpg`;
+    const op = submitOp(s, "A1", 4, p);
+    const out = await applyOpsToTrip({ db, trip: s.trip, ops: [op], isCommissioner: false });
+    // The sync hook ran first: no bytes yet.
+    expect(await judgeHook({ trip: s.trip, events: out.events, ops: out.applied, results: out.results, state: out.snapshot.state }, deps)).toEqual([
+      { status: "skipped", reason: "no_photo" },
+    ]);
+    expect(judgeCalls()).toHaveLength(0);
+
+    const res = await uploadReq(s, p);
+    expect(res.status).toBe(200);
+    expect(judgeCalls()).toHaveLength(0); // nothing before the response
+    expect(afterMock.tasks).toHaveLength(1);
+    const [outcome] = (await Promise.all(afterMock.tasks.splice(0).map((t) => t()))) as unknown[];
+    expect(outcome).toMatchObject({ status: "written" });
+    expect((await feedOf(s, "ai_judge")).map((e) => e.payload.entry_id)).toEqual([op.entry_id]);
+
+    // A retried upload of the same photo doesn't judge it again.
+    expect((await uploadReq(s, p)).status).toBe(200);
+    await Promise.all(afterMock.tasks.splice(0).map((t) => t()));
+    expect(judgeCalls()).toHaveLength(1);
+  });
+
+  it("only ctp photos, only for an active unjudged entry, never on a demo trip without DEMO_AI", async () => {
+    const s = await setup();
+    const drinkPhoto = `trips/${s.trip.id}/drinks/${newId()}.jpg`;
+    expect((await uploadReq(s, drinkPhoto)).status).toBe(200);
+    expect(afterMock.tasks).toHaveLength(0);
+    expect(await judgeUploadedPhoto(s.trip, `trips/${s.trip.id}/ctp/${newId()}.jpg`, deps)).toBeNull(); // no entry points at it
+    expect(await judgeUploadedPhoto(s.trip, drinkPhoto, deps)).toBeNull();
+
+    const p = await photo(s);
+    const op = submitOp(s, "A1", 4, p);
+    await applyOpsToTrip({ db, trip: s.trip, ops: [op], isCommissioner: false });
+    expect(await judgeUploadedPhoto({ ...s.trip, is_demo: true }, p, {})).toBeNull();
+    expect(judgeCalls()).toHaveLength(0);
   });
 });
 

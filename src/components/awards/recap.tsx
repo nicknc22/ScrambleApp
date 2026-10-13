@@ -121,7 +121,7 @@ export function buildRecapModel(state: TripState, d: Derived): RecapModel {
           : a.team_ids.map((id) => sanitizeOgText(d.teamById[id]?.name, 22) || "Team");
       return {
         title: sanitizeOgText(a.title, 28),
-        winners: a.awarded ? sanitizeOgText(who.join(" & "), 34) || "Somebody" : "Nobody",
+        winners: a.awarded ? sanitizeOgText(who.join(" & "), 48) || "Somebody" : "Nobody",
         value: a.awarded ? sanitizeOgText(a.value_label, 40) : "Boring.",
         awarded: a.awarded,
       };
@@ -144,6 +144,23 @@ const flex = (s: CSSProperties): CSSProperties => ({ display: "flex", ...s });
 /** Thick "bold" text (the only bundled font is Regular). */
 function bold(px: number): CSSProperties {
   return { WebkitTextStroke: `${px}px currentColor` } as CSSProperties;
+}
+
+/** Award winner line: shrink for long ties ("A & B & C") so they fit a tile; ellipsis past that. */
+export function awardWinnerSize(text: string): number {
+  if (text.length <= 26) return 28;
+  if (text.length <= 32) return 24;
+  return 20;
+}
+
+/** One line that ends in "…" instead of running into the tile border. */
+const oneLine: CSSProperties = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" };
+
+/** Champions line (uppercase): a tie of two long names steps down instead of running off the card. */
+function championSize(team: string): number {
+  if (team.length <= 18) return 52;
+  if (team.length <= 26) return 40;
+  return 32;
 }
 
 function tripNameSize(name: string): number {
@@ -237,7 +254,9 @@ export function RecapImage({ model }: { model: RecapModel }) {
         >
           <div style={flex({ flexDirection: "column", flexGrow: 1, minWidth: 0 })}>
             <div style={flex({ fontSize: 24, letterSpacing: 5, ...bold(0.8) })}>CHAMPIONS</div>
-            <div style={flex({ fontSize: 52, lineHeight: 1.05, textTransform: "uppercase", ...bold(2) })}>{model.champion.team}</div>
+            <div style={flex({ fontSize: championSize(model.champion.team), lineHeight: 1.05, textTransform: "uppercase", ...oneLine, ...bold(2) })}>
+              {model.champion.team}
+            </div>
           </div>
           <div style={flex({ flexDirection: "column", alignItems: "flex-end", marginLeft: 16 })}>
             <div style={flex({ fontSize: 64, lineHeight: 1, ...bold(2.5) })}>{model.champion.toPar}</div>
@@ -272,10 +291,8 @@ export function RecapImage({ model }: { model: RecapModel }) {
             <div style={flex({ width: 84, fontSize: teamSize + 6, ...bold(1.8) })}>{s.pos}</div>
             <div style={flex({ width: 14, height: rowH - 24, borderRadius: 7, backgroundColor: s.color, marginRight: 16 })} />
             <div style={flex({ flexDirection: "column", flexGrow: 1, minWidth: 0, overflow: "hidden" })}>
-              <div style={flex({ fontSize: teamSize, lineHeight: 1.05, whiteSpace: "nowrap", ...bold(1.2) })}>{s.team}</div>
-              {n <= 5 && s.members && (
-                <div style={flex({ fontSize: 20, color: MUTED, whiteSpace: "nowrap", marginTop: 2 })}>{s.members}</div>
-              )}
+              <div style={flex({ fontSize: teamSize, lineHeight: 1.05, ...oneLine, ...bold(1.2) })}>{s.team}</div>
+              {n <= 5 && s.members && <div style={flex({ fontSize: 20, color: MUTED, marginTop: 2, ...oneLine })}>{s.members}</div>}
             </div>
             <div style={flex({ flexDirection: "column", alignItems: "flex-end", marginLeft: 12 })}>
               <div style={flex({ fontSize: teamSize + 6, lineHeight: 1, color: FAIRWAY_DARK, ...bold(1.8) })}>{s.toPar}</div>
@@ -308,8 +325,8 @@ export function RecapImage({ model }: { model: RecapModel }) {
             <div style={flex({ fontSize: 18, letterSpacing: 2, color: FAIRWAY_DARK, textTransform: "uppercase", ...bold(0.5) })}>
               {a.title}
             </div>
-            <div style={flex({ fontSize: 28, lineHeight: 1.1, whiteSpace: "nowrap", ...bold(1) })}>{a.winners}</div>
-            <div style={flex({ fontSize: 19, color: MUTED, whiteSpace: "nowrap" })}>{a.value}</div>
+            <div style={flex({ fontSize: awardWinnerSize(a.winners), lineHeight: 1.1, ...oneLine, ...bold(1) })}>{a.winners}</div>
+            <div style={flex({ fontSize: 19, color: MUTED, ...oneLine })}>{a.value}</div>
           </div>
         ))}
       </div>

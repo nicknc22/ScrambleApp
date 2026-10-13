@@ -20,10 +20,10 @@ import {
 import { InstallGuide } from "@/components/join/InstallGuide";
 import { CommissionerUnlock } from "./CommissionerUnlock";
 import { DemoTools } from "./DemoTools";
-import { GpsSimulator } from "./GpsSimulator";
+import { GpsSimulator, useGpsSimAllowed } from "./GpsSimulator";
 import { teamOfPlayer } from "./roster";
 
-/** Settings: switch player, notifications, commissioner PIN, install help, dev GPS, version. */
+/** Settings: switch player, notifications, commissioner PIN, install help, dev GPS (commissioner/demo/dev builds), version. */
 export function SettingsSheet({ open, onClose, onSwitchPlayer }: { open: boolean; onClose: () => void; onSwitchPlayer: () => void }) {
   return (
     <BottomSheet open={open} onClose={onClose} title="Settings" size="tall">
@@ -96,11 +96,19 @@ function SettingsBody({ onSwitchPlayer }: { onSwitchPlayer: () => void }) {
   };
 
   // ----- dev mode (tap the version 7 times) -----
+  // The GPS simulator fakes long drives, so on a real trip in production only the commissioner
+  // gets it (demo trips and dev builds: everyone).
+  const simAllowed = useGpsSimAllowed() === true;
   const [dev, setDev] = useState(() => isDevMode());
   const taps = useRef(0);
   const tapVersion = () => {
     taps.current += 1;
-    if (taps.current >= 7 && !dev) {
+    if (taps.current < 7) return;
+    if (!simAllowed) {
+      if (taps.current === 7) toast.roast("The GPS simulator is commissioner-only on a real trip. Hit the ball farther.");
+      return;
+    }
+    if (!dev) {
       writePref(DEV_KEY, "1");
       setDev(true);
       toast.info("Dev mode on. GPS simulator unlocked.", { emoji: "🧪" });
@@ -187,7 +195,7 @@ function SettingsBody({ onSwitchPlayer }: { onSwitchPlayer: () => void }) {
         <InstallGuide compact />
       </Section>
 
-      {dev && view && (
+      {dev && view && simAllowed && (
         <Section title="GPS simulator (dev)">
           <GpsSimulator holes={view.holes} />
         </Section>

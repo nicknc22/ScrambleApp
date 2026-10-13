@@ -1,5 +1,6 @@
 "use client";
 import type { ReactNode } from "react";
+import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
 import { Button } from "./Button";
 import { cx } from "./cx";
 import { IconBackspace } from "./icons";
@@ -26,8 +27,8 @@ export function PinPad({
   value,
   onChange,
   onSubmit,
-  minLength = 4,
-  maxLength = 8,
+  minLength = PIN_MIN_LENGTH,
+  maxLength = PIN_MAX_LENGTH,
   error,
   busy = false,
   submitLabel = "Unlock",
@@ -46,6 +47,8 @@ export function PinPad({
     if (canSubmit) onSubmit?.(value);
   };
   const slots = Math.min(maxLength, Math.max(minLength, value.length + (value.length < maxLength ? 1 : 0)));
+  // Up to 12 dots must fit a 360px phone (328px inside the gutters): smaller dots past 8.
+  const compact = slots > 8;
 
   return (
     <div
@@ -68,7 +71,7 @@ export function PinPad({
       {label && <div className="text-sm font-extrabold uppercase tracking-widest text-muted">{label}</div>}
       <div
         key={error ? `err-${String(value.length)}` : "ok"}
-        className={cx("flex h-6 items-center gap-3", error ? "animate-shake" : null)}
+        className={cx("flex h-6 items-center", compact ? "gap-2" : "gap-3", error ? "animate-shake" : null)}
         aria-live="polite"
         aria-label={`${value.length} digits entered`}
       >
@@ -76,7 +79,7 @@ export function PinPad({
           <span
             key={i}
             className={cx(
-              "h-5 w-5 rounded-full border-[3px]",
+              compact ? "h-4 w-4 rounded-full border-2" : "h-5 w-5 rounded-full border-[3px]",
               error ? "border-flag" : "border-ink",
               i < value.length && (error ? "bg-flag" : "bg-ink"),
             )}

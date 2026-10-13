@@ -335,10 +335,17 @@ test("drink undo: one compact toast per burst that never covers a drink button (
   await expect(page.getByText("4 drinks logged", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo", exact: true })).toHaveCount(1);
   expect(await coveredButtons()).toEqual([]);
-  // The toast sits on the action bar, not above it.
-  const toastBox = await page.getByText("4 drinks logged", { exact: true }).boundingBox();
+  // The toast sits over the tab bar: Save and On the tee stay tappable too.
+  const toastBox = await page.getByRole("status").filter({ hasText: "4 drinks logged" }).boundingBox();
   const barBox = await page.getByTestId("play-action-bar").boundingBox();
-  expect(toastBox!.y).toBeGreaterThanOrEqual(barBox!.y);
+  expect(toastBox!.y).toBeGreaterThanOrEqual(barBox!.y + barBox!.height - 8);
+  for (const id of ["save-score", "next-hole"]) {
+    const hit = await page.getByTestId(id).evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      return el.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+    });
+    expect(hit, `${id} is tappable under the undo toast`).toBe(true);
+  }
   for (const row of await page.getByTestId("drink-row").all()) await expect(row.getByTestId("drink-count")).toHaveText("1");
   await expectNoHorizontalOverflow(page);
 

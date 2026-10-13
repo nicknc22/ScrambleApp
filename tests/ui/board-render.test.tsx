@@ -31,6 +31,18 @@ describe("StandingsTable", () => {
     expect(html).toContain(`data-team-id="${f.team.C}" data-pos="3" data-mine="true"`);
     expect(html).toContain("Team B, position T1, thru 1, gross 4, 1 drinks, credit -1, net 3, net to par -1");
     expect(html).toContain("Team C (your team)");
+    expect(html).not.toContain('data-testid="standings-banked"');
+  });
+
+  it("drinks on a hole without a score show as a small banked marker, not in the net", () => {
+    const f = played();
+    f.teeOff("C", 2);
+    f.drink("C", "C1", 2);
+    const d = derive(f.state);
+    const html = renderToStaticMarkup(<StandingsTable standings={d.standings} teamById={d.teamById} myTeamId={null} onOpenTeam={() => {}} />);
+    expect(html.match(/data-testid="standings-banked"/g)).toHaveLength(1);
+    expect(html).toContain("+1 🍺 banked");
+    expect(html).toContain("Team C, position 3, thru 1, gross 4, 0 drinks, credit 0, net 4, net to par E, plus 1 banked drink (-1) on an unscored hole");
   });
 });
 

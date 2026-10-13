@@ -35,7 +35,7 @@ import { applyOpsToTrip } from "./apply";
 import { hashPin } from "./auth";
 import { pgErrorCode, UNIQUE_VIOLATION, type Db } from "./db";
 import { deleteTrip, findTripByCode, insertTrip, persistWrites } from "./repo";
-import { putPhoto, type PhotoKind } from "./storage";
+import { putPhoto, removeTripPhotos, type PhotoKind } from "./storage";
 import { DEFAULT_APP_NAME, normalizeCode, seedHoles } from "./trips";
 
 export type DemoMode = "partial" | "full" | "setup";
@@ -926,7 +926,7 @@ function scheduleReactions(p: Planner, ev: FeedEvent, t: number, endLimit: numbe
 
 /** The PIN hash shared by demo trips (scrypt once per process). */
 let demoPinHashP: Promise<string> | null = null;
-function demoPinHash(): Promise<string> {
+export function demoPinHash(): Promise<string> {
   if (!demoPinHashP) {
     demoPinHashP = hashPin(DEMO_PIN);
     demoPinHashP.catch(() => {
@@ -1077,6 +1077,7 @@ export async function createDemoTrip(db: Db, opts: DemoOptions): Promise<DemoRes
   } catch (e) {
     // Don't leave a half-simulated demo behind (the caller can simply try again).
     await deleteTrip(db, trip.id).catch(() => {});
+    await removeTripPhotos(trip.id);
     throw e;
   }
   return { trip: sim.trip, code, url: `/t/${code}`, mode, stats: { ...sim.stats, ms: Date.now() - started } };
@@ -1100,22 +1101,58 @@ export async function resetDemoTrip(db: Db, rawCode: string, opts: Omit<DemoOpti
     if (!found) throw new DemoError("No demo trip with that code.", 404, "not_found");
     if (!found.trip.is_demo) throw new DemoError("That's a real trip. Demo tools don't touch real trips.", 403, "not_demo");
     await deleteTrip(db, found.trip.id);
+    // Same code → same trip id: clear its old photos (uploads included) before re-seeding.
+    await removeTripPhotos(found.trip.id);
     return await createDemoTrip(db, { ...opts, code });
   } finally {
     resetting.delete(code);
   }
 }
 
-/** Delete demo trips created more than `maxAgeMs` ago (default 7 days). Real trips are never touched. */
+/** Demo trips older than this are deleted (with their photos) when new demos get created. */
+export const DEMO_MAX_AGE_MS = 48 * 60 * MIN;
+
+/**
+ * Delete demo trips created more than `maxAgeMs` ago (default 48 h) and their stored photos.
+ * Real trips are never touched. Returns how many trips went.
+ */
 export async function pruneDemoTrips(db: Db, opts: { maxAgeMs?: number; limit?: number; now?: Date } = {}): Promise<number> {
-  const cutoff = new Date((opts.now ?? new Date()).getTime() - (opts.maxAgeMs ?? 7 * 24 * 60 * MIN));
+  const cutoff = new Date((opts.now ?? new Date()).getTime() - (opts.maxAgeMs ?? DEMO_MAX_AGE_MS));
   const rows = await db.query<{ id: string }>(
     `delete from trips where id in (
        select id from trips where is_demo = true and created_at < $1 order by created_at limit $2
      ) and is_demo = true returning id`,
     [cutoff.toISOString(), Math.max(1, Math.min(opts.limit ?? 20, 200))],
   );
+  for (const r of rows) await removeTripPhotos(r.id);
   return rows.length;
+}
+
+// ---------------------------------------------------------------------------
+// Global cap on demo creates/resets (in the database: holds across serverless instances)
+// ---------------------------------------------------------------------------
+
+/** Demo creates + resets per hour, from everyone together ("Try the demo" is public). */
+export const DEMO_CREATES_PER_HOUR = 30;
+const HOUR_MS = 60 * MIN;
+
+/**
+ * Count one demo create/reset against the hourly cap: 0 when allowed (and recorded), else the
+ * seconds until a slot frees up (nothing recorded).
+ */
+export async function claimDemoSlot(db: Db, client: string, now: Date = new Date()): Promise<number> {
+  const since = new Date(now.getTime() - HOUR_MS).toISOString();
+  const recent = await db.query<{ created_at: string }>(
+    "select created_at from demo_creations where created_at > $1 order by created_at desc limit $2",
+    [since, DEMO_CREATES_PER_HOUR],
+  );
+  if (recent.length >= DEMO_CREATES_PER_HOUR) {
+    const edge = Date.parse(recent[DEMO_CREATES_PER_HOUR - 1].created_at);
+    return Math.max(1, Math.ceil((edge + HOUR_MS - now.getTime()) / 1000));
+  }
+  await db.query("insert into demo_creations (client, created_at) values ($1, $2)", [client.slice(0, 100), now.toISOString()]);
+  await db.query("delete from demo_creations where created_at < $1", [new Date(now.getTime() - 24 * HOUR_MS).toISOString()]);
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

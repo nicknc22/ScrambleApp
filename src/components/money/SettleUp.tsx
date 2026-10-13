@@ -1,5 +1,8 @@
-// Settle-up: "A pays B $X" cards. When final and the payee has a Venmo handle: a Pay with Venmo
-// deep link, an https fallback and copy buttons. Presentational; copying is a callback.
+// Settle-up: "A pays B $X" cards. When final and the payee has a Venmo handle, MY payments get a
+// Pay with Venmo deep link, an https fallback and copy buttons. Everyone else's payments (and the
+// ones paying me) show the amount and a copy button for the payee's handle: never a prefilled pay
+// link, so a drunk mis-tap can't pay someone else's debt (or "pay" yourself).
+// Presentational; copying is a callback.
 import type { Player, UUID } from "@/lib/types";
 import type { Derived, Payment } from "@/lib/engine/types";
 import { formatCents } from "@/lib/engine/format";
@@ -128,7 +131,7 @@ export function PaymentCard({
     );
   }
 
-  // Everyone else's payment: one compact row plus a slim Venmo link.
+  // Everyone else's payment, or one paying me: one compact row plus the payee's handle to copy.
   return (
     <li
       data-testid="payment"
@@ -146,16 +149,22 @@ export function PaymentCard({
         <span className="num shrink-0 text-2xl leading-none font-black text-ink">{amount}</span>
       </div>
       {final && links && (
-        <a
-          href={links.app}
-          data-testid="venmo-pay"
-          className="btn mt-2 w-full border-sky bg-sky-soft text-[15px] text-sky-dark active:bg-sky-soft/60"
-        >
-          <span aria-hidden="true">💸</span>
-          <span className="min-w-0 truncate">Venmo {venmoAt(links.handle)}</span>
-        </a>
+        <div className="mt-2 flex" data-testid="venmo-handle">
+          <CopyButton text={venmoAt(links.handle)} what={iGet ? "your Venmo" : `${displayName(to)}'s Venmo`} label={venmoAt(links.handle)} onCopy={onCopy} />
+        </div>
       )}
-      {final && !links && <div className="mt-2 rounded-xl bg-sand px-3 py-2">{noVenmo}</div>}
+      {final && !links && (
+        <div className="mt-2 rounded-xl bg-sand px-3 py-2">
+          {iGet ? (
+            <p className="text-[15px] leading-snug font-bold text-ink">
+              {rawHandle ? <>&ldquo;{rawHandle}&rdquo; isn&apos;t a Venmo username.</> : <>No Venmo on file for you.</>} Tell{" "}
+              {displayName(from)} where to send it, or ask the commissioner to add it.
+            </p>
+          ) : (
+            noVenmo
+          )}
+        </div>
+      )}
     </li>
   );
 }

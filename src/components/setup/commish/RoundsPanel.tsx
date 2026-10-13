@@ -9,10 +9,10 @@ import { useCommishDispatch } from "./shared";
 
 const STATUS_LABEL: Record<RoundStatus, string> = { not_started: "Not started", playing: "Playing", complete: "Complete" };
 
-export function RoundsPanel() {
+export function RoundsPanel({ focusTeamId }: { focusTeamId?: string } = {}) {
   const derived = useClientState((s) => s.derived);
   const view = useClientState((s) => s.view);
-  const [fixing, setFixing] = useState<string | null>(null);
+  const [fixing, setFixing] = useState<string | null>(focusTeamId ?? null);
   if (!derived || !view) return null;
   const team = fixing ? (derived.teamById[fixing] ?? null) : null;
 

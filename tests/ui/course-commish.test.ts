@@ -1,8 +1,14 @@
 // Commissioner tools view-model: review queue, drink list, drive-minimum flags, round fixes.
 import { describe, expect, it } from "vitest";
-import { makeTrip } from "../fixtures";
+import { at, makeTrip, type TripFixture } from "../fixtures";
 import { derive } from "@/lib/engine";
+import { applyOp } from "@/lib/reducer";
+import type { Op, OpInput } from "@/lib/ops";
+import type { TripState } from "@/lib/types";
 import {
+  addDrinkInput,
+  addEntryInput,
+  defaultAddHole,
   driveFlags,
   drinkRows,
   feetFromParts,
@@ -134,5 +140,141 @@ describe("round state fixes", () => {
     expect(sameRound({ status: "playing", open_hole: 7 }, { status: "playing", open_hole: 7 })).toBe(true);
     expect(sameRound({ status: "playing", open_hole: 7 }, { status: "playing", open_hole: 8 })).toBe(false);
     expect(sameRound(null, { status: "not_started", open_hole: 3 })).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Day-of fallback: the commissioner adds a missed drink or contest entry
+// (finding speccheck/commish-cant-add-missed-drink)
+// ---------------------------------------------------------------------------
+
+let n = 0;
+const uuid = () => `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+
+/** Dispatch like the store does: id/at/by filled in, the commissioner's phone (on team A). */
+function commish(f: TripFixture, state: TripState, input: OpInput, min = 400, side: "client" | "server" = "client") {
+  const op = { ...input, id: uuid(), at: at(min), by: f.player.A1 } as Op;
+  return applyOp(state, op, { now: at(min), is_commissioner: true, side });
+}
+
+describe("commissioner adds a drink", () => {
+  it("builds a drink.log with as_commissioner, or null until team, player and hole are picked", () => {
+    expect(addDrinkInput({ teamId: "t", playerId: null, hole: 3, type: "drink" }, "d")).toBeNull();
+    expect(addDrinkInput({ teamId: "t", playerId: "p", hole: 19, type: "drink" }, "d")).toBeNull();
+    expect(addDrinkInput({ teamId: "t", playerId: "p", hole: 18, type: "shot" }, "d")).toEqual({
+      type: "drink.log",
+      drink_id: "d",
+      team_id: "t",
+      player_id: "p",
+      hole: 18,
+      drink_type: "shot",
+      photo_path: null,
+      as_commissioner: true,
+    });
+    expect(defaultAddHole(null)).toBe(1);
+    expect(defaultAddHole({ status: "playing", open_hole: 12 })).toBe(12);
+    expect(defaultAddHole({ status: "complete", open_hole: 18 })).toBe(18);
+  });
+
+  it("lands on hole 18 after the team tapped Round complete (a player's phone can't)", () => {
+    const f = makeTrip({ teams: [4, 4], status: "live" });
+    for (let h = 1; h <= 18; h++) f.teeOff("B", h, h * 10);
+    f.score("B", 18, 5);
+    f.complete("B", 200);
+    const drinkId = uuid();
+    const input = addDrinkInput({ teamId: f.team.B, playerId: f.player.B2, hole: 18, type: "shotgun" }, drinkId)!;
+    // A plain player dispatch is refused: the window is shut.
+    const asPlayer = applyOp(f.state, { ...input, as_commissioner: undefined, id: uuid(), at: at(400), by: f.player.B1 } as Op, {
+      now: at(400),
+      is_commissioner: false,
+      side: "client",
+    });
+    expect(asPlayer).toMatchObject({ ok: false, code: "no_window" });
+    for (const side of ["client", "server"] as const) {
+      const r = commish(f, f.state, input, 400, side);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = derive(r.state);
+      expect(d.drinkValues[drinkId]).toMatchObject({ hole: 18, player_id: f.player.B2, value: 1 });
+      expect(d.teamHoles[f.team.B].find((l) => l.hole === 18)).toMatchObject({ drinks: 1, credit: 1, net: 4 });
+    }
+  });
+
+  it("back-fills an earlier hole for another team and the credit stays on that hole", () => {
+    const f = makeTrip({ teams: [4, 4], status: "live" });
+    for (let h = 1; h <= 12; h++) {
+      f.teeOff("B", h, h * 10);
+      if (h < 12) f.score("B", h, 4);
+    }
+    const drinkId = uuid();
+    const r = commish(f, f.state, addDrinkInput({ teamId: f.team.B, playerId: f.player.B3, hole: 5, type: "drink" }, drinkId)!);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = derive(r.state);
+    expect(d.drinkValues[drinkId].hole).toBe(5);
+    expect(d.teamHoles[f.team.B].find((l) => l.hole === 5)).toMatchObject({ drinks: 1, net: 3 });
+    expect(d.teamHoles[f.team.B].find((l) => l.hole === 12)!.drinks).toBe(0);
+  });
+
+  it("works on a final trip (a fix after the fact)", () => {
+    const f = makeTrip({ teams: [2, 2], status: "final" });
+    f.teeOff("A", 1, 1);
+    f.complete("A", 5);
+    const r = commish(f, f.state, addDrinkInput({ teamId: f.team.A, playerId: f.player.A2, hole: 1, type: "drink" }, uuid())!);
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("commissioner adds a contest entry", () => {
+  it("builds a contest.submit with a typed distance, no GPS and no photo", () => {
+    expect(addEntryInput({ hole: 3, type: "ctp", playerId: "p", distance: null }, "e")).toBeNull();
+    expect(addEntryInput({ hole: 3, type: "ctp", playerId: null, distance: 4 }, "e")).toBeNull();
+    expect(addEntryInput({ hole: 4, type: "ld", playerId: "p", distance: 287 }, "e")).toEqual({
+      type: "contest.submit",
+      entry_id: "e",
+      hole: 4,
+      player_id: "p",
+      contest_type: "ld",
+      distance_value: 287,
+      angle_deg: null,
+      lat: null,
+      lng: null,
+      gps_accuracy_m: null,
+      low_accuracy: false,
+      photo_path: null,
+      as_commissioner: true,
+    });
+  });
+
+  it("enters a CTP for a player on another team; it counts and wins the hole", () => {
+    const f = makeTrip({ teams: [2, 2], status: "live" });
+    f.entry({ hole: 3, player_id: f.player.A2, type: "ctp", distance_value: 9 });
+    const entryId = uuid();
+    // The commissioner is A1 (team A); B1 is on team B. A player can't enter for another team.
+    const input = addEntryInput({ hole: 3, type: "ctp", playerId: f.player.B1, distance: 4.5 }, entryId)!;
+    const asPlayer = applyOp(f.state, { ...input, as_commissioner: undefined, id: uuid(), at: at(50), by: f.player.A1 } as Op, {
+      now: at(50),
+      is_commissioner: false,
+      side: "client",
+    });
+    expect(asPlayer).toMatchObject({ ok: false, code: "forbidden" });
+    const r = commish(f, f.state, input, 50);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const hole3 = derive(r.state).contests.find((c) => c.hole === 3)!;
+    expect(hole3.leader_ids).toEqual([f.player.B1]);
+    expect(hole3.entries[0]).toMatchObject({ valid: true, distance: 4.5, rank: 1, team_id: f.team.B });
+  });
+
+  it("enters a long drive by hand after the hole closed (measuring is over for players)", () => {
+    const f = makeTrip({ teams: [2, 2], status: "live" });
+    for (const t of ["A", "B"]) for (let h = 1; h <= 6; h++) f.teeOff(t, h, h);
+    const entryId = uuid();
+    const r = commish(f, f.state, addEntryInput({ hole: 4, type: "ld", playerId: f.player.B2, distance: 265 }, entryId)!);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const hole4 = derive(r.state).contests.find((c) => c.hole === 4)!;
+    expect(hole4.closed).toBe(true);
+    expect(hole4.entries.map((v) => [v.player_id, v.distance, v.valid])).toEqual([[f.player.B2, 265, true]]);
   });
 });

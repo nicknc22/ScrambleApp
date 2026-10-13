@@ -1,6 +1,8 @@
 "use client";
 // The live team table: Pos, Team, Thru, Gross, Drinks, Credit, Net, To par. Every column fits at
 // 360px (compact tabular numbers, short headers, team names clamp). Tap a row for the team card.
+// Drk / Cred / Net count scored holes only; drinks on a hole without a score yet show as a small
+// "+1 🍺 banked" line under the team name (they join the net once the hole is scored).
 import { useEffect, useRef, useState } from "react";
 import type { Team, UUID } from "@/lib/types";
 import type { StandingRow } from "@/lib/engine/types";
@@ -92,6 +94,7 @@ function StandingLine({ row: r, team, moved, onOpen }: { row: StandingView; team
     `credit ${r.credit}`,
     `net ${r.net}`,
     `net to par ${r.to_par}`,
+    ...(r.banked_drinks > 0 ? [`plus ${r.banked_drinks} banked ${r.banked_drinks === 1 ? "drink" : "drinks"} (-${r.banked_credit}) on an unscored hole`] : []),
   ].join(", ");
   return (
     <li data-flip={r.team_id} className="border-t-2 border-line first:border-t-0">
@@ -123,7 +126,7 @@ function StandingLine({ row: r, team, moved, onOpen }: { row: StandingView; team
             </span>
           )}
         </span>
-        <span className="flex min-w-0 items-center gap-1 pl-1">
+        <span className="flex min-w-0 flex-col items-start justify-center gap-0.5 pl-1">
           <span
             className={cx(
               "line-clamp-2 min-w-0 text-[14px] leading-[1.1] break-words min-[380px]:text-[15px]",
@@ -133,6 +136,14 @@ function StandingLine({ row: r, team, moved, onOpen }: { row: StandingView; team
             {r.mine && <span aria-hidden="true">★ </span>}
             {name}
           </span>
+          {r.banked && (
+            <span
+              className="num max-w-full truncate rounded-full bg-beer-soft px-1.5 text-[11px] leading-[1.35] font-black text-beer-dark"
+              data-testid="standings-banked"
+            >
+              {r.banked}
+            </span>
+          )}
         </span>
         <span className="num text-center text-[14px] font-bold">{r.thru_label}</span>
         <span className="num text-right text-[14px] font-bold">{r.gross}</span>

@@ -1,23 +1,119 @@
 "use client";
-// Dev-only GPS simulator: fake a position anywhere on the course to test long drive.
-import { useState } from "react";
+// Dev GPS simulator: fake a position anywhere on the course to test long drive. Only for the
+// commissioner (the README dry run on the real URL), demo trips, and non-production builds: a
+// player on a real trip must not be able to fake a money drive. A simulation the current viewer
+// isn't allowed (say, a leftover from the demo) is cleared on sight, and while one is active the
+// trip header shows a loud SIMULATED GPS strip (GpsSimBanner).
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { Hole } from "@/lib/types";
-import { getGpsSimulation, setGpsSimulation, type GpsSimulation } from "@/lib/client/geo";
+import { GPS_SIM_KEY, getGpsSimulation, setGpsSimulation, type GpsSimulation } from "@/lib/client/geo";
+import { readItem, type StorageLike } from "@/lib/client/identity";
+import { useClientState } from "@/lib/client/react";
 import { Button, TextField, useToast } from "@/components/ui";
 import { pointFromTee } from "./geoMath";
 
+const SIM_EVENT = "scramble:gps-sim-change";
+
+/** Who may fake GPS: the commissioner, anyone on a demo trip, anyone on a non-production build. */
+export function gpsSimAllowed({
+  isCommissioner,
+  isDemo,
+  production = process.env.NODE_ENV === "production",
+}: {
+  isCommissioner: boolean;
+  isDemo: boolean;
+  production?: boolean;
+}): boolean {
+  return !production || isCommissioner || isDemo;
+}
+
+/** Store (or clear) the simulation and tell every banner on the page. */
+export function writeGpsSimulation(sim: GpsSimulation | null, storage?: StorageLike | null): void {
+  if (storage === undefined) setGpsSimulation(sim);
+  else setGpsSimulation(sim, storage);
+  try {
+    window.dispatchEvent(new Event(SIM_EVENT));
+  } catch {
+    /* no window (tests) */
+  }
+}
+
+/** The simulation in effect for this viewer: a stored one they aren't allowed is cleared. */
+export function enforceGpsSimulation(allowed: boolean, storage?: StorageLike | null): GpsSimulation | null {
+  const sim = storage === undefined ? getGpsSimulation() : getGpsSimulation(storage);
+  if (sim && !allowed) {
+    writeGpsSimulation(null, storage);
+    return null;
+  }
+  return sim;
+}
+
+function subscribeSim(onChange: () => void): () => void {
+  window.addEventListener(SIM_EVENT, onChange);
+  window.addEventListener("storage", onChange);
+  return () => {
+    window.removeEventListener(SIM_EVENT, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+
+/** The stored simulation, live (this tab's writes and other tabs'). */
+export function useGpsSimulation(): GpsSimulation | null {
+  const raw = useSyncExternalStore(subscribeSim, () => readItem(GPS_SIM_KEY), () => null);
+  return useMemo(() => (raw ? getGpsSimulation() : null), [raw]);
+}
+
+/** May this viewer use the simulator on this trip? null until the trip has loaded. */
+export function useGpsSimAllowed(): boolean | null {
+  const isCommissioner = useClientState((s) => s.isCommissioner);
+  const isDemo = useClientState((s) => (s.view ? s.view.trip.is_demo === true : null));
+  return isDemo === null ? null : gpsSimAllowed({ isCommissioner, isDemo });
+}
+
+/** Loud strip for the trip header while a simulated position is active. Clears one this viewer isn't allowed. */
+export function GpsSimBanner() {
+  const allowed = useGpsSimAllowed();
+  const sim = useGpsSimulation();
+  useEffect(() => {
+    if (allowed === false && sim) enforceGpsSimulation(false);
+  }, [allowed, sim]);
+  if (!allowed || !sim) return null;
+  return <GpsSimStrip onOff={() => writeGpsSimulation(null)} />;
+}
+
+export function GpsSimStrip({ onOff }: { onOff: () => void }) {
+  return (
+    <div
+      role="alert"
+      data-testid="gps-sim-banner"
+      className="flex items-center gap-2 border-t-2 border-ink bg-flag py-1 pr-1 pl-[max(12px,env(safe-area-inset-left))] text-white"
+    >
+      <span className="text-2xl leading-none" aria-hidden="true">
+        🛰️
+      </span>
+      <span className="min-w-0 flex-1 leading-tight">
+        <span className="block text-[15px] font-black tracking-wide uppercase">Simulated GPS</span>
+        <span className="block text-xs font-bold">Long drives on this phone use a fake position.</span>
+      </span>
+      <button type="button" onClick={onOff} className="btn shrink-0 border-ink bg-paper px-3 text-[15px] text-ink active:bg-sand">
+        Turn off
+      </button>
+    </div>
+  );
+}
+
 export function GpsSimulator({ holes }: { holes: Hole[] }) {
   const toast = useToast();
-  const [sim, setSim] = useState<GpsSimulation | null>(() => getGpsSimulation());
-  const [lat, setLat] = useState(() => (sim ? String(sim.lat) : ""));
-  const [lng, setLng] = useState(() => (sim ? String(sim.lng) : ""));
+  // Live: the header strip's Turn off (or another tab) can change it underneath us.
+  const sim = useGpsSimulation();
+  const [lat, setLat] = useState(() => String(getGpsSimulation()?.lat ?? ""));
+  const [lng, setLng] = useState(() => String(getGpsSimulation()?.lng ?? ""));
   const [hole, setHole] = useState(() => holes.find((h) => h.contest === "ld")?.number ?? 1);
   const [yards, setYards] = useState("260");
 
   const apply = (p: { lat: number; lng: number }) => {
     const next: GpsSimulation = { lat: p.lat, lng: p.lng, accuracy: 3 };
-    setGpsSimulation(next);
-    setSim(getGpsSimulation());
+    writeGpsSimulation(next);
     setLat(p.lat.toFixed(6));
     setLng(p.lng.toFixed(6));
     toast.info(`GPS faked at ${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`, { emoji: "🛰️" });
@@ -49,8 +145,7 @@ export function GpsSimulator({ holes }: { holes: Hole[] }) {
   };
 
   const clear = () => {
-    setGpsSimulation(null);
-    setSim(null);
+    writeGpsSimulation(null);
     toast.info("GPS simulator off. Back to real satellites.", { emoji: "🛰️" });
   };
 

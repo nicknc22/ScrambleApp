@@ -18,7 +18,7 @@ import {
   setDbForTests,
   type DbConnection,
 } from "@/lib/server/db";
-import { INIT_SQL, runMigrations } from "@/lib/server/migrate";
+import { embeddedMigrations, INIT_SQL, runMigrations } from "@/lib/server/migrate";
 import {
   findTripByCode,
   getAppliedOpIds,
@@ -37,6 +37,7 @@ import { newId } from "@/lib/ids";
 import { DEFAULT_SETTINGS, ROW_TABLES, type AnyRow, type RowTable, type Trip, type TripState } from "@/lib/types";
 
 const PG_BIN = "/usr/lib/postgresql/16/bin";
+const VERSIONS = embeddedMigrations().map((m) => m.version);
 
 function findRunuser(): string | null {
   for (const p of ["/usr/sbin/runuser", "/sbin/runuser", "/usr/bin/runuser", "/bin/runuser"]) {
@@ -240,14 +241,14 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
   });
 
   it("applies the migration once; the SQL is idempotent; RLS on every table", async () => {
-    expect(await runMigrations(pg)).toEqual(["001_init"]);
+    expect(await runMigrations(pg)).toEqual(VERSIONS);
     expect(await runMigrations(pg)).toEqual([]);
     await pg.exec(INIT_SQL);
     const rls = await pg.query<{ relname: string; relrowsecurity: boolean }>(
       `select c.relname, c.relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace
        where n.nspname = 'public' and c.relkind = 'r'`,
     );
-    expect(rls.length).toBe(18);
+    expect(rls.length).toBe(21);
     expect(rls.every((r) => r.relrowsecurity)).toBe(true);
     // Same columns as PGlite (catalog parity).
     const colsSql = `select table_name, column_name, data_type, is_nullable, column_default from information_schema.columns
@@ -263,9 +264,9 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
     const b = await connectPostgres(migUrl);
     try {
       const [ra, rb] = await Promise.all([runMigrations(a), runMigrations(b)]);
-      expect([...ra, ...rb]).toEqual(["001_init"]);
-      const v = await a.query("select version from schema_migrations");
-      expect(v).toEqual([{ version: "001_init" }]);
+      expect([...ra, ...rb]).toEqual(VERSIONS);
+      const v = await a.query("select version from schema_migrations order by version");
+      expect(v).toEqual(VERSIONS.map((version) => ({ version })));
     } finally {
       await a.close();
       await b.close();
@@ -407,8 +408,8 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
       await closeDb();
       const [{ app }] = await getDb().query<{ app: string }>("select current_setting('application_name') as app");
       expect(app).toBe("scramble");
-      const versions = await getDb().query("select version from schema_migrations");
-      expect(versions).toEqual([{ version: "001_init" }]);
+      const versions = await getDb().query("select version from schema_migrations order by version");
+      expect(versions).toEqual(VERSIONS.map((version) => ({ version })));
     } finally {
       await closeDb();
       vi.unstubAllEnvs();

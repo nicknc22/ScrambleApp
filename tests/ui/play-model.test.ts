@@ -15,6 +15,7 @@ import {
   driveView,
   hasUnsavedDraft,
   isEditingOtherHole,
+  isOwnMove,
   joinNames,
   mulliganOptions,
   needsOverride,
@@ -122,6 +123,17 @@ describe("viewing hole and advancing", () => {
     expect(pinAfterTeamMove({ from: 5, to: 6, pin: 3, wasSummary: false, finished: false, unsavedOnFrom: false })).toBe(3);
     expect(pinAfterTeamMove({ from: 5, to: 6, pin: 6, wasSummary: false, finished: false, unsavedOnFrom: false })).toBeNull();
     expect(pinAfterTeamMove({ from: 18, to: 18, pin: 18, wasSummary: false, finished: true, unsavedOnFrom: true })).toBe(18);
+  });
+
+  it("tells this phone's own moves from another phone's", () => {
+    // Saved a score on hole 3 (opens it) a moment ago: the move to 3 is ours.
+    expect(isOwnMove({ to: 3, at: 1000 }, 3, false, 1500)).toBe(true);
+    // Saved hole 2 a moment ago, then the team went to 3: another phone teed off.
+    expect(isOwnMove({ to: 2, at: 1000 }, 3, false, 1500)).toBe(false);
+    expect(isOwnMove({ to: "complete", at: 1000 }, 18, true, 1500)).toBe(true);
+    expect(isOwnMove({ to: 18, at: 1000 }, 18, true, 1500)).toBe(false);
+    expect(isOwnMove({ to: 3, at: 1000 }, 3, false, 60_000)).toBe(false);
+    expect(isOwnMove(null, 3, false, 1500)).toBe(false);
   });
 
   it("tells the user when another phone moved the team", () => {
@@ -318,6 +330,20 @@ describe("scorecard strip and summary", () => {
     expect(inn).toMatchObject({ label: "In", par: 36, strokes: 5, net: 4, played: 1 });
     expect(total).toMatchObject({ par: 72, strokes: 9, net: 8, played: 2 });
     expect(unscoredHoles(d.teamHoles[f.team.A], 3)).toEqual([2, 3]);
+  });
+
+  it("the strip's total net is the leaderboard's net mid-round, with a drink on the open hole (finding: two net definitions)", () => {
+    const f = makeTrip({ teams: [4, 3] });
+    f.teeOff("A", 1);
+    f.score("A", 1, 5);
+    f.drink("A", "A1", 1);
+    f.teeOff("A", 2);
+    f.drink("A", "A2", 2); // open hole 2, not scored: banked
+    const d = derive(f.state);
+    const row = d.standings.find((r) => r.team_id === f.team.A)!;
+    const total = nineTotals(d.teamHoles[f.team.A])[2];
+    expect(total).toMatchObject({ strokes: 5, net: 4, played: 1 });
+    expect(row).toMatchObject({ gross: 5, net: 4, net_to_par: 0, pending_drinks: 1, pending_credit: 1 });
   });
 
   it("round summary from the standings row", () => {

@@ -44,7 +44,7 @@ export const POST = withErrors(async (request: Request, ctx: { params: Promise<{
     return badRequest(`Too many changes in one sync (max ${MAX_OPS_PER_SYNC}). Send them in smaller batches.`, "too_many_ops");
   }
 
-  const comm = isCommissioner(request, t.trip.id);
+  const comm = isCommissioner(request, t.trip.id, t.pinHash);
   let out: Awaited<ReturnType<typeof applyOpsToTrip>>;
   try {
     out = await applyOpsToTrip({ db: t.db, trip: t.trip, ops, isCommissioner: comm });

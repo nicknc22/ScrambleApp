@@ -77,7 +77,7 @@ async function syncOk(code: string, ops: unknown[], headers: Record<string, stri
 }
 
 function commishCookie(tripId: string): Record<string, string> {
-  return { cookie: `${commissionerCookieName(tripId)}=${makeCommissionerToken(tripId)}` };
+  return { cookie: `${commissionerCookieName(tripId)}=${makeCommissionerToken(tripId, PIN_HASH)}` };
 }
 
 interface Setup {
@@ -386,9 +386,9 @@ describe("POST /api/t/[code]/sync: scenarios", () => {
     ]);
     const forged = await syncOk(s.trip.code, [mk("hole.update", { hole: 3, patch: { tee_lat: 1, tee_lng: 1 } })], commishCookie(other.id));
     expect(forged.results[0]).toMatchObject({ status: "rejected", code: "forbidden" });
-    const tampered = { cookie: `${commissionerCookieName(s.trip.id)}=${makeCommissionerToken(s.trip.id).slice(0, -2)}xx` };
+    const tampered = { cookie: `${commissionerCookieName(s.trip.id)}=${makeCommissionerToken(s.trip.id, PIN_HASH).slice(0, -2)}xx` };
     expect((await syncOk(s.trip.code, [mk("trip.finalize", {})], tampered)).results[0]).toMatchObject({ status: "rejected", code: "forbidden" });
-    const expired = { cookie: `${commissionerCookieName(s.trip.id)}=${makeCommissionerToken(s.trip.id, Date.now() - 13 * 3600_000)}` };
+    const expired = { cookie: `${commissionerCookieName(s.trip.id)}=${makeCommissionerToken(s.trip.id, PIN_HASH, Date.now() - 13 * 3600_000)}` };
     expect((await syncOk(s.trip.code, [mk("trip.finalize", {})], expired)).results[0]).toMatchObject({ status: "rejected", code: "forbidden" });
 
     const fix2 = mk("score.set", { team_id: s.team.A, hole: 3, strokes: 2, as_commissioner: true });

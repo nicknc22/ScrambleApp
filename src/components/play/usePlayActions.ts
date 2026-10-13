@@ -184,11 +184,13 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
           else fail(r);
           return false;
         }
-        const value = store.getState().derived?.drinkValues[drinkId]?.value;
+        // The engine's view of the drink: its value and the hole it is credited to.
+        const credited = store.getState().derived?.drinkValues[drinkId];
+        const value = credited?.value;
         const name = playerName(playerId);
-        const fb = drinkFeedback(type, value, name, hole);
+        const fb = drinkFeedback(type, value, name, credited?.hole ?? hole);
         if (fb.ghost) fanfare.show({ tone: "ghost", emoji: "👻", ...ghostFanfareCopy(name, value ?? 2), key: `ghost-${drinkId}` });
-        pushBurst(burst.current, { opId: r.op.id, drinkId, name, type, value, hole });
+        pushBurst(burst.current, { opId: r.op.id, drinkId, name, type, value, hole: credited?.hole ?? hole });
         showBurst(false);
         return true;
       },

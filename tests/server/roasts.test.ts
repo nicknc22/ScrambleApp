@@ -340,12 +340,21 @@ describe("handleRoastTrigger", () => {
     expect(pushed).toHaveLength(0);
   });
 
-  it("skips triggers with no target team (a tie for the lead)", async () => {
+  it("a tie for the lead isn't a lead change (only a new SOLE leader posts), so there's nothing to roast", async () => {
     const s = await setup();
     await play(s, score(s, "A", 1, 4));
     const out = await play(s, score(s, "B", 1, 4));
-    const tie = triggerOf(out, (t) => t.type === "lead_change");
-    expect(tie.team_id).toBeNull();
+    expect(out.events.roast_triggers.filter((t) => t.type === "lead_change")).toEqual([]);
+    expect(out.events.feed.filter((e) => e.type === "lead_change")).toEqual([]);
+  });
+
+  it("skips triggers with no target team (a tie-for-the-lead row from before ties stopped posting)", async () => {
+    const s = await setup();
+    const out = await play(s, score(s, "A", 1, 4));
+    const lead = triggerOf(out, (t) => t.type === "lead_change");
+    // Ties no longer post a lead_change (only a new sole leader does), so fake an old tie row.
+    await db.query("update feed_events set team_id = null where id = $1", [lead.feed_event_id]);
+    const tie: RoastTrigger = { ...lead, team_id: null };
     expect(await handleRoastTrigger(s.trip.id, tie, deps)).toEqual({ status: "skipped", reason: "no_team" });
     expect(aiCalls).toHaveLength(0);
   });

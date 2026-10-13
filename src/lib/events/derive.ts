@@ -379,10 +379,12 @@ function eventsForStep(ctx: Ctx, step: OpStep): void {
   if (A.drinks !== B.drinks) drinkChanges(ctx, step, actor);
   if (A.mulligans !== B.mulligans) mulliganChanges(ctx, step, actor);
   if (A.contest_entries !== B.contest_entries) contestChanges(ctx, step, actor);
-  // Anything that can move a hole net: strokes, drinks, team sizes (ghost credit), base team size.
+  // Anything that can move a hole net: strokes, drinks, the window timeline (a late-synced tee.open
+  // re-homes drinks, see effectiveDrinkHole), team sizes (ghost credit), base team size.
   const netsMayMove =
     A.hole_scores !== B.hole_scores ||
     A.drinks !== B.drinks ||
+    A.team_round_state !== B.team_round_state ||
     A.team_members !== B.team_members ||
     A.players !== B.players ||
     A.teams !== B.teams ||
@@ -485,7 +487,7 @@ function completions(ctx: Ctx, step: OpStep, actor: UUID | null): void {
       gross_to_par: row.gross_to_par,
       pos_label: row.pos_label,
       thru: row.thru,
-      drinks: row.drinks,
+      drinks: row.drinks + row.pending_drinks,
       ghost_beers: row.ghost_beers,
       last: isLast(d.standings, rs.team_id),
     };

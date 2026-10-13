@@ -214,6 +214,14 @@ test.describe("money + awards", () => {
     expect(href).toMatch(/^venmo:\/\/paycharge\?txn=pay&recipients=[a-z]+-e2e&amount=\d+\.\d{2}&note=Scramble%3A%20E2E%20Money%20Scramble%20settle-up$/);
     const web = await payments.first().getByTestId("venmo-web").getAttribute("href");
     expect(web).toMatch(/^https:\/\/venmo\.com\/[a-z]+-e2e\?txn=pay&amount=\d+\.\d{2}&note=/);
+    // Only my own payments carry a pay link. Everyone else's show the amount and the payee's handle
+    // to copy: no one-tap way to pay somebody else's debt.
+    const mine = await page.locator('[data-testid="payment"][data-mine="pay"]').count();
+    await expect(page.getByTestId("venmo-pay")).toHaveCount(mine);
+    const others = page.locator('[data-testid="payment"]:not([data-mine="pay"])');
+    expect(await others.count()).toBeGreaterThan(0);
+    await expect(others.locator('a[href^="venmo:"], a[href*="venmo.com"]')).toHaveCount(0);
+    await expect(others.first().getByTestId("venmo-handle")).toContainText(/@[a-z]+-e2e/);
     await expectNoHorizontalOverflow(page);
 
     // Pots: the team match was won, hole 3 has a winner.

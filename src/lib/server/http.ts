@@ -3,6 +3,7 @@
 // the client reads `error` / `reason` / `message`.
 import type { Trip } from "@/lib/types";
 import { getDb, type Db } from "./db";
+import { ConfigError } from "./env";
 import { findTripByCode } from "./repo";
 import { normalizeCode } from "./trips";
 
@@ -109,6 +110,11 @@ export function withErrors<A extends unknown[]>(handler: (...args: A) => Promise
     try {
       return await handler(...args);
     } catch (e) {
+      if (e instanceof ConfigError) {
+        // Missing server configuration (e.g. DATABASE_URL on Vercel): say exactly what's wrong.
+        console.error(`CONFIG ERROR: ${e.message}`);
+        return errorJson(500, e.message, { code: "not_configured" });
+      }
       console.error("API error:", e);
       return serverError();
     }

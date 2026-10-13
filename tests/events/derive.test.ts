@@ -347,6 +347,14 @@ describe("round_complete", () => {
     expect(sim.run([mk("round.complete", { team_id: A })]).feed).toEqual([]);
   });
 
+  it("counts every drink, including drinks banked on a hole that never got a score", () => {
+    const { sim, A, p } = live();
+    sim.run([tee(A, 1), score(A, 1, 4), drink(A, p.A1, 1), tee(A, 2), drink(A, p.A2, 2), drink(A, p.A3, 2)]);
+    const ev = one(sim.run([mk("round.complete", { team_id: A })]), "round_complete");
+    // Net counts scored holes only (hole 2's credit is banked); the drink count is the whole round.
+    expect(ev.payload).toMatchObject({ gross: 4, net: 3, thru: 1, drinks: 3 });
+  });
+
   it("a lone finisher (or everyone tied) is not last", () => {
     const { sim, A, B } = live();
     sim.run([score(A, 1, 4), score(B, 1, 4)]);
@@ -474,6 +482,16 @@ describe("score_notable net_zero", () => {
     const { sim, A, p } = live();
     const r = sim.run([tee(A, 1), ...[1, 2, 3, 4, 5, 6].map(() => drink(A, p.A1, 1))]);
     expect(ofType(r, "score_notable")).toEqual([]);
+  });
+
+  it("fires when a late-synced tee.open re-homes stale-stamped drinks onto a scored hole", () => {
+    const { sim, A, p } = live();
+    // Hole 3 got a score early (no window move), and a stale phone logged two drinks stamped hole 1.
+    sim.run([tee(A, 1, { at: at(0) }), score(A, 3, 2, { at: at(5) }), drink(A, p.A2, 1, "drink", { at: at(15) }), drink(A, p.A3, 1, "drink", { at: at(16) })]);
+    expect(sim.active("score_notable").map((e) => e.payload.kind)).toEqual(["birdie"]); // a 2 on the par-3 3rd
+    // The scorer's offline tee.open for hole 3 (tapped at +12) arrives: the drinks count on hole 3.
+    const r = sim.run([tee(A, 3, { at: at(12), by: p.A1 })]);
+    expect(one(r, "score_notable").payload).toMatchObject({ kind: "net_zero", hole: 3, strokes: 2, credit: 2, net: 0 });
   });
 });
 
@@ -666,7 +684,7 @@ describe("who logged it, and which hole", () => {
       // The feed names the hole the drinks count on, whichever phone synced first.
       const text = sim.active().filter((e) => e.type === "drinks" || e.type === "shot").map((e) => sim.render(e).body).join(" | ");
       expect(text, order).not.toMatch(/hole 1\b/);
-      expect(text, order).toMatch(/shot on hole 2|hole 2: Player A3/);
+      expect(sim.render(sim.active("shot")[0]).body, order).toMatch(/hole 2\b/);
       if (order === "drinker first") {
         // Both plain drinks were batched while hole 1 looked open; the post now says where they count.
         expect(text).toContain("2 drinks on holes 2 and 3");
@@ -692,6 +710,17 @@ describe("who logged it, and which hole", () => {
     sim.run([tee(A, 4, { at: at(0) }), tee(A, 5, { at: at(20) }), stale]);
     const del = sim.run([mk("drink.delete", { drink_id: stale.drink_id, by: p.A1, as_commissioner: true })], { commish: true });
     expect(one(del, "commissioner_override").payload.summary).toBe("deleted Player A2's drink on hole 5");
+  });
+
+  it("the commissioner can pin a re-homed drink back on the hole its phone stamped", () => {
+    const { sim, A, p } = live();
+    const stale = drink(A, p.A2, 4, "drink", { at: at(30) });
+    sim.run([tee(A, 4, { at: at(0) }), tee(A, 5, { at: at(20) }), stale]);
+    expect(derive(sim.state).drinkValues[stale.drink_id].hole).toBe(5);
+    // E.g. the drinker's phone clock ran fast: the drink really was on 4.
+    const mv = sim.run([mk("drink.move", { drink_id: stale.drink_id, hole: 4, by: p.A1, as_commissioner: true })], { commish: true });
+    expect(one(mv, "commissioner_override").payload.summary).toBe("moved a drink from hole 5 to hole 4 (Player A2, Team A)");
+    expect(derive(sim.state).drinkValues[stale.drink_id].hole).toBe(4);
   });
 });
 

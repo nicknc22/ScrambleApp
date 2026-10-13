@@ -12,6 +12,7 @@ import {
   rememberTrip,
 } from "@/lib/client/ui-prefs";
 import { getLastTripCode } from "@/lib/client/identity";
+import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
 import { Button, Card, IconChevronRight, IconClose, TextField } from "@/components/ui";
 import { Wordmark } from "@/components/shell/Splash";
 
@@ -115,8 +116,8 @@ export default function HomePage() {
       setCreateError("Name the trip. Something the groom will regret.");
       return;
     }
-    if (pin.trim().length < 4) {
-      setCreateError("The commissioner PIN is at least 4 digits.");
+    if (pin.trim().length < PIN_MIN_LENGTH) {
+      setCreateError(`The commissioner PIN is at least ${PIN_MIN_LENGTH} digits.`);
       return;
     }
     setCreating(true);
@@ -274,7 +275,7 @@ export default function HomePage() {
                 autoComplete="off"
                 placeholder="••••"
                 value={pin}
-                onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 12))}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX_LENGTH))}
                 hint="The PIN from the server setup. You'll use it to unlock powers on any phone."
               />
               {createError && (

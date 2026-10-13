@@ -7,19 +7,19 @@ import { DRINK_UNDO_ATTR } from "./DrinkUndoToast";
 
 /** Height of the bar content (without safe area); toasts float above it. */
 export const ACTION_BAR_H = 80;
-/** The drink-undo toast's bottom edge sits this far above the tab bar (inside the bar's height). */
-const DRINK_TOAST_INSET = 6;
 
 export function ActionBar({ children }: { children: ReactNode }) {
   return (
     <>
       {/* Toasts sit above the tab bar by default; lift them above this bar too (!important beats the
-          shell's inline var). While the compact drink-undo toast is up, the stack sits ON the bar
-          instead, so the undo never covers a teammate's drink buttons. While a modal sheet is
-          open, globals.css parks them near the top (its selector is more specific). */}
+          shell's inline var). While the compact drink-undo toast is up, the stack sits over the
+          TAB BAR instead: drink rows can be anywhere on screen, and this bar's Save / On the tee
+          must stay tappable, so fixed navigation is the one place the undo covers nothing that
+          matters for 10 seconds. While a modal sheet is open, globals.css parks toasts near the
+          top (its selector is more specific). */}
       <style>
         {`:root{--toast-bottom:calc(var(--tabbar-h) + ${ACTION_BAR_H + 10}px) !important}` +
-          `:root:has([${DRINK_UNDO_ATTR}]){--toast-bottom:calc(var(--tabbar-h) + ${DRINK_TOAST_INSET}px) !important}`}
+          `:root:has([${DRINK_UNDO_ATTR}]){--toast-bottom:0px !important}`}
       </style>
       <div
         className="fixed inset-x-0 z-[35] border-t-2 border-ink bg-paper/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur"

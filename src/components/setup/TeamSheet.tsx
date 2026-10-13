@@ -187,14 +187,20 @@ function TeamForm({
           enterKeyHint="done"
           data-testid="team-name-input"
         />
-        {renamedFrom && renamedFrom !== team.name && (
-          <div className="flex items-center gap-2 rounded-xl border-2 border-fairway bg-fairway-soft py-0.5 pr-0.5 pl-3" role="status">
-            <p className="min-w-0 flex-1 truncate text-[15px] font-extrabold">✅ Saved. Was “{renamedFrom}”</p>
-            <Button variant="ghost" className="shrink-0" onClick={undoRename}>
-              Undo
-            </Button>
-          </div>
-        )}
+        {/* Fixed-height slot: the "Saved" row appears on blur, i.e. on the pointerdown of whatever is
+            tapped next. If it pushed the chips below down, that tap would land on nothing. */}
+        <div className="h-14" role="status" data-testid="team-name-status">
+          {renamedFrom && renamedFrom !== team.name ? (
+            <div className="flex h-full items-center gap-2 rounded-xl border-2 border-fairway bg-fairway-soft pr-0.5 pl-3">
+              <p className="min-w-0 flex-1 truncate text-[15px] font-extrabold">✅ Saved. Was “{renamedFrom}”</p>
+              <Button variant="ghost" className="shrink-0" onClick={undoRename}>
+                Undo
+              </Button>
+            </div>
+          ) : (
+            <p className="flex h-full items-center px-1 text-sm font-bold text-muted">Saves when you leave the field. Or roll some below.</p>
+          )}
+        </div>
         <Button
           variant="ghostbeer"
           size="lg"

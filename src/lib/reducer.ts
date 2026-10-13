@@ -548,7 +548,9 @@ function drinkLog(tx: Tx, op: DrinkLogOp): void {
     created_at: tx.now,
     deleted_at: null,
     deleted_by: null,
-    moved_from_hole: null,
+    // A commissioner back-filling a hole other than the team's open window (a dead phone, the cart
+    // kept paper) pins the drink there like a move; unpinned drinks follow the window timeline.
+    moved_from_hole: tx.override && openWindowHole(roundStateOf(s, team.id)) !== hole ? hole : null,
   };
   tx.put("drinks", row);
 }
@@ -567,7 +569,9 @@ function drinkMove(tx: Tx, op: DrinkMoveOp): void {
   const drink = tx.state.drinks.find((d) => d.id === op.drink_id);
   if (!drink || !isActive(drink)) reject("not_found", "That drink doesn't exist (or was undone).");
   const hole = requireHole(op.hole);
-  if (drink.hole === hole) return;
+  // A never-moved drink "moved" to its own stamped hole is still pinned there: unmoved drinks follow
+  // the window timeline in the engine (effectiveDrinkHole), which may have re-homed it.
+  if (drink.hole === hole && drink.moved_from_hole !== null) return;
   tx.patch("drinks", drink, { hole, moved_from_hole: drink.moved_from_hole ?? drink.hole });
 }
 

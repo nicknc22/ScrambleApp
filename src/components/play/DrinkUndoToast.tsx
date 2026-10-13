@@ -1,7 +1,7 @@
 "use client";
 // The merged drink-undo toast: one per team burst, two single lines (title + message, truncated)
-// so it stays compact. Its marker attribute lets ActionBar park the toast over the bar itself while
-// it is up, so it never covers the drink buttons a teammate is about to tap.
+// so it stays compact. Its marker attribute lets ActionBar park the toast over the tab bar while it
+// is up, so it never covers the drink buttons a teammate is about to tap (or Save / On the tee).
 import type { ToastAction, ToastOptions, ToastTone } from "@/components/ui";
 import type { ToastCopy } from "./model";
 

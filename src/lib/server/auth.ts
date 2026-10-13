@@ -1,12 +1,28 @@
-// Commissioner auth: PIN hashing (scrypt) and a signed, short-lived, httpOnly cookie.
+// Commissioner auth: PIN hashing (scrypt), a signed short-lived commissioner cookie, a signed
+// long-lived trusted-device cookie, and the wrong-PIN throttle (in Postgres, see pin_failures).
 //
 // PIN hash format: "scrypt:<salt b64url>:<hash b64url>" (N=16384, r=8, p=1, 32-byte key).
 // No "$" on purpose: Next's .env loader expands "$name", which would silently mangle the hash.
 // The older "scrypt$<salt>$<hash>" form is still accepted.
-// Cookie "scramble_comm_<first 8 of trip id>" = "<tripId>.<expMs>.<sig>",
-//   sig = base64url(HMAC-SHA256(secret, "<tripId>.<expMs>")).
+//
+// Both cookies are bound to the trip's CURRENT PIN hash (a fingerprint of it is part of the signed
+// payload, not of the cookie), so changing the PIN revokes every cookie issued before it. The
+// device that changed the PIN gets fresh ones.
+//
+// Commissioner cookie "scramble_comm_<first 8 of trip id>" = "<tripId>.<expMs>.<sig>",
+//   sig = base64url(HMAC-SHA256(secret, "<tripId>.<expMs>.<pin fingerprint>")), valid 12 h.
+// Trusted-device cookie "scramble_dev_<first 8 of trip id>" = "<tripId>.<expMs>.<deviceId>.<sig>",
+//   sig = base64url(HMAC-SHA256(secret, "dev.<tripId>.<expMs>.<deviceId>.<pin fingerprint>")),
+//   valid 60 days. Set when the trip is created and on every successful unlock. It grants nothing
+//   by itself: it only exempts this device from the SHARED wrong-PIN lockouts (trip-wide and per
+//   IP), so friends mashing the pad can't lock the real commissioner out. The device still needs
+//   the PIN and has its own per-device bucket.
 import crypto from "node:crypto";
+import { isValidPin, PIN_RE } from "@/lib/pin";
+import { getDb, type Db } from "./db";
 import { appSecret, commissionerPinHash, isProduction, supabaseServiceRoleKey } from "./env";
+
+export { isValidPin, PIN_RE };
 
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
@@ -16,13 +32,8 @@ const SALT_LEN = 16;
 
 /** Commissioner session length. */
 export const COMMISSIONER_TTL_MS = 12 * 60 * 60 * 1000;
-
-/** New PINs: 4 to 12 digits. */
-export const PIN_RE = /^\d{4,12}$/;
-
-export function isValidPin(pin: unknown): pin is string {
-  return typeof pin === "string" && PIN_RE.test(pin);
-}
+/** Trusted-device cookie length: covers a trip created weeks before the round. */
+export const TRUSTED_DEVICE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 
 function scrypt(pin: string, salt: Buffer): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -65,7 +76,7 @@ export async function verifyPin(pin: unknown, stored: string | null | undefined)
 }
 
 // ---------------------------------------------------------------------------
-// Signed commissioner token
+// Signed tokens
 // ---------------------------------------------------------------------------
 
 let warnedDevSecret = false;
@@ -86,36 +97,77 @@ function sign(payload: string): string {
   return crypto.createHmac("sha256", signingSecret()).update(payload).digest("base64url");
 }
 
-export function makeCommissionerToken(tripId: string, nowMs: number = Date.now(), ttlMs: number = COMMISSIONER_TTL_MS): string {
-  const exp = Math.floor(nowMs + ttlMs);
-  const payload = `${tripId}.${exp}`;
-  return `${payload}.${sign(payload)}`;
+/**
+ * Compare signatures as their exact base64url text (constant time). Decoding first would accept
+ * non-canonical spellings: the last of 43 characters carries only 4 bits, so 4 different last
+ * characters decode to the same bytes.
+ */
+function sameSignature(given: string, expected: string): boolean {
+  const a = Buffer.from(given, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-/** True when `token` is an unexpired, untampered token for this trip. */
-export function verifyCommissionerToken(token: string | null | undefined, tripId: string, nowMs: number = Date.now()): boolean {
+/** Short hash of the trip's current PIN hash, mixed into every signature (PIN change = revoke). */
+export function pinFingerprint(pinHash: string): string {
+  return crypto.createHash("sha256").update(`pin:${pinHash}`).digest("base64url").slice(0, 22);
+}
+
+const EXP_RE = /^\d{1,16}$/;
+const DEVICE_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+
+export function makeCommissionerToken(tripId: string, pinHash: string, nowMs: number = Date.now(), ttlMs: number = COMMISSIONER_TTL_MS): string {
+  const payload = `${tripId}.${Math.floor(nowMs + ttlMs)}`;
+  return `${payload}.${sign(`${payload}.${pinFingerprint(pinHash)}`)}`;
+}
+
+/** True when `token` is an unexpired, untampered token for this trip and its current PIN. */
+export function verifyCommissionerToken(token: string | null | undefined, tripId: string, pinHash: string, nowMs: number = Date.now()): boolean {
   if (!token || typeof token !== "string" || token.length > 300) return false;
-  const lastDot = token.lastIndexOf(".");
-  if (lastDot <= 0) return false;
-  const payload = token.slice(0, lastDot);
-  const sig = token.slice(lastDot + 1);
-  const sepDot = payload.lastIndexOf(".");
-  if (sepDot <= 0) return false;
-  const tokenTrip = payload.slice(0, sepDot);
-  const expStr = payload.slice(sepDot + 1);
-  if (tokenTrip !== tripId || !/^\d{1,16}$/.test(expStr)) return false;
-  if (Number(expStr) <= nowMs) return false;
-  const expected = Buffer.from(sign(payload), "base64url");
-  const given = Buffer.from(sig, "base64url");
-  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  const [tokenTrip, expStr, sig] = parts;
+  if (tokenTrip !== tripId || !EXP_RE.test(expStr) || Number(expStr) <= nowMs) return false;
+  return sameSignature(sig, sign(`${tokenTrip}.${expStr}.${pinFingerprint(pinHash)}`));
+}
+
+export function newDeviceId(): string {
+  return crypto.randomBytes(16).toString("base64url");
+}
+
+export function makeTrustedDeviceToken(
+  tripId: string,
+  pinHash: string,
+  deviceId: string,
+  nowMs: number = Date.now(),
+  ttlMs: number = TRUSTED_DEVICE_TTL_MS,
+): string {
+  const payload = `${tripId}.${Math.floor(nowMs + ttlMs)}.${deviceId}`;
+  return `${payload}.${sign(`dev.${payload}.${pinFingerprint(pinHash)}`)}`;
+}
+
+/** The device id of a valid trusted-device token for this trip and its current PIN, else null. */
+export function verifyTrustedDeviceToken(token: string | null | undefined, tripId: string, pinHash: string, nowMs: number = Date.now()): string | null {
+  if (!token || typeof token !== "string" || token.length > 300) return null;
+  const parts = token.split(".");
+  if (parts.length !== 4) return null;
+  const [tokenTrip, expStr, deviceId, sig] = parts;
+  if (tokenTrip !== tripId || !EXP_RE.test(expStr) || Number(expStr) <= nowMs || !DEVICE_ID_RE.test(deviceId)) return null;
+  return sameSignature(sig, sign(`dev.${tokenTrip}.${expStr}.${deviceId}.${pinFingerprint(pinHash)}`)) ? deviceId : null;
 }
 
 // ---------------------------------------------------------------------------
 // Cookies
 // ---------------------------------------------------------------------------
 
+const cookieSuffix = (tripId: string) => tripId.replace(/[^A-Za-z0-9]/g, "").slice(0, 8);
+
 export function commissionerCookieName(tripId: string): string {
-  return `scramble_comm_${tripId.replace(/[^A-Za-z0-9]/g, "").slice(0, 8)}`;
+  return `scramble_comm_${cookieSuffix(tripId)}`;
+}
+
+export function trustedDeviceCookieName(tripId: string): string {
+  return `scramble_dev_${cookieSuffix(tripId)}`;
 }
 
 /** Parse a Cookie header into name → value (first occurrence wins). */
@@ -191,9 +243,9 @@ export function serializeCookie(name: string, value: string, opts: CookieOptions
   return parts.join("; ");
 }
 
-/** Set-Cookie value granting commissioner powers on this trip for 12 hours. */
-export function commissionerCookie(request: Request, tripId: string, nowMs: number = Date.now()): string {
-  return serializeCookie(commissionerCookieName(tripId), makeCommissionerToken(tripId, nowMs), {
+/** Set-Cookie value granting commissioner powers on this trip (at its current PIN) for 12 hours. */
+export function commissionerCookie(request: Request, tripId: string, pinHash: string, nowMs: number = Date.now()): string {
+  return serializeCookie(commissionerCookieName(tripId), makeCommissionerToken(tripId, pinHash, nowMs), {
     maxAgeSec: COMMISSIONER_TTL_MS / 1000,
     secure: secureFor(request),
   });
@@ -204,64 +256,122 @@ export function clearCommissionerCookie(request: Request, tripId: string): strin
   return serializeCookie(commissionerCookieName(tripId), "", { maxAgeSec: 0, secure: secureFor(request) });
 }
 
-/** Does this request carry a valid commissioner cookie for the trip? */
-export function isCommissioner(request: Request, tripId: string, nowMs: number = Date.now()): boolean {
+/** Does this request carry a valid commissioner cookie for the trip at its current PIN? */
+export function isCommissioner(request: Request, tripId: string, pinHash: string, nowMs: number = Date.now()): boolean {
   const token = parseCookies(request.headers.get("cookie")).get(commissionerCookieName(tripId));
-  return verifyCommissionerToken(token, tripId, nowMs);
+  return verifyCommissionerToken(token, tripId, pinHash, nowMs);
+}
+
+/** The device id from a valid trusted-device cookie for the trip at its current PIN, else null. */
+export function trustedDeviceId(request: Request, tripId: string, pinHash: string, nowMs: number = Date.now()): string | null {
+  const token = parseCookies(request.headers.get("cookie")).get(trustedDeviceCookieName(tripId));
+  return verifyTrustedDeviceToken(token, tripId, pinHash, nowMs);
+}
+
+/** Set-Cookie value (re)trusting this device for 60 days; keeps its device id if it has one. */
+export function trustedDeviceCookie(request: Request, tripId: string, pinHash: string, nowMs: number = Date.now()): string {
+  const token = parseCookies(request.headers.get("cookie")).get(trustedDeviceCookieName(tripId));
+  // An id from an older PIN's cookie is fine to keep: the new signature binds it to the new PIN.
+  const prior = token?.split(".")[2];
+  const deviceId = prior && DEVICE_ID_RE.test(prior) ? prior : newDeviceId();
+  return serializeCookie(trustedDeviceCookieName(tripId), makeTrustedDeviceToken(tripId, pinHash, deviceId, nowMs), {
+    maxAgeSec: TRUSTED_DEVICE_TTL_MS / 1000,
+    secure: secureFor(request),
+  });
+}
+
+export function clearTrustedDeviceCookie(request: Request, tripId: string): string {
+  return serializeCookie(trustedDeviceCookieName(tripId), "", { maxAgeSec: 0, secure: secureFor(request) });
+}
+
+/**
+ * Set-Cookie headers after creating a trip or entering the right PIN: commissioner powers
+ * (first: callers and tests read the first cookie) + this device trusted.
+ */
+export function commissionerSessionHeaders(request: Request, tripId: string, pinHash: string, nowMs: number = Date.now()): [string, string][] {
+  return [
+    ["Set-Cookie", commissionerCookie(request, tripId, pinHash, nowMs)],
+    ["Set-Cookie", trustedDeviceCookie(request, tripId, pinHash, nowMs)],
+  ];
 }
 
 // ---------------------------------------------------------------------------
-// PIN attempt throttle (per process; good enough against a bored groomsman)
+// Wrong-PIN throttle (pin_failures; shared by every server instance, survives cold starts)
 // ---------------------------------------------------------------------------
+//
+// Three buckets, checked BEFORE the PIN is verified (a throttled request never learns whether its
+// PIN was right, so the throttle can't be used as an oracle):
+//   per client   8 wrong PINs per 10 min and 30 per 24 h from one IP (or one trusted device)
+//   per trip    30 wrong PINs per 10 min and 100 per 24 h from everyone together (caps a guesser
+//               who rotates IPs: a 4-digit PIN would take ~50 days on average)
+// A trusted device (see above) skips the shared buckets: only its own per-device bucket applies.
+// tripId null = trip creation, checked against the server's COMMISSIONER_PIN_HASH.
 
-const WINDOW_MS = 10 * 60 * 1000;
-const MAX_FAILS_PER_CLIENT = 8;
-const MAX_FAILS_PER_TRIP = 40;
-
-interface Bucket {
-  count: number;
-  resetAt: number;
-}
-const G = globalThis as typeof globalThis & { __scramblePinThrottle?: Map<string, Bucket> };
-const buckets: Map<string, Bucket> = (G.__scramblePinThrottle ??= new Map());
-
-function bucket(key: string, now: number): Bucket {
-  let b = buckets.get(key);
-  if (!b || b.resetAt <= now) {
-    b = { count: 0, resetAt: now + WINDOW_MS };
-    buckets.set(key, b);
-  }
-  return b;
-}
+export const PIN_WINDOW_MS = 10 * 60 * 1000;
+export const PIN_DAY_MS = 24 * 60 * 60 * 1000;
+export const MAX_FAILS_PER_CLIENT = 8;
+export const MAX_FAILS_PER_CLIENT_DAY = 30;
+export const MAX_FAILS_PER_TRIP = 30;
+export const MAX_FAILS_PER_TRIP_DAY = 100;
 
 /** Best-effort client address (Vercel sets x-forwarded-for). */
 export function clientKey(request: Request): string {
   const fwd = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return fwd || request.headers.get("x-real-ip")?.trim() || "local";
+  return (fwd || request.headers.get("x-real-ip")?.trim() || "local").slice(0, 100);
 }
 
-/** Seconds until another PIN attempt is allowed, or 0 when allowed now. */
-export function pinRetryAfter(tripId: string, client: string, now: number = Date.now()): number {
-  const per = bucket(`${tripId}|${client}`, now);
-  const all = bucket(`${tripId}|*`, now);
-  if (per.count >= MAX_FAILS_PER_CLIENT) return Math.ceil((per.resetAt - now) / 1000);
-  if (all.count >= MAX_FAILS_PER_TRIP) return Math.ceil((all.resetAt - now) / 1000);
-  return 0;
+/** Throttle client key of a trusted device. */
+export const deviceClientKey = (deviceId: string) => `dev:${deviceId}`;
+
+/** Seconds until the oldest failure that keeps `rows` (newest first) at the limit leaves the window. */
+function waitFor(rows: { created_at: string }[], limit: number, windowMs: number, now: number): number {
+  if (rows.length < limit) return 0;
+  const edge = Date.parse(rows[limit - 1].created_at);
+  if (!(edge + windowMs > now)) return 0;
+  return Math.max(1, Math.ceil((edge + windowMs - now) / 1000));
 }
 
-export function recordPinFailure(tripId: string, client: string, now: number = Date.now()): void {
-  bucket(`${tripId}|${client}`, now).count++;
-  bucket(`${tripId}|*`, now).count++;
-  if (buckets.size > 5000) {
-    for (const [k, b] of buckets) if (b.resetAt <= now) buckets.delete(k);
+export interface PinThrottleOptions {
+  /** A trusted device: only its own bucket counts. */
+  trusted?: boolean;
+  now?: number;
+}
+
+/** Seconds until another PIN attempt is allowed from `client`, or 0 when allowed now. */
+export async function pinRetryAfter(db: Db, tripId: string | null, client: string, opts: PinThrottleOptions = {}): Promise<number> {
+  const now = opts.now ?? Date.now();
+  const since = (ms: number) => new Date(now - ms).toISOString();
+  const mine = await db.query<{ created_at: string }>(
+    `select created_at from pin_failures
+      where trip_id is not distinct from $1::uuid and client = $2 and created_at > $3
+      order by created_at desc limit $4`,
+    [tripId, client, since(PIN_DAY_MS), MAX_FAILS_PER_CLIENT_DAY],
+  );
+  let wait = Math.max(waitFor(mine, MAX_FAILS_PER_CLIENT, PIN_WINDOW_MS, now), waitFor(mine, MAX_FAILS_PER_CLIENT_DAY, PIN_DAY_MS, now));
+  if (!opts.trusted) {
+    const all = await db.query<{ created_at: string }>(
+      `select created_at from pin_failures
+        where trip_id is not distinct from $1::uuid and created_at > $2
+        order by created_at desc limit $3`,
+      [tripId, since(PIN_DAY_MS), MAX_FAILS_PER_TRIP_DAY],
+    );
+    wait = Math.max(wait, waitFor(all, MAX_FAILS_PER_TRIP, PIN_WINDOW_MS, now), waitFor(all, MAX_FAILS_PER_TRIP_DAY, PIN_DAY_MS, now));
   }
+  return wait;
 }
 
-export function recordPinSuccess(tripId: string, client: string): void {
-  buckets.delete(`${tripId}|${client}`);
+export async function recordPinFailure(db: Db, tripId: string | null, client: string, now: number = Date.now()): Promise<void> {
+  await db.query("insert into pin_failures (trip_id, client, created_at) values ($1, $2, $3)", [tripId, client, new Date(now).toISOString()]);
+  // Housekeeping: nothing older than the longest window matters.
+  await db.query("delete from pin_failures where created_at < $1", [new Date(now - 2 * PIN_DAY_MS).toISOString()]);
 }
 
-/** Tests only. */
-export function resetPinThrottle(): void {
-  buckets.clear();
+/** The right PIN clears that client's own bucket (the shared ones keep counting). */
+export async function recordPinSuccess(db: Db, tripId: string | null, client: string): Promise<void> {
+  await db.query("delete from pin_failures where trip_id is not distinct from $1::uuid and client = $2", [tripId, client]);
+}
+
+/** Tests and operators: forget every wrong PIN (all trips). Never throws. */
+export async function resetPinThrottle(db: Db = getDb()): Promise<void> {
+  await db.query("delete from pin_failures").catch(() => {});
 }

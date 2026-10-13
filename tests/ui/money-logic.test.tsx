@@ -233,7 +233,46 @@ describe("money components (server-rendered)", () => {
     expect(projected).not.toContain("venmo://");
     expect(projected).toContain(formatCents(toA1!.amount_cents));
   });
+
+  it("settle-up: a prefilled pay link only on payments I make; others' (and mine to receive) show the amount + copy handle", () => {
+    // Findings money/venmo-links-on-others-debts, walkthrough/payee-sees-pay-yourself-venmo-link.
+    const f = playedTrip();
+    f.state.players = f.state.players.map((p) => ({ ...p, venmo_handle: `h-${p.id}` }));
+    const d = derive(f.state);
+    const note = "Scramble: Test Trip settle-up";
+    const render = (meId: string | null) =>
+      renderToStaticMarkup(<SettleUpList payments={d.money.payments} people={d} meId={meId} final note={note} onCopy={() => {}} />);
+    const payLinks = (html: string) => [...html.matchAll(/href="(venmo:\/\/[^"]+|https:\/\/venmo\.com\/[^"]+)"/g)].map((m) => m[1]);
+    expect(d.money.payments.length).toBeGreaterThan(1);
+
+    // A payer: links only for their own payments, never to themselves.
+    const payer = d.money.payments[0].from_player_id;
+    const mine = d.money.payments.filter((p) => p.from_player_id === payer);
+    const links = payLinks(render(payer));
+    expect(links).toHaveLength(mine.length * 2); // app deep link + web fallback per payment
+    for (const p of mine) expect(links.some((l) => l.includes(`recipients=h-${p.to_player_id}&amp;`))).toBe(true);
+    expect(links.some((l) => l.includes(`h-${payer}`))).toBe(false);
+
+    // A payee: no link that opens "pay yourself", just their handle to copy and send.
+    const payee = d.money.payments[0].to_player_id;
+    const asPayee = render(payee);
+    expect(payLinks(asPayee)).toEqual([]);
+    expect(asPayee).toContain(`aria-label="Copy your Venmo"`);
+    expect(asPayee).toContain(`@h-${payee}`);
+
+    // Somebody who owes nothing (or nobody picked): no one-tap way to pay another man's debt.
+    const bystander = f.state.players.find((p) => !d.money.payments.some((x) => x.from_player_id === p.id))!.id;
+    const asBystander = render(bystander);
+    expect(payLinks(asBystander)).toEqual([]);
+    expect(payLinks(render(null))).toEqual([]);
+    // Each third-party card still shows its amount and a copy button for the payee's handle.
+    const third = d.money.payments.find((p) => p.from_player_id !== bystander && p.to_player_id !== bystander)!;
+    expect(asBystander).toContain(formatCents(third.amount_cents));
+    expect(asBystander).toContain(`@h-${third.to_player_id}`);
+    expect(asBystander).not.toContain('data-testid="venmo-pay"');
+  });
 });
+
 
 describe("copyText", () => {
   it("uses the async clipboard when available", async () => {

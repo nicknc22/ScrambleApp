@@ -1,6 +1,7 @@
 "use client";
 // Hole-by-hole card for one team (bottom sheet): strokes, drinks, credit, net and whose tee shot,
-// with OUT / IN / TOT rows, plus the headline numbers and ghost beers.
+// with OUT / IN / TOT rows (scored holes, so TOT matches the leaderboard row), plus the headline
+// numbers, ghost beers and drinks banked on a hole without a score yet.
 import type { UUID } from "@/lib/types";
 import type { Derived, TeamHoleLine } from "@/lib/engine/types";
 import { formatToPar } from "@/lib/engine/format";
@@ -92,6 +93,11 @@ function TeamCard({ teamId, derived, mine }: { teamId: UUID; derived: Derived; m
         <span className="rounded-full bg-ghost-soft px-3 py-1.5 text-ghost-dark" data-testid="card-ghosts">
           👻 {row?.ghost_beers ?? 0} ghost {row?.ghost_beers === 1 ? "beer" : "beers"}
         </span>
+        {total.banked_drinks > 0 && (
+          <span className="rounded-full border-2 border-beer-dark bg-beer-soft px-3 py-1 text-beer-dark" data-testid="card-banked">
+            +{total.banked_drinks} 🍺 banked (−{total.banked_credit}): counts once the hole is scored
+          </span>
+        )}
         {row?.status === "complete" && <span className="rounded-full bg-fairway-soft px-3 py-1.5 text-fairway-dark">🏁 Done</span>}
       </div>
 
@@ -149,7 +155,8 @@ function TeamCard({ teamId, derived, mine }: { teamId: UUID; derived: Derived; m
         </div>
       </div>
       <p className="text-sm font-semibold text-muted">
-        Net = strokes − drink credit. Drinks count on the hole whose window was open. Purple nets are zero or better. Yes, really.
+        Net = strokes − drink credit. Drinks count on the hole whose window was open, and join the totals once that hole is scored.
+        Purple nets are zero or better. Yes, really.
       </p>
     </div>
   );

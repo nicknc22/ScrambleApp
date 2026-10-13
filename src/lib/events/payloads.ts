@@ -205,6 +205,7 @@ export interface RoundCompletePayload {
   gross_to_par: number;
   pos_label: string;
   thru: number;
+  /** Every drink the team logged (including any banked on a hole that never got a score). */
   drinks: number;
   ghost_beers: number;
   /** Last place among started teams when they finished. */

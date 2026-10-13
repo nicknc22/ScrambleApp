@@ -1,19 +1,26 @@
 // Commissioner unlock for one trip.
-//   GET              → {is_commissioner}
-//   POST {pin}       → verify against the trip's PIN hash, set the 12 h cookie → {ok: true}
-//   DELETE           → clear the cookie → {ok: true}
-//   PUT {pin, new_pin} → change the trip's PIN (4-12 digits) after verifying the current one
-// Wrong PINs are throttled per client (and per trip) in this process.
+//   GET                → {is_commissioner}
+//   POST {pin}         → verify against the trip's PIN hash, set the 12 h cookie + trust this
+//                        device for 60 days → {ok: true}
+//   DELETE             → lock: clear both cookies on this device → {ok: true}
+//   PUT {pin, new_pin} → change the trip's PIN (4-12 digits) after verifying the current one.
+//                        Every cookie issued for the old PIN stops working; this device gets new ones.
+// Wrong PINs are throttled in the database (per client, per trip); a trusted device only answers
+// to its own bucket, so other people's wrong guesses can't lock the commissioner out.
+import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
 import {
   clearCommissionerCookie,
+  clearTrustedDeviceCookie,
   clientKey,
-  commissionerCookie,
+  commissionerSessionHeaders,
+  deviceClientKey,
   hashPin,
   isCommissioner,
   isValidPin,
   pinRetryAfter,
   recordPinFailure,
   recordPinSuccess,
+  trustedDeviceId,
   verifyPin,
 } from "@/lib/server/auth";
 import { badRequest, errorJson, json, loadTripOr404, readJsonObject, withErrors, type TripContext } from "@/lib/server/http";
@@ -44,23 +51,27 @@ function throttled(seconds: number): Response {
   });
 }
 
-/** Throttle + verify. Returns null when the PIN is right, else the error Response. */
+/**
+ * Throttle + verify. Returns null when the PIN is right, else the error Response. The throttle is
+ * checked before the PIN, so a throttled request learns nothing about its PIN.
+ */
 async function checkPin(request: Request, t: TripContext, pin: unknown): Promise<Response | null> {
-  const client = clientKey(request);
-  const wait = pinRetryAfter(t.trip.id, client);
+  const device = trustedDeviceId(request, t.trip.id, t.pinHash);
+  const client = device ? deviceClientKey(device) : clientKey(request);
+  const wait = await pinRetryAfter(t.db, t.trip.id, client, { trusted: device !== null });
   if (wait > 0) return throttled(wait);
   if (!(await verifyPin(typeof pin === "string" ? pin.trim() : pin, t.pinHash))) {
-    recordPinFailure(t.trip.id, client);
+    await recordPinFailure(t.db, t.trip.id, client);
     return wrongPin();
   }
-  recordPinSuccess(t.trip.id, client);
+  await recordPinSuccess(t.db, t.trip.id, client);
   return null;
 }
 
 export const GET = withErrors(async (request: Request, ctx: Ctx) => {
   const t = await loadTripOr404((await ctx.params).code);
   if (t instanceof Response) return t;
-  return json({ is_commissioner: isCommissioner(request, t.trip.id) });
+  return json({ is_commissioner: isCommissioner(request, t.trip.id, t.pinHash) });
 });
 
 export const POST = withErrors(async (request: Request, ctx: Ctx) => {
@@ -70,10 +81,7 @@ export const POST = withErrors(async (request: Request, ctx: Ctx) => {
   if (body instanceof Response) return body;
   const denied = await checkPin(request, t, body.pin);
   if (denied) return denied;
-  return json(
-    { ok: true, is_commissioner: true },
-    { headers: { "Set-Cookie": commissionerCookie(request, t.trip.id) } },
-  );
+  return json({ ok: true, is_commissioner: true }, { headers: commissionerSessionHeaders(request, t.trip.id, t.pinHash) });
 });
 
 export const DELETE = withErrors(async (request: Request, ctx: Ctx) => {
@@ -81,7 +89,13 @@ export const DELETE = withErrors(async (request: Request, ctx: Ctx) => {
   if (t instanceof Response) return t;
   return json(
     { ok: true, is_commissioner: false },
-    { headers: { "Set-Cookie": clearCommissionerCookie(request, t.trip.id) } },
+    {
+      headers: [
+        ["Set-Cookie", clearCommissionerCookie(request, t.trip.id)],
+        // A phone the commissioner borrowed and locked again shouldn't stay trusted.
+        ["Set-Cookie", clearTrustedDeviceCookie(request, t.trip.id)],
+      ],
+    },
   );
 });
 
@@ -91,12 +105,10 @@ export const PUT = withErrors(async (request: Request, ctx: Ctx) => {
   const body = await readJsonObject(request);
   if (body instanceof Response) return body;
   const newPin = typeof body.new_pin === "string" ? body.new_pin.trim() : "";
-  if (!isValidPin(newPin)) return badRequest("The new PIN has to be 4 to 12 digits.");
+  if (!isValidPin(newPin)) return badRequest(`The new PIN has to be ${PIN_MIN_LENGTH} to ${PIN_MAX_LENGTH} digits.`);
   const denied = await checkPin(request, t, body.pin);
   if (denied) return denied;
-  await setTripPinHash(t.db, t.trip.id, await hashPin(newPin));
-  return json(
-    { ok: true, is_commissioner: true },
-    { headers: { "Set-Cookie": commissionerCookie(request, t.trip.id) } },
-  );
+  const newHash = await hashPin(newPin);
+  await setTripPinHash(t.db, t.trip.id, newHash);
+  return json({ ok: true, is_commissioner: true }, { headers: commissionerSessionHeaders(request, t.trip.id, newHash) });
 });

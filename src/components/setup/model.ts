@@ -475,6 +475,37 @@ export function unfinishedTeams(s: TripState): UnfinishedTeam[] {
   return out;
 }
 
+export interface ScoreGap {
+  team: Team;
+  /** Holes the team has played past with no strokes, ascending. */
+  holes: number[];
+}
+
+/**
+ * Holes a team has already played past without a score: every hole once it tapped Round complete,
+ * else the holes before its open hole. A blank hole drops out of the round net (its drinks stay
+ * banked), so it plays as even par: the commissioner should see these before pots lock.
+ */
+export function scoreGaps(s: TripState): ScoreGap[] {
+  const out: ScoreGap[] = [];
+  for (const team of liveTeams(s)) {
+    const rs = s.team_round_state.find((r) => r.team_id === team.id);
+    const passed = rs?.status === "complete" ? 18 : rs?.status === "playing" && rs.open_hole !== null ? rs.open_hole - 1 : 0;
+    if (passed <= 0) continue;
+    const scored = new Set(s.hole_scores.filter((h) => h.team_id === team.id && h.strokes !== null).map((h) => h.hole));
+    const holes: number[] = [];
+    for (let h = 1; h <= passed; h++) if (!scored.has(h)) holes.push(h);
+    if (holes.length > 0) out.push({ team, holes });
+  }
+  return out;
+}
+
+/** "hole 7" / "holes 2, 7 and 13". */
+export function holesLabel(holes: readonly number[]): string {
+  if (holes.length === 1) return `hole ${holes[0]}`;
+  return `holes ${holes.slice(0, -1).join(", ")} and ${holes[holes.length - 1]}`;
+}
+
 // ---------------------------------------------------------------------------
 // Players
 // ---------------------------------------------------------------------------

@@ -7,7 +7,9 @@ import { createTestDb, setDbForTests, type DbConnection } from "@/lib/server/db"
 import { hashPin, resetPinThrottle } from "@/lib/server/auth";
 import { applyOpsToTrip } from "@/lib/server/apply";
 import {
+  claimDemoSlot,
   createDemoTrip,
+  DEMO_CREATES_PER_HOUR,
   DEMO_PHOTO_ASSETS,
   DEMO_PIN,
   DemoError,
@@ -21,7 +23,7 @@ import {
   type DemoResult,
 } from "@/lib/server/demo";
 import { findTripByCode, loadTripState } from "@/lib/server/repo";
-import { readLocalPhoto } from "@/lib/server/storage";
+import { putPhoto, readLocalPhoto } from "@/lib/server/storage";
 import { createTrip } from "@/lib/server/trips";
 import { derive } from "@/lib/engine";
 import { haversineYards } from "@/lib/engine/geo";
@@ -81,11 +83,18 @@ afterAll(async () => {
   fs.rmSync(uploads, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   localEnv();
   resetDemoRateLimit();
-  resetPinThrottle();
+  await resetPinThrottle();
+  await db.query("delete from demo_creations");
 });
+
+const JUNK = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
+const filesUnder = (tripId: string): string[] => {
+  const dir = path.join(uploads, "trips", tripId);
+  return fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true, withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name) : [];
+};
 
 
 describe("demo course layout", () => {
@@ -356,18 +365,36 @@ describe("resetDemoTrip", () => {
     await expect(resetDemoTrip(db, "nosuchdemo", { mode: "partial" })).rejects.toMatchObject({ status: 404 });
   });
 
-  it("pruneDemoTrips drops week-old demos only", async () => {
-    const old = await createDemoTrip(db, { mode: "setup", code: "demoold01", now: new Date(NOW.getTime() - 9 * 24 * 3600_000), photos: false });
+  it("pruneDemoTrips drops demos older than 48 hours, with their photos; never real trips", async () => {
+    const old = await createDemoTrip(db, { mode: "setup", code: "demoold01", now: new Date(NOW.getTime() - 50 * 3600_000), photos: false });
+    const young = await createDemoTrip(db, { mode: "setup", code: "demoyoung1", now: new Date(NOW.getTime() - 30 * 3600_000), photos: false });
     const real = await createTrip(db, {
       name: "Old real trip",
       app_name: "Scramble",
       pin_hash: await hashPin("2468"),
       now: new Date(NOW.getTime() - 30 * 24 * 3600_000),
     });
+    // Somebody uploaded junk into the old demo.
+    await putPhoto(old.trip.id, `trips/${old.trip.id}/posts/${newId()}.jpg`, JUNK);
+    expect(filesUnder(old.trip.id)).toHaveLength(1);
     const n = await pruneDemoTrips(db, { now: NOW });
     expect(n).toBeGreaterThanOrEqual(1);
     expect(await findTripByCode(db, old.code)).toBeNull();
+    expect(filesUnder(old.trip.id)).toEqual([]);
+    expect(await findTripByCode(db, young.code)).not.toBeNull();
     expect(await findTripByCode(db, real.code)).not.toBeNull();
+  });
+
+  it("a reset clears the old trip's photos (uploads included) before re-seeding", async () => {
+    const first = await createDemoTrip(db, { mode: "full", code: "demophotos1", now: NOW });
+    const seeded = filesUnder(first.trip.id).length;
+    expect(seeded).toBeGreaterThan(0);
+    await putPhoto(first.trip.id, `trips/${first.trip.id}/posts/${newId()}.jpg`, JUNK);
+    expect(filesUnder(first.trip.id)).toHaveLength(seeded + 1);
+    await resetDemoTrip(db, "demophotos1", { mode: "full", now: NOW });
+    expect(filesUnder(first.trip.id)).toHaveLength(seeded);
+    await resetDemoTrip(db, "demophotos1", { mode: "setup", now: NOW });
+    expect(filesUnder(first.trip.id)).toEqual([]);
   });
 });
 
@@ -418,6 +445,26 @@ describe("POST /api/demo", () => {
     expect((await demoRoute(demoReq({ code: "nosuchdemo2" }, "10.1.1.3"))).status).toBe(404);
     expect((await demoRoute(demoReq({ mode: "bogus" }, "10.1.1.3"))).status).toBe(400);
     expect((await demoRoute(demoReq({ code: "../etc" }, "10.1.1.3"))).status).toBe(400);
+  });
+
+  it("caps demo creates + resets per hour for everyone together (in the database)", async () => {
+    const t0 = new Date("2026-10-20T10:00:00.000Z");
+    for (let i = 0; i < DEMO_CREATES_PER_HOUR; i++) expect(await claimDemoSlot(db, `10.7.${i}.1`, new Date(t0.getTime() + i * 1000))).toBe(0);
+    const wait = await claimDemoSlot(db, "10.7.200.1", new Date(t0.getTime() + 60_000));
+    expect(wait).toBeGreaterThan(0);
+    expect(wait).toBeLessThanOrEqual(3600);
+    expect(await claimDemoSlot(db, "10.7.200.1", new Date(t0.getTime() + 3601_000))).toBe(0);
+
+    // Through the route: a fresh client still gets 429 while the hour is full.
+    await db.query("delete from demo_creations");
+    await db.query(
+      "insert into demo_creations (client, created_at) select 'x', now() from generate_series(1, $1::int)",
+      [DEMO_CREATES_PER_HOUR],
+    );
+    const res = await demoRoute(demoReq({}, "10.1.77.1"));
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({ code: "throttled", retry_after: expect.any(Number) });
+    expect(res.headers.get("set-cookie")).toBeNull();
   });
 
   it("rate limits per client", async () => {

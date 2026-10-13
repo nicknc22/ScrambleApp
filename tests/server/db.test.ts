@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanString, createTestDb, getDb, normalizeRow, normalizeValue, setDbForTests, type DbConnection } from "@/lib/server/db";
-import { embeddedMigrations, INIT_SQL, loadMigrations, migrationsDir, runMigrations } from "@/lib/server/migrate";
+import { ABUSE_LIMITS_SQL, embeddedMigrations, INIT_SQL, loadMigrations, migrationsDir, runMigrations } from "@/lib/server/migrate";
 import { ROW_SPECS, TRIP_SPEC, type ColDef } from "@/lib/server/repo";
 import { ROW_TABLES } from "@/lib/types";
 
@@ -27,11 +27,18 @@ const ALL_TABLES = [
   "push_log",
   "ai_log",
   "applied_ops",
+  "pin_failures",
+  "photo_uploads",
+  "demo_creations",
 ];
+/** Server-wide bookkeeping that outlives any one trip (no trips FK). */
+const GLOBAL_TABLES = ["schema_migrations", "trips", "demo_creations"];
+const VERSIONS = ["001_init", "002_abuse_limits"];
 
 describe("migrations", () => {
   it("embedded SQL is byte-identical to db/migrations/*.sql, and every file is embedded", () => {
     expect(INIT_SQL).toBe(fs.readFileSync(path.join(process.cwd(), "db/migrations/001_init.sql"), "utf8"));
+    expect(ABUSE_LIMITS_SQL).toBe(fs.readFileSync(path.join(process.cwd(), "db/migrations/002_abuse_limits.sql"), "utf8"));
     const files = fs.readdirSync(migrationsDir()).filter((f) => f.endsWith(".sql"));
     const embedded = new Map(embeddedMigrations().map((m) => [m.version, m.sql]));
     expect(files.length).toBeGreaterThan(0);
@@ -58,14 +65,30 @@ describe("migrations", () => {
     const names = new Set(rows.map((r) => r.table_name));
     for (const t of ALL_TABLES) expect(names.has(t), t).toBe(true);
     const versions = await db.query<{ version: string }>("select version from schema_migrations order by version");
-    expect(versions.map((v) => v.version)).toEqual(["001_init"]);
+    expect(versions.map((v) => v.version)).toEqual(VERSIONS);
   });
 
   it("is a no-op the second time, and the SQL itself is idempotent", async () => {
     expect(await runMigrations(db)).toEqual([]);
     await db.exec(INIT_SQL); // pasting it into the SQL editor again must not break anything
+    await db.exec(ABUSE_LIMITS_SQL);
     const versions = await db.query("select version from schema_migrations");
-    expect(versions).toHaveLength(1);
+    expect(versions).toHaveLength(VERSIONS.length);
+  });
+
+  it("applies 002 on top of a database that only had 001 (an existing deploy)", async () => {
+    const old = await createTestDb();
+    try {
+      // Simulate the pre-002 database: drop what 002 adds and forget it ran.
+      await old.exec("drop table pin_failures; drop table photo_uploads; drop table demo_creations; delete from schema_migrations where version = '002_abuse_limits'");
+      expect(await runMigrations(old)).toEqual(["002_abuse_limits"]);
+      const rows = await old.query<{ n: number }>(
+        "select count(*)::int as n from information_schema.tables where table_name in ('pin_failures', 'photo_uploads', 'demo_creations')",
+      );
+      expect(rows[0].n).toBe(3);
+    } finally {
+      await old.close();
+    }
   });
 
   it("enables RLS on every table and defines no policies", async () => {
@@ -84,7 +107,7 @@ describe("migrations", () => {
       `select c.conrelid::regclass::text as table, c.confrelid::regclass::text as ref, pg_get_constraintdef(c.oid) as def
        from pg_constraint c where c.contype = 'f'`,
     );
-    const children = ALL_TABLES.filter((t) => t !== "trips" && t !== "schema_migrations");
+    const children = ALL_TABLES.filter((t) => !GLOBAL_TABLES.includes(t));
     for (const t of children) {
       const own = fks.filter((f) => f.table === t);
       expect(own, t).toHaveLength(1);

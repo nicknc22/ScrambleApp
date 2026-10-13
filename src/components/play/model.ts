@@ -127,6 +127,27 @@ export function teamMoveNotice(opts: {
 /** After the screen changed holes under the user's thumb, Save ignores taps for this long. */
 export const HOLE_MOVE_GUARD_MS = 1500;
 
+/**
+ * This phone's latest write that can move the team: a tee-off / round complete, or a score or tee
+ * shot on hole N+1 (which opens it). `at` is a performance.now() time.
+ */
+export interface LocalMove {
+  to: number | "complete";
+  at: number;
+}
+
+const OWN_MOVE_MS = 10_000;
+
+/**
+ * Did the team's move to hole `to` (or finishing the round) come from this phone's own recent
+ * write? The optimistic reducer moves the team at once, so a match within a few seconds is ours
+ * (that phone already said so); anything else came from another phone.
+ */
+export function isOwnMove(local: LocalMove | null, to: number, finished: boolean, now: number): boolean {
+  if (!local || now - local.at > OWN_MOVE_MS) return false;
+  return finished ? local.to === "complete" : local.to === to;
+}
+
 /** Hole the big "On the tee" CTA opens while viewing `viewing`, or null when there is nothing to tee off. */
 export function teeCtaHole(rs: RoundLike | null | undefined, viewing: number): number | null {
   if (rs?.status === "complete") return null;
