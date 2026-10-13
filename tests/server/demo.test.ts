@@ -8,6 +8,7 @@ import { hashPin, resetPinThrottle } from "@/lib/server/auth";
 import { applyOpsToTrip } from "@/lib/server/apply";
 import {
   createDemoTrip,
+  DEMO_PHOTO_ASSETS,
   DEMO_PIN,
   DemoError,
   demoCourseLayout,
@@ -101,7 +102,7 @@ describe("demo course layout", () => {
   });
 
   it("embeds real JPEGs", () => {
-    for (const a of ["beer", "shotgun", "ctp", "ld", "sunset", "snowman"] as const) {
+    for (const a of DEMO_PHOTO_ASSETS) {
       const b = demoPhotoBytes(a);
       expect(b.byteLength).toBeGreaterThan(1000);
       expect([b[0], b[1], b[2]]).toEqual([0xff, 0xd8, 0xff]);
@@ -285,6 +286,7 @@ describe("createDemoTrip", () => {
     expect(activeFeed(s).filter((e) => e.type === "round_complete")).toHaveLength(3);
     expect(d.awards.find((a) => a.key === "champions")!.awarded).toBe(true);
     expect(d.awards.find((a) => a.key === "longest_drive")!.photo_path).not.toBeNull();
+    expect(d.awards.find((a) => a.key === "closest_pin")!.photo_path).not.toBeNull();
   });
 
   it("setup: roster, teams, pots and course ready, round not started", async () => {
