@@ -3,7 +3,8 @@ import {
   GeoError,
   getGpsSimulation,
   GPS_SIM_KEY,
-  requestLocationPermission,
+  measurePosition,
+  primeLocationPermission,
   sampleBestPosition,
   setGpsSimulation,
   type GeolocationLike,
@@ -145,24 +146,131 @@ describe("sampleBestPosition", () => {
   });
 });
 
-describe("requestLocationPermission", () => {
-  it("maps outcomes and never rejects", async () => {
-    const geo = new FakeGeo();
-    const ok = requestLocationPermission({ geolocation: geo });
-    geo.emit(1, 2, 10);
-    expect(await ok).toBe("granted");
-    expect(geo.options).toMatchObject({ enableHighAccuracy: true, timeout: 10000 });
+/**
+ * A phone showing "Allow location?": nothing is delivered (one-shot or watch) until allow()/deny();
+ * allow() hands every waiting callback the first coarse fix, like a real phone.
+ */
+class PromptGeo implements GeolocationLike {
+  answer: "pending" | "allowed" | "denied" = "pending";
+  once: Array<{ s: (p: GeolocationPosition) => void; e?: ((e: GeolocationPositionError) => void) | null }> = [];
+  watchers = new Map<number, { s: (p: GeolocationPosition) => void; e?: ((e: GeolocationPositionError) => void) | null }>();
+  oneShots: Array<PositionOptions | undefined> = [];
+  private nextId = 1;
+  watchPosition(s: (p: GeolocationPosition) => void, e?: ((e: GeolocationPositionError) => void) | null) {
+    const id = this.nextId++;
+    this.watchers.set(id, { s, e });
+    if (this.answer === "denied") e?.(geoError(1));
+    return id;
+  }
+  clearWatch(id: number) {
+    this.watchers.delete(id);
+  }
+  getCurrentPosition(s: (p: GeolocationPosition) => void, e?: ((e: GeolocationPositionError) => void) | null, o?: PositionOptions) {
+    this.oneShots.push(o);
+    if (this.answer === "allowed") s(position(65));
+    else if (this.answer === "denied") e?.(geoError(1));
+    else this.once.push({ s, e });
+  }
+  allow(coarse = 65) {
+    this.answer = "allowed";
+    for (const c of this.once.splice(0)) c.s(position(coarse));
+    for (const w of [...this.watchers.values()]) w.s(position(coarse));
+  }
+  deny() {
+    this.answer = "denied";
+    for (const c of this.once.splice(0)) c.e?.(geoError(1));
+    for (const w of [...this.watchers.values()]) w.e?.(geoError(1));
+  }
+  emit(accuracy: number) {
+    for (const w of [...this.watchers.values()]) w.s(position(accuracy));
+  }
+}
 
-    const geo2 = new FakeGeo();
-    const denied = requestLocationPermission({ geolocation: geo2 });
-    geo2.fail(1);
-    expect(await denied).toBe("denied");
+function position(accuracy: number): GeolocationPosition {
+  return { coords: { latitude: 41.05, longitude: -75.67, accuracy }, timestamp: Date.now() } as unknown as GeolocationPosition;
+}
+function geoError(code: number): GeolocationPositionError {
+  return { code, message: "x", PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 } as GeolocationPositionError;
+}
+const prompt = async () => "prompt" as const;
 
-    const geo3 = new FakeGeo();
-    const silent = requestLocationPermission({ geolocation: geo3 });
-    vi.advanceTimersByTime(16_000);
-    expect(await silent).toBe("unavailable");
+describe("measurePosition (the first Measure drive asks for location)", () => {
+  it("the Allow prompt doesn't eat the 5 s window: no coarse first fix, a real one", async () => {
+    // The bug: sampling straight away while the prompt is up 6 s returns the first coarse fix (a weak try).
+    const raw = new PromptGeo();
+    const bad = sampleBestPosition({ geolocation: raw, storage: null, durationMs: 5000 });
+    await vi.advanceTimersByTimeAsync(6000);
+    raw.allow(65);
+    expect((await bad).accuracy).toBe(65);
 
-    expect(await requestLocationPermission({ geolocation: null })).toBe("unsupported");
+    const geo = new PromptGeo();
+    const p = measurePosition({ geolocation: geo, storage: null, durationMs: 5000, permissionState: prompt });
+    await vi.advanceTimersByTimeAsync(6000); // reading the prompt
+    expect(geo.watchers.size).toBe(0); // sampling hasn't started
+    expect(geo.oneShots).toHaveLength(1);
+    geo.allow(65);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(geo.watchers.size).toBe(1); // the 5 s window starts now
+    await vi.advanceTimersByTimeAsync(1500);
+    geo.emit(30);
+    await vi.advanceTimersByTimeAsync(1500);
+    geo.emit(8);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect((await p).accuracy).toBe(8);
+  });
+
+  it("a slow Allow (11 s) doesn't time out either", async () => {
+    const raw = new PromptGeo();
+    const bad = sampleBestPosition({ geolocation: raw, storage: null }).catch((e: GeoError) => e.code);
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(await bad).toBe("timeout");
+
+    const geo = new PromptGeo();
+    const p = measurePosition({ geolocation: geo, storage: null, permissionState: prompt });
+    await vi.advanceTimersByTimeAsync(11_000);
+    geo.allow();
+    await vi.advanceTimersByTimeAsync(0);
+    geo.emit(4);
+    expect((await p).accuracy).toBe(4);
+  });
+
+  it("Don't Allow: permission_denied, and it never starts watching", async () => {
+    const geo = new PromptGeo();
+    const p = measurePosition({ geolocation: geo, storage: null, permissionState: prompt }).catch((e: GeoError) => e);
+    await vi.advanceTimersByTimeAsync(3000);
+    geo.deny();
+    const err = await p;
+    expect(err).toBeInstanceOf(GeoError);
+    expect((err as GeoError).code).toBe("permission_denied");
+    expect(geo.watchers.size).toBe(0);
+    // Already denied in Settings: says so without a one-shot.
+    const blocked = new PromptGeo();
+    expect(await primeLocationPermission({ geolocation: blocked, storage: null, permissionState: async () => "denied" })).toBe("denied");
+    expect(blocked.oneShots).toHaveLength(0);
+  });
+
+  it("already granted (or simulated): no one-shot, sampling starts at the tap", async () => {
+    const geo = new PromptGeo();
+    geo.answer = "allowed";
+    const p = measurePosition({ geolocation: geo, storage: null, permissionState: async () => "granted" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(geo.oneShots).toHaveLength(0);
+    geo.emit(5);
+    expect((await p).accuracy).toBe(5);
+
+    const storage = new MemStorage();
+    setGpsSimulation({ lat: 41, lng: -75, accuracy: 3 }, storage);
+    const sim = new PromptGeo();
+    expect((await measurePosition({ geolocation: sim, storage, permissionState: prompt })).simulated).toBe(true);
+    expect(sim.oneShots).toHaveLength(0);
+  });
+
+  it("no Permissions API: asks with the one-shot anyway; a prompt nobody answers stops waiting", async () => {
+    const geo = new PromptGeo();
+    const primed = primeLocationPermission({ geolocation: geo, storage: null, permissionState: async () => "unknown", maxWaitMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await primed).toBe("ready");
+    expect(geo.oneShots).toEqual([expect.objectContaining({ maximumAge: Number.POSITIVE_INFINITY })]);
+    expect(await primeLocationPermission({ geolocation: null, storage: null, permissionState: prompt })).toBe("ready");
   });
 });

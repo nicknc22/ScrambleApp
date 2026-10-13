@@ -210,47 +210,77 @@ export function sampleBestPosition(opts: SampleOptions = {}): Promise<GeoReading
   });
 }
 
-export type LocationPermission = "granted" | "denied" | "unavailable" | "unsupported";
+export type LocationPermissionState = "granted" | "denied" | "prompt" | "unknown";
 
 /**
- * One-shot location request for onboarding (so the permission prompt happens at join time, not
- * mid-shot). Never rejects.
+ * Get the browser's "Allow location?" prompt answered BEFORE a sampling window starts. Nothing asks
+ * for location up front, so the first Measure drive triggers the prompt, and sampleBestPosition's
+ * timers start at the tap: a player who read the prompt for 6 s got the first coarse fix (weak, a
+ * wasted try) and one who took 11 s got "GPS took too long" (another). So when the permission isn't
+ * known to be granted, ask with a one-shot request and wait for the answer (its reading is thrown
+ * away). "denied" when the answer is no, else "ready". Never rejects.
  */
-export function requestLocationPermission(
-  opts: { geolocation?: GeolocationLike | null; timeoutMs?: number } = {},
-): Promise<LocationPermission> {
+export async function primeLocationPermission(
+  opts: {
+    geolocation?: GeolocationLike | null;
+    storage?: StorageLike | null;
+    permissionState?: () => Promise<LocationPermissionState>;
+    /** Stop waiting after this long (some browsers never call back on a dismissed prompt). Default 60 s. */
+    maxWaitMs?: number;
+  } = {},
+): Promise<"ready" | "denied"> {
+  if (getGpsSimulation(opts.storage === undefined ? safeStorage() : opts.storage)) return "ready";
   const geo = opts.geolocation === undefined ? defaultGeolocation() : opts.geolocation;
-  if (!geo) return Promise.resolve("unsupported");
-  return new Promise<LocationPermission>((resolve) => {
+  if (!geo) return "ready"; // sampling says "unsupported"
+  const state = await (opts.permissionState ?? getLocationPermissionState)();
+  if (state === "granted") return "ready";
+  if (state === "denied") return "denied";
+  return new Promise<"ready" | "denied">((resolve) => {
     let settled = false;
-    const done = (v: LocationPermission) => {
+    const done = (v: "ready" | "denied") => {
       if (settled) return;
       settled = true;
+      clearTimeout(t);
       resolve(v);
     };
-    // Some browsers never call back when the prompt is dismissed; don't hang onboarding.
-    const t = setTimeout(() => done("unavailable"), (opts.timeoutMs ?? 10000) + 5000);
+    const t = setTimeout(() => done("ready"), opts.maxWaitMs ?? 60_000);
     try {
       geo.getCurrentPosition(
-        () => {
-          clearTimeout(t);
-          done("granted");
-        },
-        (err) => {
-          clearTimeout(t);
-          done(errorCode(err) === "permission_denied" ? "denied" : "unavailable");
-        },
-        { enableHighAccuracy: true, timeout: opts.timeoutMs ?? 10000, maximumAge: 60_000 },
+        () => done("ready"),
+        (err) => done(errorCode(err) === "permission_denied" ? "denied" : "ready"),
+        // Any position will do (it's only the prompt we're after): cached and coarse is fastest.
+        { enableHighAccuracy: false, maximumAge: Number.POSITIVE_INFINITY, timeout: 15_000 },
       );
     } catch {
-      clearTimeout(t);
-      done("unsupported");
+      done("ready");
     }
   });
 }
 
-/** Permission state without prompting, where the Permissions API exists. */
-export async function getLocationPermissionState(): Promise<"granted" | "denied" | "prompt" | "unknown"> {
+/**
+ * What Measure drive calls: primeLocationPermission, then sampleBestPosition, so the sampling
+ * window starts only once the permission prompt is answered. Rejects like sampleBestPosition
+ * (permission_denied when the answer was no).
+ */
+export async function measurePosition(
+  opts: SampleOptions & { permissionState?: () => Promise<LocationPermissionState>; maxPromptWaitMs?: number } = {},
+): Promise<GeoReading> {
+  const primed = await primeLocationPermission({
+    geolocation: opts.geolocation,
+    storage: opts.storage,
+    permissionState: opts.permissionState,
+    maxWaitMs: opts.maxPromptWaitMs,
+  });
+  if (primed === "denied") throw new GeoError("permission_denied");
+  return sampleBestPosition(opts);
+}
+
+/**
+ * Permission state without prompting, where the Permissions API exists. (Nothing asks for location
+ * up front: the first Measure drive asks (primeLocationPermission), and the long-drive sheet says
+ * why before they tap.)
+ */
+export async function getLocationPermissionState(): Promise<LocationPermissionState> {
   try {
     if (typeof navigator === "undefined" || !navigator.permissions?.query) return "unknown";
     const s = await navigator.permissions.query({ name: "geolocation" as PermissionName });

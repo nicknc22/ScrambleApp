@@ -9,7 +9,7 @@
 import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import type { UUID } from "@/lib/types";
 import { useClientState } from "@/lib/client/react";
-import { GEO_ERROR_MESSAGES, GeoError, sampleBestPosition, type GeoErrorCode } from "@/lib/client/geo";
+import { GEO_ERROR_MESSAGES, GeoError, getLocationPermissionState, measurePosition, type GeoErrorCode } from "@/lib/client/geo";
 import { BottomSheet, Button, Card, EmptyState, PlayerName, TeamPill, cx, displayName } from "@/components/ui";
 import { useShellNav } from "@/components/shell/nav";
 import {
@@ -101,7 +101,8 @@ function LongDriveFlow({ onClose, hole }: LongDriveSheetProps) {
     const mine = ++attempt.current;
     const live = () => alive.current && mine === attempt.current;
     send({ type: "start" });
-    sampleBestPosition({
+    // The first time, the phone asks "Allow location?": the 5 s window starts once that's answered.
+    measurePosition({
       durationMs: SAMPLE_MS,
       onProgress: (reading) => {
         if (live()) send({ type: "progress", reading });
@@ -316,7 +317,23 @@ function LongDriveFlow({ onClose, hole }: LongDriveSheetProps) {
   );
 }
 
+/** Shown above Measure when the phone hasn't allowed location yet (nothing asks up front). */
+export const LOCATION_REASON = "First time, your phone asks to use your location. Say Allow: GPS measures the drive, not your ego.";
+
 function IdleCard() {
+  // Location isn't requested at join time: the first Measure triggers the browser's prompt (and only
+  // then starts sampling, see measurePosition), so say why before they tap. Hidden once it's granted
+  // (unknown = can't tell, so say it).
+  const [askNext, setAskNext] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void getLocationPermissionState().then((state) => {
+      if (live) setAskNext(state !== "granted");
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
   return (
     <Card tone="sky" className="space-y-2 text-center" data-testid="ld-idle">
       <p className="text-6xl leading-none" aria-hidden="true">
@@ -324,6 +341,11 @@ function IdleCard() {
       </p>
       <p className="loud text-3xl">Stand at your ball.</p>
       <p className="text-base font-bold">Fairway only (honor system). Hit Measure and hold the phone still for 5 seconds.</p>
+      {askNext && (
+        <p className="rounded-xl border-2 border-ink bg-paper px-3 py-2 text-sm font-extrabold" data-testid="ld-location-reason">
+          📍 {LOCATION_REASON}
+        </p>
+      )}
     </Card>
   );
 }

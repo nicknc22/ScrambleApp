@@ -1,5 +1,5 @@
-// Commissioner Setup end to end against the real server: create the trip from the home page,
-// build the roster, make 3 teams (tap-to-move for most players, one real mouse drag), crown the
+// Commissioner Setup end to end against the real server: create the trip from the home page
+// (roster box cleared, so it starts empty), build the roster by hand, make 3 teams (tap-to-move for most players, one real mouse drag), crown the
 // groom, set antes with a 70/30 split, start the round, and check Play unlocks for a player.
 import { randomUUID } from "node:crypto";
 import { devices, expect, test, type APIRequestContext, type Page } from "@playwright/test";
@@ -40,6 +40,11 @@ test("commissioner sets up the trip from scratch and starts the round", async ({
   await page.goto("/?home=1");
   await page.getByRole("button", { name: "Create the trip" }).click();
   await page.getByLabel("Trip name").fill("Setup Spec Scramble");
+  // The roster box comes pre-filled with the crew (e2e/onboarding.spec.ts covers that path); empty
+  // it to build a different roster by hand. No names, no groom picker.
+  await expect(page.getByTestId("create-roster")).toHaveValue(/^Caster\nJoe\n/);
+  await page.getByTestId("create-roster").fill("");
+  await expect(page.getByTestId("create-groom")).toHaveCount(0);
   await page.getByLabel("Commissioner PIN").fill("2468");
   await page.getByRole("button", { name: "Create trip" }).click();
   await expect(page).toHaveURL(/\/t\/[a-z0-9]+\?tab=setup/, { timeout: 30_000 });
@@ -201,8 +206,6 @@ test("commissioner sets up the trip from scratch and starts the round", async ({
     await p2.goto(`/t/${code}`);
     await expect(p2.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
     await p2.getByTestId("join-player").filter({ hasText: "Tom" }).click();
-    await expect(p2.getByTestId("onboarding")).toBeVisible();
-    await p2.getByRole("button", { name: "Skip setup" }).click();
     await expect(p2.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play");
     await expect(p2.getByTestId("waiting-for-start")).toHaveCount(0);
     await expect(p2.getByTestId("tee-cta")).toBeVisible();
@@ -300,7 +303,9 @@ test("every setup section fits a 360px phone, settings save, and Setup is commis
   await page.goto(`/t/${code}?tab=setup`);
   await expect(page.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("join-player").filter({ hasText: "Tom" }).click();
-  await page.getByRole("button", { name: "Skip setup" }).click();
   await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play");
   await expect(page.getByTestId("waiting-for-start")).toBeVisible();
+  // Pre-round, the optional "Get set up" card leads (Home Screen + notifications), and fits 360px.
+  await expect(page.getByTestId("get-set-up")).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });

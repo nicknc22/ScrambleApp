@@ -1,5 +1,9 @@
-// POST /api/trips {pin, name?, app_name?} → 201 {code, trip_id, url} + commissioner cookie (and
-// this device trusted for the new trip, see auth.ts).
+// POST /api/trips {pin, name?, app_name?, roster?} → 201 {code, trip_id, url, players} +
+// commissioner cookie (and this device trusted for the new trip, see auth.ts).
+// `roster` (optional): the players to pre-load, in order, as names or {name, is_groom?} (at most
+// one groom, unique names; see validateRosterInput). They're created in the same transaction as
+// the trip; `players` is [{id, name}] in roster order (the creator's phone claims players[0]).
+// A malformed roster is a 400 before the PIN is even checked.
 // With a server PIN set (COMMISSIONER_PIN_HASH, else the plain COMMISSIONER_PIN), the PIN must
 // match it. The new trip stores that hash, or a fresh scrypt hash of the plain PIN (never the PIN
 // itself). Wrong PINs share the database throttle (bucket: trip_id null; per IP, plus a slow
@@ -7,6 +11,7 @@
 // trip). A server PIN that is set but malformed refuses every attempt (not_configured).
 // Without one, only outside production (dev convenience): the trip's PIN becomes `pin`.
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
+import { validateRosterInput } from "@/lib/roster";
 import {
   attemptPin,
   clientKey,
@@ -20,7 +25,7 @@ import {
 import { getDb } from "@/lib/server/db";
 import { isProduction } from "@/lib/server/env";
 import { badRequest, errorJson, json, readJsonObject, withErrors } from "@/lib/server/http";
-import { createTrip, DEFAULT_APP_NAME, DEFAULT_TRIP_NAME, TripInputError } from "@/lib/server/trips";
+import { createTripWithRoster, DEFAULT_APP_NAME, DEFAULT_TRIP_NAME, TripInputError } from "@/lib/server/trips";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,6 +36,8 @@ export const POST = withErrors(async (request: Request) => {
   const pin = typeof body.pin === "string" ? body.pin.trim() : "";
   const name = typeof body.name === "string" ? body.name : DEFAULT_TRIP_NAME;
   const appName = typeof body.app_name === "string" ? body.app_name : DEFAULT_APP_NAME;
+  const roster = validateRosterInput(body.roster);
+  if (!roster.ok) return badRequest(roster.error);
   const db = getDb();
 
   let pinHash: string;
@@ -60,9 +67,9 @@ export const POST = withErrors(async (request: Request) => {
   }
 
   try {
-    const trip = await createTrip(db, { name, app_name: appName, pin_hash: pinHash });
+    const { trip, players } = await createTripWithRoster(db, { name, app_name: appName, pin_hash: pinHash, roster: roster.roster });
     return json(
-      { code: trip.code, trip_id: trip.id, url: `/t/${trip.code}` },
+      { code: trip.code, trip_id: trip.id, url: `/t/${trip.code}`, players: players.map((p) => ({ id: p.id, name: p.name })) },
       { status: 201, headers: commissionerSessionHeaders(request, trip.id, pinHash) },
     );
   } catch (e) {

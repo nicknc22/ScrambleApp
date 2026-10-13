@@ -1,6 +1,6 @@
 "use client";
 // Captures Chrome/Android's beforeinstallprompt so we can offer a real "Install" button.
-// Registered at module load (the event fires early, before onboarding mounts).
+// Registered at module load (the event fires early, before the "Get set up" card mounts).
 import { useSyncExternalStore } from "react";
 
 interface BeforeInstallPromptEvent extends Event {

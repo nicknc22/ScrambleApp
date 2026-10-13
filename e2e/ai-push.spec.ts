@@ -151,7 +151,6 @@ test.describe("closest to pin with a photo", () => {
     await page.addInitScript(
       ([c, me]) => {
         localStorage.setItem(`scramble:me:${c}`, me);
-        localStorage.setItem("scramble:onboarded", "1");
       },
       [s.code, s.player.A1],
     );

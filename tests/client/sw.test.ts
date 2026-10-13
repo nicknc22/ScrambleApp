@@ -296,6 +296,36 @@ describe("service worker", () => {
     expect(JSON.parse(await text((await sw.get("/manifest.webmanifest", "cors")).res))).toMatchObject({ name: "Scramble" });
   });
 
+  it("a trip manifest's ?me=<player> variant is cached by full URL, and offline borrows any cached copy with its own me", async () => {
+    const sw = loadSw();
+    const JOE = "3f2b8c1e-6a4d-4e7f-9b21-0c5d8e7f6a1b";
+    const GREG = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+    sw.net.handler = (req) => {
+      const u = new URL(req.url);
+      const me = u.searchParams.get("me");
+      const start = `/t/abc123?source=homescreen${me ? `&me=${me}` : ""}`;
+      return new Response(JSON.stringify({ name: "Bachelor Open", id: "/t/abc123", start_url: start }), { status: 200, headers: { "content-type": "application/manifest+json" } });
+    };
+    // Online: the plain manifest and Joe's variant are cached separately.
+    await sw.get("/t/abc123/manifest.webmanifest", "cors");
+    await sw.get(`/t/abc123/manifest.webmanifest?me=${JOE}`, "cors");
+    const cache = sw.caches.caches.get("scramble-static-v1")!;
+    expect(cache.entries.has(ORIGIN + "/t/abc123/manifest.webmanifest")).toBe(true);
+    expect(cache.entries.has(`${ORIGIN}/t/abc123/manifest.webmanifest?me=${JOE}`)).toBe(true);
+
+    sw.net.online = false;
+    const body = async (p: string) => JSON.parse(await text((await sw.get(p, "cors")).res)) as { start_url: string; name: string; id: string };
+    // The exact copy.
+    expect((await body(`/t/abc123/manifest.webmanifest?me=${JOE}`)).start_url).toBe(`/t/abc123?source=homescreen&me=${JOE}`);
+    // A variant never fetched: another copy with start_url pointing at the right player.
+    const greg = await body(`/t/abc123/manifest.webmanifest?me=${GREG}`);
+    expect(greg).toMatchObject({ name: "Bachelor Open", id: "/t/abc123", start_url: `/t/abc123?source=homescreen&me=${GREG}` });
+    // Junk me: no me at all.
+    expect((await body("/t/abc123/manifest.webmanifest?me=joe")).start_url).toBe("/t/abc123?source=homescreen");
+    // Nothing cached for this trip: still the offline answer.
+    expect((await sw.get("/t/other99/manifest.webmanifest?me=" + JOE, "cors")).res?.status).toBe(504);
+  });
+
   it("API calls, non-GET and cross-origin requests go straight to the network", async () => {
     const sw = loadSw();
     expect((await sw.get("/api/t/abc/state", "cors")).handled).toBe(false);

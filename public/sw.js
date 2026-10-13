@@ -4,7 +4,9 @@
  * deploy never throws away the pages and chunks a phone needs to open with no signal):
  *   pages   navigations: network-first (4 s), cached by URL without its search string
  *   static  /_next/static/*, /icon*, /apple-icon*, /favicon.ico: cache-first;
- *           web manifests (/manifest.webmanifest, /t/<code>/manifest.webmanifest): network-first
+ *           web manifests (/manifest.webmanifest, /t/<code>/manifest.webmanifest): network-first,
+ *           cached by full URL (a trip's ?me=<player> variant included); offline, a trip manifest
+ *           variant never fetched falls back to any cached copy of it with start_url's `me` rewritten
  *   photos  /api/photos/* and Supabase public storage objects: cache-first, and only a 200 is
  *           ever cached (a photo requested before its upload landed 404s; caching that, or an
  *           opaque response that might hide one, would keep it broken forever)
@@ -270,13 +272,45 @@ async function cacheFirst(event, cacheName, isPhoto) {
   }
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Offline copy of a trip manifest whose exact URL was never cached (e.g. the ?me=<player> variant
+ * the page links once a name is picked): another cached copy of the same manifest, with start_url's
+ * `me` set to this request's (or removed), so the Home Screen app still starts as the right player.
+ */
+async function tripManifestVariant(cache, request) {
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch (e) {
+    return null;
+  }
+  if (!TRIP_MANIFEST_RE.test(url.pathname)) return null;
+  const base = await cache.match(request, { ignoreSearch: true, ignoreVary: true });
+  if (!base) return null;
+  const me = url.searchParams.get("me");
+  try {
+    const body = await base.clone().json();
+    if (body && typeof body.start_url === "string") {
+      const start = new URL(body.start_url, self.location.origin);
+      if (me && UUID_RE.test(me)) start.searchParams.set("me", me.toLowerCase());
+      else start.searchParams.delete("me");
+      body.start_url = start.pathname + start.search;
+    }
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/manifest+json; charset=utf-8" } });
+  } catch (e) {
+    return base;
+  }
+}
+
 /** Web manifests: network first (a renamed app shows up), the cached copy when offline. */
 async function networkFirst(event, cacheName) {
   const request = event.request;
   const cached = async () => {
     try {
       const cache = await caches.open(cacheName);
-      return (await cache.match(request, { ignoreVary: true })) || null;
+      return (await cache.match(request, { ignoreVary: true })) || (await tripManifestVariant(cache, request));
     } catch (e) {
       return null;
     }

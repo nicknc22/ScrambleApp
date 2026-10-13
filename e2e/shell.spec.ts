@@ -80,7 +80,7 @@ test.describe("trip shell (mocked API)", () => {
     };
   }
 
-  test("join -> onboarding -> tabs, with the tab in the URL", async ({ page }) => {
+  test("join -> straight into the tabs (no wizard), with the tab in the URL", async ({ page }) => {
     const { body } = snapshot();
     await page.route(`**/api/t/${CODE}/**`, async (route) => {
       const url = new URL(route.request().url());
@@ -93,9 +93,7 @@ test.describe("trip shell (mocked API)", () => {
     await expect(page.getByRole("heading", { name: "Shell Spec Scramble" })).toBeVisible();
     await expectNoHorizontalOverflow(page);
 
-    await page.getByTestId("join-player").first().click();
-    await expect(page.getByTestId("onboarding")).toBeVisible();
-    await page.getByRole("button", { name: "Skip setup" }).click();
+    await page.getByTestId("join-player").filter({ hasText: "Player A1" }).click();
 
     const shell = page.getByTestId("trip-shell");
     await expect(shell).toBeVisible();

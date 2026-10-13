@@ -1,5 +1,7 @@
 "use client";
 // Roster: quick-add by name, tap a row to edit (nickname, Venmo, groom), crown the groom.
+// Empty roster: "Load the boys" adds the default crew in one tap; "Add several at once" takes a
+// pasted list (RosterBulk.tsx). With players: "Send the link" (the clean /t/<code> link).
 import { useRef, useState, type FormEvent } from "react";
 import { useClientState } from "@/lib/client/react";
 import { newId } from "@/lib/ids";
@@ -9,7 +11,6 @@ import {
   BottomSheet,
   Button,
   Card,
-  EmptyState,
   IconChevronRight,
   IconPlus,
   PlayerName,
@@ -22,10 +23,13 @@ import {
 } from "@/components/ui";
 import { duplicateName, groomOf, livePlayers, teamIdByPlayer } from "./model";
 import { PlayerSheet } from "./PlayerSheet";
+import { ShareTripLinkCard } from "@/components/shell/ShareTripLink";
+import { BulkAddSheet, LoadTheBoysCard } from "./RosterBulk";
 import { clearSetupToasts, useSetupDispatch } from "./shared";
 
 export function RosterSection() {
   const view = useClientState((s) => s.view);
+  const meId = useClientState((s) => s.meId);
   const dispatch = useSetupDispatch();
   const toast = useToast();
   const [editing, setEditingState] = useState<string | "new" | null>(null);
@@ -34,6 +38,11 @@ export function RosterSection() {
     setEditingState(v);
   };
   const [groomPicker, setGroomPicker] = useState(false);
+  const [bulkOpen, setBulkOpenState] = useState(false);
+  const setBulkOpen = (v: boolean) => {
+    if (v) clearSetupToasts(toast);
+    setBulkOpenState(v);
+  };
   const [name, setName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   if (!view) return null;
@@ -74,7 +83,7 @@ export function RosterSection() {
         title="Roster"
         subtitle={
           players.length === 0
-            ? "Who's coming? Add everyone, then make teams."
+            ? "Who's coming? Load the boys, then make teams."
             : `${players.length} degenerate${players.length === 1 ? "" : "s"}${groom ? ` · 👑 ${displayName(groom)}` : ""}`
         }
       />
@@ -84,6 +93,8 @@ export function RosterSection() {
           The round is live. Roster edits post to the feed, and deleting a player changes his team&apos;s ghost beer math.
         </Card>
       )}
+
+      {players.length === 0 ? <LoadTheBoysCard /> : <ShareTripLinkCard code={view.trip.code} tripName={view.trip.name} />}
 
       <form onSubmit={quickAdd} className="flex items-end gap-2" noValidate>
         <div className="min-w-0 flex-1">
@@ -108,13 +119,23 @@ export function RosterSection() {
           Add
         </Button>
       </form>
-      <button
-        type="button"
-        onClick={() => setEditing("new")}
-        className="-mt-2 min-h-12 text-[15px] font-extrabold text-fairway-dark underline underline-offset-4"
-      >
-        Add with nickname, Venmo and groom flag
-      </button>
+      <div className="-mt-2 flex flex-wrap gap-x-5">
+        <button
+          type="button"
+          onClick={() => setBulkOpen(true)}
+          className="min-h-12 text-left text-[15px] font-extrabold text-fairway-dark underline underline-offset-4"
+          data-testid="bulk-add-open"
+        >
+          Add several at once
+        </button>
+        <button
+          type="button"
+          onClick={() => setEditing("new")}
+          className="min-h-12 text-left text-[15px] font-extrabold text-fairway-dark underline underline-offset-4"
+        >
+          Add with nickname, Venmo and groom flag
+        </button>
+      </div>
 
       {players.length > 0 && !groom && (
         <Card tone="hazard" className="flex items-center gap-3">
@@ -131,11 +152,7 @@ export function RosterSection() {
         </Card>
       )}
 
-      {players.length === 0 ? (
-        <EmptyState emoji="🦗" title="Empty roster">
-          Nobody&apos;s coming? Type a name above and hit Add. Ten times, probably.
-        </EmptyState>
-      ) : (
+      {players.length > 0 && (
         <ul className="overflow-hidden rounded-2xl border-2 border-ink" data-testid="roster-list">
           {players.map((p, i) => {
             const team = teamById.get(tOf.get(p.id) ?? "");
@@ -152,7 +169,7 @@ export function RosterSection() {
                   <Avatar player={p} teamSortOrder={team?.sort_order ?? null} showCrown={false} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-lg leading-tight font-black">
-                      <PlayerName player={p} showRealName />
+                      <PlayerName player={p} showRealName you={p.id === meId} />
                     </span>
                     <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-bold text-muted">
                       {team ? <TeamPill team={team} size="sm" /> : <Badge tone="hazard">No team</Badge>}
@@ -171,6 +188,7 @@ export function RosterSection() {
 
       <PlayerSheet playerId={editing} onClose={() => setEditing(null)} />
       <GroomPicker open={groomPicker} onClose={() => setGroomPicker(false)} />
+      <BulkAddSheet open={bulkOpen} onClose={() => setBulkOpen(false)} />
     </div>
   );
 }

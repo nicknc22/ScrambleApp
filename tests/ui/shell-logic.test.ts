@@ -10,7 +10,6 @@ import { issueKind, syncIssuesChipText } from "@/components/shell/SyncIssues";
 import { describeOp, loadSyncIssues, saveSyncIssues, syncIssuesKey, MAX_SYNC_ISSUES, type SyncIssue } from "@/lib/client/sync-issues";
 import type { Op } from "@/lib/ops";
 import { loadErrorKind } from "@/components/shell/Splash";
-import { onboardingSteps } from "@/components/join/Onboarding";
 
 describe("tabs", () => {
   const player = { isCommissioner: false, status: "live" as const };
@@ -192,7 +191,7 @@ describe("feed unread", () => {
   });
 });
 
-describe("load errors and onboarding steps", () => {
+describe("load errors", () => {
   it("classifies load errors", () => {
     expect(loadErrorKind("No trip with that code. Double-check the link from the group chat.", true)).toBe("not_found");
     expect(loadErrorKind("No signal, and this trip isn't saved on this phone yet.", false)).toBe("offline");
@@ -200,11 +199,6 @@ describe("load errors and onboarding steps", () => {
     expect(loadErrorKind("The server is having a moment (500). Retrying…", false)).toBe("server");
     expect(loadErrorKind(null, false)).toBe("offline");
     expect(loadErrorKind(null, true)).toBe("server");
-  });
-
-  it("skips the install step when running standalone", () => {
-    expect(onboardingSteps(false)).toEqual(["install", "location", "notify"]);
-    expect(onboardingSteps(true)).toEqual(["location", "notify"]);
   });
 });
 

@@ -50,8 +50,8 @@ describe("web app manifest", () => {
 describe("per-trip manifest (Home Screen icon opens the trip)", () => {
   let db: DbConnection;
   const params = (code: string) => ({ params: Promise.resolve({ code }) });
-  const get = async (code: string) => {
-    const res = await tripManifest(new Request(`http://localhost/t/${code}/manifest.webmanifest`), params(code));
+  const get = async (code: string, search = "") => {
+    const res = await tripManifest(new Request(`http://localhost/t/${code}/manifest.webmanifest${search}`), params(code));
     return { res, body: res.ok ? ((await res.json()) as Record<string, unknown>) : null };
   };
 
@@ -79,6 +79,22 @@ describe("per-trip manifest (Home Screen icon opens the trip)", () => {
       theme_color: "#0a7d3e",
     });
     expect(body!.icons).toEqual(manifest().icons);
+  });
+
+  it("carries ?me=<player> into start_url (so the Home Screen app knows who you are), same app id", async () => {
+    const me = "3f2b8c1e-6a4d-4e7f-9b21-0c5d8e7f6a1b";
+    const { body } = await get("bachparty", `?me=${me}`);
+    expect(body).toMatchObject({ id: "/t/bachparty", start_url: `/t/bachparty?source=homescreen&me=${me}`, scope: "/", name: "Bachelor Open" });
+    expect((await get("bachparty", `?me=${me.toUpperCase()}`)).body).toMatchObject({ start_url: `/t/bachparty?source=homescreen&me=${me}` });
+  });
+
+  it("ignores a missing, malformed or ambiguous me", async () => {
+    const plain = "/t/bachparty?source=homescreen";
+    for (const search of ["", "?me=", "?me=joe", "?me=%3Cscript%3E", "?me=3f2b8c1e6a4d4e7f9b210c5d8e7f6a1b", `?me=3f2b8c1e-6a4d-4e7f-9b21-0c5d8e7f6a1b&me=9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d`]) {
+      const { res, body } = await get("bachparty", search);
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ id: "/t/bachparty", start_url: plain });
+    }
   });
 
   it("falls back to 'Scramble' for an unknown trip or a database that doesn't answer in time", async () => {

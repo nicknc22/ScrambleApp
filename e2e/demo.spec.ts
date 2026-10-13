@@ -31,8 +31,6 @@ test.describe("demo mode", () => {
     await expect(page.getByTestId("join-player")).toHaveCount(10);
     await expectNoHorizontalOverflow(page);
     await page.getByTestId("join-player").filter({ hasText: "Captain Mulligan" }).click();
-    const onboarding = page.getByTestId("onboarding");
-    if (await onboarding.isVisible().catch(() => false)) await page.getByRole("button", { name: "Skip setup" }).click();
     const shell = page.getByTestId("trip-shell");
     await expect(shell).toBeVisible();
 

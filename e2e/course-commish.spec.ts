@@ -65,7 +65,6 @@ async function openSetup(page: Page, seed: Seed) {
     ([code, me]) => {
       try {
         localStorage.setItem(`scramble:me:${code}`, me);
-        localStorage.setItem("scramble:onboarded", "1");
       } catch {
         /* ignore */
       }
@@ -360,7 +359,6 @@ test.describe("course editor + commissioner tools", () => {
       await p2.addInitScript(
         ([code, me]) => {
           localStorage.setItem(`scramble:me:${code}`, me);
-          localStorage.setItem("scramble:onboarded", "1");
           localStorage.setItem("scramble:dev", "1");
           if (!sessionStorage.getItem("seeded")) {
             localStorage.setItem("scramble:gps-sim", JSON.stringify({ lat: 41.1, lng: -75.6, accuracy: 3 }));

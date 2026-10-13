@@ -7,16 +7,19 @@ import {
   IconClipboard,
   IconGear,
   IconHome,
+  IconShare,
   IconTrophy,
   IconUserSwap,
   cx,
 } from "@/components/ui";
+import { useShareTripLink } from "./ShareTripLink";
 import type { TabKey } from "./tabs";
 
-/** The ☰ menu: extra destinations (Setup, Awards, Settings) and housekeeping. */
+/** The ☰ menu: extra destinations (Setup, Awards, Settings), the trip link and housekeeping. */
 export function MenuSheet({
   open,
   onClose,
+  code,
   tripName,
   isCommissioner,
   isFinal,
@@ -27,6 +30,7 @@ export function MenuSheet({
 }: {
   open: boolean;
   onClose: () => void;
+  code: string;
   tripName: string;
   isCommissioner: boolean;
   isFinal: boolean;
@@ -35,6 +39,7 @@ export function MenuSheet({
   onSettings: () => void;
   onSwitchPlayer: () => void;
 }) {
+  const [sendLink] = useShareTripLink(code, tripName);
   return (
     <BottomSheet open={open} onClose={onClose} title={tripName}>
       <ul className="flex flex-col gap-2 pb-2">
@@ -57,6 +62,15 @@ export function MenuSheet({
             onClick={() => onGo("setup")}
           />
         )}
+        <MenuRow
+          icon={<IconShare size={26} />}
+          label="Send the trip link"
+          sub="For the group chat: open it, tap your name, in"
+          onClick={() => {
+            onClose();
+            void sendLink();
+          }}
+        />
         <MenuRow icon={<IconGear size={26} />} label="Settings" sub="Notifications, commissioner PIN, install" onClick={onSettings} />
         <MenuRow icon={<IconUserSwap size={26} />} label="Not you? Switch player" onClick={onSwitchPlayer} />
         <li>

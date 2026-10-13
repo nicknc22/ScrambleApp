@@ -76,7 +76,6 @@ async function openAs(page: Page, code: string, meId: string, tab: string) {
   await page.addInitScript(
     ([c, me]) => {
       localStorage.setItem(`scramble:me:${c}`, me);
-      localStorage.setItem("scramble:onboarded", "1");
     },
     [code, meId],
   );

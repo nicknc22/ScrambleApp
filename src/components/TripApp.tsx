@@ -2,19 +2,41 @@
 // Client entry for /t/[code]: store + toast/confirm/fanfare providers around the shell.
 // Everything loads from the local cache first, so the page works with no signal.
 import Link from "next/link";
+import { useState } from "react";
+import { adoptMeFromLaunch } from "@/lib/client/identity";
 import { TripProvider } from "@/lib/client/react";
+import { detectPlatform, isStandalone } from "@/lib/client/ui-prefs";
 import { ConfirmProvider, FanfareProvider, ToastProvider, buttonClasses } from "@/components/ui";
 import { ErrorBoundary } from "@/components/shell/ErrorBoundary";
 import { TripShell } from "@/components/shell/TripShell";
 
+/**
+ * First launch of the iPhone Home Screen app (separate storage): adopt the player its start URL
+ * carries (?me=), iOS + standalone only and never over a stored player (adoptMeFromLaunch). Runs
+ * once, in the first client render, i.e. before TripProvider's effect starts the store and reads who
+ * this phone is. Returns the adopted id (the shell says "You're Joe" once), else null.
+ */
+function useAdoptLaunchIdentity(code: string): string | null {
+  const [adopted] = useState(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      return adoptMeFromLaunch({ code, search: window.location.search, standalone: isStandalone(), platform: detectPlatform() });
+    } catch {
+      return null;
+    }
+  });
+  return adopted;
+}
+
 export function TripApp({ code }: { code: string }) {
+  const adoptedMe = useAdoptLaunchIdentity(code);
   return (
     <ErrorBoundary where="app" fallback={(error) => <AppCrash error={error} />}>
       <TripProvider code={code}>
         <ToastProvider>
           <ConfirmProvider>
             <FanfareProvider>
-              <TripShell code={code} />
+              <TripShell code={code} adoptedMe={adoptedMe} />
             </FanfareProvider>
           </ConfirmProvider>
         </ToastProvider>

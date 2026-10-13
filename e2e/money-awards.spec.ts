@@ -101,7 +101,6 @@ async function expectNoHorizontalOverflow(page: Page) {
 async function openAs(page: Page, code: string, playerId: string, tab: string) {
   await page.addInitScript(
     ([c, me]) => {
-      localStorage.setItem("scramble:onboarded", "1");
       localStorage.setItem(`scramble:me:${c}`, me);
     },
     [code, playerId],

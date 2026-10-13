@@ -82,8 +82,8 @@ test("measure a long drive by GPS with a photo, then a closest-to-pin entry on t
   await page.goto(`/t/${code}`);
   await expect(page.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("join-player").filter({ hasText: "Dave" }).click();
-  await expect(page.getByTestId("onboarding")).toBeVisible();
-  await page.getByRole("button", { name: "Skip setup" }).click();
+  // Tapping your name goes straight in: no setup wizard.
+  await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play");
 
   await page.getByTestId("tab-contests").click();
   await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "contests");

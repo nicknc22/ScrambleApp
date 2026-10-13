@@ -1,8 +1,20 @@
 // Trip creation and snapshots (what GET /api/t/<code>/state returns).
 import { JACK_FROST_HOLES } from "@/lib/course";
 import { deriveId, newId, newTripCode } from "@/lib/ids";
-import { DEFAULT_SETTINGS, type Hole, type Snapshot, type SnapshotMeta, type Trip, type UUID } from "@/lib/types";
-import type { Write } from "@/lib/reducer";
+import type { PlayerUpsertOp } from "@/lib/ops";
+import { applyOp, type Write } from "@/lib/reducer";
+import { validateRosterInput, type RosterEntry, type RosterPlayer } from "@/lib/roster";
+import {
+  DEFAULT_SETTINGS,
+  ROW_TABLES,
+  type Hole,
+  type Player,
+  type Snapshot,
+  type SnapshotMeta,
+  type Trip,
+  type TripState,
+  type UUID,
+} from "@/lib/types";
 import { pgErrorCode, UNIQUE_VIOLATION, type Db } from "./db";
 import { aiEnabled } from "./env";
 import { findTripByCode, insertTrip, persistWrites, readTripState } from "./repo";
@@ -39,8 +51,19 @@ export interface CreateTripInput {
   is_demo?: boolean;
   /** Fixed join code (demo/tests). Default: a random unguessable code. */
   code?: string;
+  /**
+   * Players to pre-load, in order (names or {name, is_groom}); checked with validateRosterInput.
+   * Absent/empty: the trip starts with an empty roster.
+   */
+  roster?: ReadonlyArray<string | RosterEntry>;
   /** Clock override for tests. */
   now?: Date;
+}
+
+export interface CreatedTrip {
+  trip: Trip;
+  /** The pre-loaded players, in roster order (empty without a roster). */
+  players: Player[];
 }
 
 export class TripInputError extends Error {
@@ -74,18 +97,53 @@ export function seedHoles(tripId: UUID, nowIso: string): Hole[] {
 }
 
 /**
- * Create a trip in setup with default settings and the 18 seeded holes, in one transaction.
- * Retries with a fresh random code on the (astronomically unlikely) code collision.
+ * The roster as player rows, built by the reducer exactly as Setup's "Add a player" builds them
+ * (player.upsert by the commissioner during setup: sort_order 0..n-1, one groom, created_at =
+ * the op's server time; each player 1 ms after the previous so even raw row order is roster
+ * order). Setup-time roster edits post nothing to the feed, so neither does this.
  */
-export async function createTrip(db: Db, input: CreateTripInput): Promise<Trip> {
+function rosterWrites(trip: Trip, holes: Hole[], roster: readonly RosterPlayer[], nowMs: number): { players: Player[]; writes: Write[] } {
+  const empty = Object.fromEntries(ROW_TABLES.map((t) => [t, []])) as unknown as Omit<TripState, "trip">;
+  let state: TripState = { ...empty, trip, holes };
+  const writes: Write[] = [];
+  const ids: UUID[] = [];
+  roster.forEach((entry, i) => {
+    const at = new Date(nowMs + i).toISOString();
+    const id = newId();
+    const op: PlayerUpsertOp = {
+      id: newId(),
+      type: "player.upsert",
+      at,
+      by: null,
+      player: { id, name: entry.name, is_groom: entry.is_groom },
+    };
+    const r = applyOp(state, op, { now: at, is_commissioner: true, side: "server" });
+    if (!r.ok) throw new TripInputError(r.reason);
+    state = r.state;
+    writes.push(...r.writes);
+    ids.push(id);
+  });
+  const byId = new Map(state.players.map((p) => [p.id, p]));
+  return { players: ids.map((id) => byId.get(id)!), writes };
+}
+
+/**
+ * Create a trip in setup with default settings, the 18 seeded holes and (optionally) a pre-loaded
+ * roster, all in one transaction: a failure anywhere leaves no trip behind. Retries with a fresh
+ * random code on the (astronomically unlikely) code collision.
+ */
+export async function createTripWithRoster(db: Db, input: CreateTripInput): Promise<CreatedTrip> {
   if (!input.pin_hash) throw new TripInputError("A commissioner PIN hash is required");
   const fixedCode = input.code === undefined ? null : normalizeCode(input.code);
   if (input.code !== undefined && !fixedCode) throw new TripInputError("Trip codes are 3-64 letters and digits");
   const name = cleanName(input.name, MAX_TRIP_NAME, DEFAULT_TRIP_NAME);
   const appName = cleanName(input.app_name, MAX_APP_NAME, DEFAULT_APP_NAME);
+  const roster = validateRosterInput(input.roster);
+  if (!roster.ok) throw new TripInputError(roster.error);
 
   for (let attempt = 0; ; attempt++) {
-    const nowIso = (input.now ?? new Date()).toISOString();
+    const nowMs = (input.now ?? new Date()).getTime();
+    const nowIso = new Date(nowMs).toISOString();
     const trip: Trip = {
       id: newId(),
       code: fixedCode ?? newTripCode(),
@@ -100,12 +158,14 @@ export async function createTrip(db: Db, input: CreateTripInput): Promise<Trip> 
       finalized_at: null,
       updated_at: nowIso,
     };
+    const holes = seedHoles(trip.id, nowIso);
+    const seeded = rosterWrites(trip, holes, roster.roster, nowMs);
     try {
       return await db.tx(async (t) => {
         const saved = await insertTrip(t, trip, input.pin_hash);
-        const writes: Write[] = seedHoles(trip.id, nowIso).map((row) => ({ kind: "upsert", table: "holes", row }));
+        const writes: Write[] = [...holes.map((row): Write => ({ kind: "upsert", table: "holes", row })), ...seeded.writes];
         await persistWrites(t, trip.id, writes);
-        return saved;
+        return { trip: saved, players: seeded.players };
       });
     } catch (e) {
       if (pgErrorCode(e) === UNIQUE_VIOLATION && !fixedCode && attempt < 4) continue;
@@ -113,6 +173,11 @@ export async function createTrip(db: Db, input: CreateTripInput): Promise<Trip> 
       throw e;
     }
   }
+}
+
+/** createTripWithRoster, for callers that only need the trip. */
+export async function createTrip(db: Db, input: CreateTripInput): Promise<Trip> {
+  return (await createTripWithRoster(db, input)).trip;
 }
 
 /**

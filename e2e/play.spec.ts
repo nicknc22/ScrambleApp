@@ -69,7 +69,6 @@ async function joinAs(page: Page, code: string, playerId: string, viewport?: { w
   await page.context().addInitScript(
     ([c, id]) => {
       localStorage.setItem(`scramble:me:${c}`, id);
-      localStorage.setItem("scramble:onboarded", "1");
     },
     [code, playerId],
   );
@@ -106,8 +105,6 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await page.goto(`/t/${code}`);
   await expect(page.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("join-player").filter({ hasText: "Tom" }).click();
-  await expect(page.getByTestId("onboarding")).toBeVisible();
-  await page.getByRole("button", { name: "Skip setup" }).click();
 
   const shell = page.getByTestId("trip-shell");
   await expect(shell).toHaveAttribute("data-tab", "play");
@@ -216,7 +213,6 @@ test("scorecard strip: open an earlier hole, edit it, and come back", async ({ p
   await context.addInitScript(
     ([c, id]) => {
       localStorage.setItem(`scramble:me:${c}`, id);
-      localStorage.setItem("scramble:onboarded", "1");
     },
     [code, players.find((p) => p.name === "Dave")!.id],
   );

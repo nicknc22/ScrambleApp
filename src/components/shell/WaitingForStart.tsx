@@ -1,10 +1,13 @@
 "use client";
-// Pre-round hero for players while the trip is in setup: who's on which team, tee times,
-// and a reminder that pre-round drinks don't count. Flips to Play when the round starts.
+// Pre-round hero for players while the trip is in setup: who this phone is ("You're Greg · Not
+// you?"), the optional "Get set up" card (Home Screen + notifications), who's on which team, tee
+// times, and a reminder that pre-round drinks don't count. This is where the boys land when they
+// open the link early. Flips to Play when the round starts.
 import { useClientState } from "@/lib/client/react";
 import { Avatar, Badge, Button, Card, EmptyState, PlayerName, TeamPill, teamColor } from "@/components/ui";
+import { GetSetUp } from "@/components/join/GetSetUp";
 import { useShellNav } from "./nav";
-import { formatTeeTime, rosterGroups } from "./roster";
+import { activeTeams, formatTeeTime, rosterGroups } from "./roster";
 
 const TIPS = [
   "Pre-round drinks don't count. Drink them anyway, just not for credit.",
@@ -21,10 +24,32 @@ export function WaitingForStart() {
   if (!view) return null;
 
   const groups = rosterGroups(view, { includeEmptyTeams: true });
+  // Roster loaded but no teams yet: one "the field" card instead of "No team · Needs a team".
+  const noTeams = activeTeams(view).length === 0;
   const settings = view.trip.settings;
+  const myGroup = meId ? groups.find((g) => g.players.some((p) => p.id === meId)) : undefined;
+  const me = myGroup?.players.find((p) => p.id === meId) ?? null;
 
   return (
     <div className="mx-auto w-full max-w-xl space-y-5 px-4 pt-4" data-testid="waiting-for-start">
+      {me && (
+        // No PIN: the name is the only check, so keep saying who this phone is (a mis-tap shows here).
+        <div className="flex min-h-14 items-center gap-3 rounded-2xl border-2 border-ink bg-paper py-1 pr-1 pl-3" data-testid="you-are">
+          <Avatar player={me} teamSortOrder={myGroup?.team?.sort_order ?? null} size="md" showCrown={false} />
+          <p className="min-w-0 flex-1 truncate text-lg font-black">
+            You&apos;re <PlayerName player={me} />
+          </p>
+          <button
+            type="button"
+            onClick={nav.switchPlayer}
+            className="min-h-12 shrink-0 rounded-xl px-3 text-base font-extrabold text-fairway-dark underline underline-offset-4 active:bg-sand"
+            data-testid="you-are-switch"
+          >
+            Not you?
+          </button>
+        </div>
+      )}
+      <GetSetUp />
       <section
         className="relative overflow-hidden rounded-3xl border-2 border-ink px-5 pt-6 pb-5 text-white shadow-hard"
         style={{ background: "radial-gradient(circle at 80% 0%, #15a356 0%, #0a7d3e 45%, #064d27 100%)" }}
@@ -50,7 +75,7 @@ export function WaitingForStart() {
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-xl font-black tracking-tight uppercase">The teams</h2>
+        <h2 className="text-xl font-black tracking-tight uppercase">{noTeams && groups.length > 0 ? "The field" : "The teams"}</h2>
         {groups.length === 0 && (
           <EmptyState emoji="🦗" title="No roster yet">
             The commissioner is still picking teams. Hassle him in the group chat.
@@ -63,14 +88,14 @@ export function WaitingForStart() {
           return (
             <Card key={g.team?.id ?? "free"} padded={false} className="overflow-hidden" style={{ borderColor: mine ? "#0b0f0c" : undefined }}>
               <div className="flex items-center gap-2 px-4 py-3" style={{ backgroundColor: c.soft }}>
-                <TeamPill team={g.team} size="md" you={mine} />
-                <span className="min-w-0 flex-1" />
-                {g.team ? (
-                  tee ? (
-                    <Badge tone="outline">Tee {tee}</Badge>
-                  ) : null
+                {noTeams ? (
+                  <span className="min-w-0 flex-1 text-base leading-tight font-extrabold">Teams drop soon. The commissioner is agonizing.</span>
                 ) : (
-                  <Badge tone="hazard">Needs a team</Badge>
+                  <>
+                    <TeamPill team={g.team} size="md" you={mine} />
+                    <span className="min-w-0 flex-1" />
+                    {g.team ? tee ? <Badge tone="outline">Tee {tee}</Badge> : null : <Badge tone="hazard">Needs a team</Badge>}
+                  </>
                 )}
               </div>
               {g.players.length === 0 ? (

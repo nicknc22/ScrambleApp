@@ -39,7 +39,6 @@ test("change to a 12-digit PIN, lock, then unlock with all 12 digits on the pad"
     ([c, id]) => {
       try {
         localStorage.setItem(`scramble:me:${c}`, id);
-        localStorage.setItem("scramble:onboarded", "1");
       } catch {
         /* ignore */
       }

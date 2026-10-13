@@ -76,7 +76,6 @@ test("a photo that won't upload never holds up the score, and the phone doesn't 
   await context.addInitScript(
     ([c, id]) => {
       localStorage.setItem(`scramble:me:${c}`, id);
-      localStorage.setItem("scramble:onboarded", "1");
     },
     [code, players[1].id],
   );
@@ -159,7 +158,6 @@ test.describe("changes the server refused (mocked API)", () => {
     await page.addInitScript(
       ([c, id]) => {
         localStorage.setItem(`scramble:me:${c}`, id);
-        localStorage.setItem("scramble:onboarded", "1");
       },
       [CODE, f.player.A1],
     );

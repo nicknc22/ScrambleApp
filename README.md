@@ -4,7 +4,7 @@ A phone-first web app for one gloriously stupid 18-hole team scramble: Saturday,
 
 **What it does**
 
-- **Join in seconds:** the trip link shows the roster, you tap your name, and the phone remembers it. It installs to the Home Screen as an app.
+- **Join in seconds:** the trip link shows the roster, you tap your name, and you're in: no PIN, no account, no setup wizard. The phone remembers you, and so does the Home Screen app if you add it (a pre-round **Get set up** card offers that and notifications, both optional).
 - **Play screen:** one-thumb score stepper with a live net preview, whose tee shot was used (with drive-minimum warnings), Drink / Shotgun / Shot buttons per teammate with an optional photo of the empty, a 10-second undo on everything, and mulligans (earned from shotguns and shots, plus the Groom's Mulligan with full-screen fanfare).
 - **Drink math:** every drink is -1 on the team's open hole. Threesomes earn credit as if they had four drinkers (every third drink is a 👻 ghost beer worth 2).
 - **Live leaderboard:** gross, drinks, credit, net and net to par, plus Drinkers, Contests and Drives boards. Tap a team for its hole-by-hole card.
@@ -86,10 +86,10 @@ For AI roasts, team names and the closest-to-pin judge, create an API key at [co
 
 ### 4. Create the real trip
 
-1. Open your Vercel URL on your phone → **Commissioner → Create the trip**. Name it, enter your PIN (the `COMMISSIONER_PIN` you set in Vercel). You land in **Setup**.
-2. Fill in the roster (nickname, Venmo handle, groom flag), drag players into teams, set tee times and set the pots.
+1. Open your Vercel URL on your phone → **Commissioner → Create the trip**. Name it. **Who's playing** is already filled in with the boys (Caster, Joe, Greg, Rich, Reitman, Drew, Will, Ross, Conner, Mark), one per line: edit it if the list changes. The first name is you, and **The groom** is set to Caster. Enter your PIN (the `COMMISSIONER_PIN` you set in Vercel) and tap **Create trip**. You land in **Setup** with everyone on the roster, and this phone is already Caster.
+2. Drag players into teams, set tee times and set the pots. Tap a player to add a nickname or Venmo handle. (Trip created before the roster was pre-filled? **Setup → Roster → Load the boys** adds all 10 in one tap and makes this phone Caster. If the roster is half there, **Add several at once → Fill in the crew** adds whoever's missing.)
 3. **Course:** Jack Frost National is mapped in OpenStreetMap, so in **Setup → Course** tap **Try OpenStreetMap import**: it fills in the tee and green points for you. Then check the four par 5 tee points on the satellite map (holes 4, 9, 12 and 18): long drive measures from them, so drag any that sit off the actual tee box. (From a terminal, `DATABASE_URL=... npm run osm-import -- --code <code>` does the same import.)
-4. Send `https://<your-app>/t/<code>` to the group chat. Everyone taps their name and adds it to their Home Screen from that page. Each trip gets its own Home Screen icon, and on iPhone the icon keeps its own storage: open it once, tap your name again, and (commissioner) unlock with the PIN there too.
+4. **Setup → Roster → Send the link** (or **Menu → Send the trip link**) opens your phone's share sheet with the clean `https://<your-app>/t/<code>` link (on a laptop it's copied): drop it in the group chat. Each guy opens it and taps his name, and the app says "You're in, Joe" with a **Not you?** in case of a fat thumb. That's it: no PIN, no wizard. A **Get set up** card offers **Add to Home Screen** and notifications (both optional; on iPhone, notifications only work from the Home Screen app); anyone who first opens the link after the round starts gets it as one row on the Play screen. The Home Screen icon opens the trip already knowing who you are. The commissioner unlocks with the PIN once more there, because the icon has its own storage on iPhone.
 5. On Saturday, **Setup → Start round** when the first group is on the tee.
 
 ## Testing
@@ -108,10 +108,10 @@ npm run test:e2e      # Playwright (Chromium, iPhone 13 viewport) against a prod
 Use a throwaway trip so you exercise exactly what Saturday uses. Check each box:
 
 - [ ] **Create (1 min).** On your iPhone, open the deployed URL → **Commissioner → Create the trip** "Dry Run" with your real PIN.
-- [ ] **Roster + teams (2 min).** Add yourself (groom, your real Venmo handle) and 4 fakes. Make a threesome (with you) and a twosome by dragging players between teams. Tap **Generate names**, re-roll, pick one. Set tee times.
+- [ ] **Roster + teams (2 min).** The crew is pre-filled with you (Caster) first and crowned: cut it to 5 names for the dry run. Tap yourself to add your real Venmo handle. Make a threesome (with you) and a twosome by dragging players between teams. Tap **Generate names**, re-roll, pick one. Set tee times.
 - [ ] **Pots (30 s).** $20 team match with a 70/30 split, $5 per contest hole. Opt one fake out of one pot.
 - [ ] **Course (2 min).** On the satellite map, place the tee and green for holes 1, 3 and 4 (hole 4 is a par 5: its tee is what long drive measures from).
-- [ ] **Join like a player (2 min).** Copy the `/t/<code>` link, open it in Safari, tap your name, try **Not you?** and back. Follow the onboarding: Share → **Add to Home Screen**, open the app from the icon (it starts fresh: tap your name again, and unlock commissioner powers with your PIN once more), allow location and notifications (both one-line asks).
+- [ ] **Join like a player (2 min).** **Setup → Roster → Send the link** and send it to yourself, then open it in a Safari private tab: **Who are you?** lists the roster; tap a name and you're straight in (no PIN, no wizard). Back in your normal Safari you're already Caster: **Menu → Not you? Switch player** and back. On the pre-round **Get set up** card, tap **Put it on your Home Screen** and follow it (Share → **Add to Home Screen**), then open the app from the icon: it should open as you without asking. Unlock commissioner powers with your PIN once more there, and turn on notifications from the card. Location is asked the first time you **Measure drive**.
 - [ ] **Start (10 s).** **Setup → Start round.** The feed says so.
 - [ ] **Play three holes (3 min).** Tap **On the tee**, log a Drink, a Shotgun with a photo of the empty, and a drink for a teammate; undo one within 10 seconds. Enter scores and whose tee shot. Use an earned mulligan, then the **Groom's Mulligan** (fanfare). On hole 3, edit hole 1 from the scorecard strip and watch the feed post the edit. A threesome's 3rd drink should post a 👻 ghost beer.
 - [ ] **Airplane mode (2 min).** Turn on airplane mode. Log a score, two drinks and a post. Force-quit the app and reopen it: everything is still there and the badge says "Offline, N changes waiting". Turn airplane mode off: the badge clears and a second phone or laptop shows it all within seconds.
@@ -119,7 +119,7 @@ Use a throwaway trip so you exercise exactly what Saturday uses. Check each box:
 - [ ] **Commissioner fixes (1 min).** **Setup → Commissioner tools:** override a score and move a drink to another hole. The feed shows a Commissioner override and the leaderboard recomputes.
 - [ ] **Money (1 min).** The Money tab shows live projections. On a settle-up payment to your own Venmo handle, tap **Pay with Venmo**: Venmo should open with the amount and note filled in. Back out without paying.
 - [ ] **Finalize + awards (1 min).** **Setup → Finalize round.** Check the Awards, open the gallery, download one photo and the zip, share the recap card.
-- [ ] **Reset.** Don't reuse the dry run for Saturday: create the real trip fresh (section 4 above). The dry-run Home Screen icon always opens the dry-run trip (each trip's icon is its own app), so long-press it and delete it, then open the real trip's link in Safari (Chrome on Android) and **Add to Home Screen** again from that page. Tap the new icon: it must open the real trip (tap your name and unlock with your PIN there once). Then make sure the GPS simulator is off in the new icon so Saturday uses real GPS: if a **SIMULATED GPS** strip shows under the header, tap its **Turn off** (or **Settings → GPS simulator → Turn off**). Check it whatever your phone: the simulator setting belongs to the site, not to one trip or one icon, so on Android a new icon keeps it from the dry run (and so does Safari itself if you used the simulator there).
+- [ ] **Reset.** Don't reuse the dry run for Saturday: create the real trip fresh (section 4 above). The dry-run Home Screen icon always opens the dry-run trip (each trip's icon is its own app), so long-press it and delete it, then open the real trip's link in Safari (Chrome on Android) and **Add to Home Screen** again from that page. Tap the new icon: it must open the real trip, already as you (unlock with your PIN there once). Then make sure the GPS simulator is off in the new icon so Saturday uses real GPS: if a **SIMULATED GPS** strip shows under the header, tap its **Turn off** (or **Settings → GPS simulator → Turn off**). Check it whatever your phone: the simulator setting belongs to the site, not to one trip or one icon, so on Android a new icon keeps it from the dry run (and so does Safari itself if you used the simulator there).
 
 Short on time? **Try the demo** gives you a round already in progress; **Settings → Demo mode → Replay as full round** jumps straight to awards and settle-up. Demo trips never call the AI (unless the server sets `DEMO_AI=1`), so check the AI judge and roasts on your dry-run trip, not the demo.
 
@@ -143,6 +143,7 @@ Nothing below can be tested from a laptop or a simulator. Do it on your own iPho
 - **Camera:** taking a photo from the drink, contest and post buttons works, and iPhone HEIC photos arrive as JPEGs (they're converted on the phone).
 - **GPS accuracy:** stand in an open area and Measure drive; it wants 12 m or better. Under trees or next to buildings it may need the 3-try weak-GPS fallback.
 - **Offline launch:** with airplane mode on, open the Home Screen app from cold. It should show the last state, not a Safari error page.
+- **The Home Screen icon remembers who you are:** tap your name in Safari first, then **Add to Home Screen** from that page. The icon should open as you, with no **Who are you?**. If it does ask, tap your name once and it sticks; that's the built-in fallback. It depends on which address iOS saves for the icon, and both carry your player.
 
 ## Open items (from the spec)
 

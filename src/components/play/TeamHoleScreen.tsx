@@ -11,6 +11,7 @@ import { readPref, writePref } from "@/lib/client/ui-prefs";
 import { Screen } from "@/components/shell/Screen";
 import { ClosestToPinSheet } from "@/components/contests/ClosestToPinSheet";
 import { LongDriveSheet } from "@/components/contests/LongDriveSheet";
+import { GetSetUp } from "@/components/join/GetSetUp";
 import {
   HOLE_MOVE_GUARD_MS,
   advanceConfirm,
@@ -390,6 +391,9 @@ export function TeamHoleScreen({
         </div>
         {/* Below the chips and the stepper so it never pushes them off the first screen. */}
         {derived.teamSize[teamId] === 3 && !reminderHidden && <ThreesomeReminder onDismiss={hideReminder} />}
+        {/* Whoever first opens the link after Start never saw the pre-round card: Home Screen +
+            notifications as one row (hidden per trip, gone once done). */}
+        {tripStatus === "live" && !finished && <GetSetUp compact />}
         <ContestPanel
           hole={hole}
           contest={line.contest}

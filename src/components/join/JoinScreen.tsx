@@ -1,5 +1,6 @@
 "use client";
-// "Who are you?" Roster grid grouped by team. Tap your name -> stored on this device.
+// "Who are you?" Roster grid grouped by team. Tap your name -> stored on this device -> straight
+// into the app (no PIN, no wizard). Home Screen and notifications are offered later, never forced.
 import { useState } from "react";
 import { useClientState, useTripStore } from "@/lib/client/react";
 import type { Player, Team } from "@/lib/types";
@@ -82,7 +83,7 @@ export function JoinScreen({ onJoined, onSkip, onCancel }: JoinScreenProps) {
 
       <main className="mx-auto max-w-xl px-gutter pt-5">
         <h2 className="loud text-4xl">Who are you?</h2>
-        <p className="mt-1 text-lg font-bold text-ink">Tap your name. This phone will remember it.</p>
+        <p className="mt-1 text-lg font-bold text-ink">Tap your name. That&apos;s it.</p>
 
         {groups.length === 0 ? (
           <EmptyState
@@ -99,7 +100,15 @@ export function JoinScreen({ onJoined, onSkip, onCancel }: JoinScreenProps) {
         ) : (
           <div className="mt-5 space-y-6">
             {groups.map((g) => (
-              <RosterGroupBlock key={g.team?.id ?? "free"} team={g.team} players={g.players} meId={meId} onPick={pick} />
+              <RosterGroupBlock
+                key={g.team?.id ?? "free"}
+                team={g.team}
+                players={g.players}
+                meId={meId}
+                onPick={pick}
+                // No teams yet (just the roster): no "Free agents" label over everybody.
+                label={g.team !== null || groups.length > 1}
+              />
             ))}
           </div>
         )}
@@ -142,20 +151,24 @@ function RosterGroupBlock({
   players,
   meId,
   onPick,
+  label,
 }: {
   team: Team | null;
   players: Player[];
   meId: string | null;
   onPick: (p: Player) => void;
+  label: boolean;
 }) {
   const c = teamColor(team ? team.sort_order : null);
   const tee = formatTeeTime(team?.tee_time);
   return (
     <section>
-      <div className="mb-2.5 flex items-center gap-2">
-        {team ? <TeamPill team={team} size="md" /> : <span className="text-lg font-black uppercase">Free agents</span>}
-        {tee && <span className="text-sm font-extrabold text-muted">Tee {tee}</span>}
-      </div>
+      {label && (
+        <div className="mb-2.5 flex items-center gap-2">
+          {team ? <TeamPill team={team} size="md" /> : <span className="text-lg font-black uppercase">Free agents</span>}
+          {tee && <span className="text-sm font-extrabold text-muted">Tee {tee}</span>}
+        </div>
+      )}
       <ul className="grid grid-cols-2 gap-2.5">
         {players.map((p) => (
           <li key={p.id} className="min-w-0">

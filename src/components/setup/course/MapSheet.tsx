@@ -5,7 +5,7 @@
 import dynamic from "next/dynamic";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useClientState, useTripStore } from "@/lib/client/react";
-import { GeoError, sampleBestPosition } from "@/lib/client/geo";
+import { GeoError, measurePosition } from "@/lib/client/geo";
 import type { Hole } from "@/lib/types";
 import {
   BottomSheet,
@@ -163,7 +163,8 @@ function MapSheetBody({ startHole, onClose }: { startHole: number; onClose: () =
     setGpsBusy(true);
     setGpsAcc(null);
     try {
-      const r = await sampleBestPosition({ durationMs: 6000, goodEnoughM: 4, onProgress: (b) => setGpsAcc(b.accuracy) });
+      // measurePosition: a first-time "Allow location?" prompt is answered before the 6 s window starts.
+      const r = await measurePosition({ durationMs: 6000, goodEnoughM: 4, onProgress: (b) => setGpsAcc(b.accuracy) });
       place(mode, { lat: r.lat, lng: r.lng });
       apiRef.current?.panTo({ lat: r.lat, lng: r.lng });
       setGpsAcc(r.accuracy);

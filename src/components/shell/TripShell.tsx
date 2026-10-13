@@ -1,13 +1,14 @@
 "use client";
-// The trip page shell: splash / load error / join / onboarding / tabs. Lives inside TripProvider
-// and the Toast/Confirm/Fanfare providers (see TripApp).
-import { useState, type ReactNode } from "react";
+// The trip page shell: splash / load error / join / tabs. Lives inside TripProvider and the
+// Toast/Confirm/Fanfare providers (see TripApp). Picking your name goes straight into the app; the
+// pre-round screen offers Home Screen + notifications (GetSetUp) without blocking anything.
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { Player } from "@/lib/types";
 import { useClientState, useTripStore } from "@/lib/client/react";
-import { isOnboarded } from "@/lib/client/ui-prefs";
-import { IconChevronRight } from "@/components/ui";
+import { carriesIdentityInUrl, dropForeignMe, loadMe, syncHomeScreenIdentity } from "@/lib/client/identity";
+import { detectPlatform } from "@/lib/client/ui-prefs";
+import { IconChevronRight, displayName, useToast } from "@/components/ui";
 import { JoinScreen } from "@/components/join/JoinScreen";
-import { Onboarding } from "@/components/join/Onboarding";
-import { displayName } from "@/components/ui/PlayerName";
 import { PlayScreen } from "@/components/screens/PlayScreen";
 import { LeaderboardScreen } from "@/components/screens/LeaderboardScreen";
 import { FeedScreen } from "@/components/screens/FeedScreen";
@@ -23,7 +24,7 @@ import { activePlayers, teamOfPlayer } from "./roster";
 import { SettingsSheet } from "./SettingsSheet";
 import { LoadError, Splash } from "./Splash";
 import { TabBar } from "./TabBar";
-import { TAB_LABEL, defaultTab, resolveTab, type TabKey } from "./tabs";
+import { TAB_LABEL, resolveTab, type TabKey } from "./tabs";
 import { TripHeader } from "./TripHeader";
 import { useUrlTab } from "./useUrlTab";
 
@@ -39,13 +40,13 @@ const SCREENS: Record<TabKey, () => ReactNode> = {
 
 const reload = () => window.location.reload();
 
-export function TripShell({ code }: { code: string }) {
+export function TripShell({ code, adoptedMe = null }: { code: string; adoptedMe?: string | null }) {
   const store = useTripStore();
   const s = useClientState();
+  const toast = useToast();
   const [urlTab, setUrlTab] = useUrlTab();
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [onboardingFor, setOnboardingFor] = useState<string | null>(null);
   const [skipJoin, setSkipJoin] = useState(false);
   const [feedSeen, setFeedSeen] = useState<string | null>(() => readFeedSeen(code));
 
@@ -78,7 +79,6 @@ export function TripShell({ code }: { code: string }) {
     setMenuOpen(false);
     setSettingsOpen(false);
     setSkipJoin(false);
-    setOnboardingFor(null);
     store.setMe(null);
   };
 
@@ -93,26 +93,49 @@ export function TripShell({ code }: { code: string }) {
     switchPlayer,
   };
 
+  const me = view && s.meId ? (view.players.find((p) => p.id === s.meId && !p.deleted_at) ?? null) : null;
+
+  // With no PIN, the name is the only check: say who this phone is now, with a one-tap way out.
+  const sayWhoYouAre = (p: Player, carried: boolean) => {
+    toast.show({
+      id: "you-are",
+      tone: "success",
+      emoji: "👋",
+      title: `You're in, ${displayName(p)}.`,
+      message: carried ? "Picked up from Safari. Wrong guy? Tap Not you." : "Fat thumb? Tap Not you.",
+      action: { label: "Not you?", onAction: switchPlayer },
+    });
+  };
+  // The Home Screen app adopted its player from the launch URL (TripApp): say so once.
+  const announcedAdopt = useRef(false);
+  useEffect(() => {
+    if (announcedAdopt.current || !adoptedMe || !me || me.id !== adoptedMe) return;
+    announcedAdopt.current = true;
+    sayWhoYouAre(me, true);
+  });
+
+  // Before the trip loads (Splash, or LoadError on a first visit with no signal): drop a `me` in the
+  // address bar that isn't this phone's own player, so a link carrying the sender's player is never
+  // what "Add to Home Screen" saves. Off iOS the URL never carries one, so any `me` goes. Deferred
+  // one task: on hydration Next.js hooks history.replaceState in an effect that runs after this one
+  // (parents run last), and an unhooked replaceState would leave its router on the old URL.
+  useEffect(() => {
+    const t = setTimeout(() => dropForeignMe(carriesIdentityInUrl(detectPlatform()) ? loadMe(code) : null), 0);
+    return () => clearTimeout(t);
+  }, [code]);
+
+  // iPhone only: carry the player into "Add to Home Screen" via ?me= on the manifest link and in the
+  // address bar (dropped after Switch player); the Home Screen app's first launch adopts it (TripApp).
+  // Elsewhere the same call keeps both clean. Only once the trip has loaded (the store has read who
+  // this phone is). Re-asserted on tab changes; cheap, idempotent.
+  const knownMe = view ? (me?.id ?? null) : undefined;
+  useEffect(() => {
+    if (knownMe !== undefined) syncHomeScreenIdentity(code, carriesIdentityInUrl(detectPlatform()) ? knownMe : null);
+  }, [code, knownMe, tab]);
+
   if (!view) {
     if (s.loadError) return <LoadError code={code} message={s.loadError} online={s.online} onRetry={reload} />;
     return <Splash onRetry={reload} />;
-  }
-
-  const me = s.meId ? (view.players.find((p) => p.id === s.meId && !p.deleted_at) ?? null) : null;
-
-  if (onboardingFor && me && onboardingFor === me.id) {
-    return (
-      <Onboarding
-        code={code}
-        playerId={me.id}
-        playerName={displayName(me)}
-        vapidPublicKey={s.snapshot?.meta.vapid_public_key ?? null}
-        onDone={() => {
-          setOnboardingFor(null);
-          setTab(defaultTab(ctx));
-        }}
-      />
-    );
   }
 
   const noPlayers = activePlayers(view).length === 0;
@@ -125,7 +148,8 @@ export function TripShell({ code }: { code: string }) {
     return (
       <JoinScreen
         onJoined={(id) => {
-          if (!isOnboarded()) setOnboardingFor(id);
+          const picked = view.players.find((p) => p.id === id);
+          if (picked) sayWhoYouAre(picked, false);
         }}
         onSkip={s.isCommissioner ? () => setSkipJoin(true) : undefined}
       />
@@ -172,6 +196,7 @@ export function TripShell({ code }: { code: string }) {
         <MenuSheet
           open={menuOpen}
           onClose={() => setMenuOpen(false)}
+          code={code}
           tripName={view.trip.name}
           isCommissioner={s.isCommissioner}
           isFinal={status === "final"}

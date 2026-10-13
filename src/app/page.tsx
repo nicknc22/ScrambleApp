@@ -1,6 +1,7 @@
 "use client";
-// Home: join by code, commissioner creates the trip, or try the demo. Remembers recent trips.
-import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
+// Home: join by code, commissioner creates the trip (with the roster pre-loaded), or try the demo.
+// Remembers recent trips.
+import { useEffect, useId, useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
 import {
   APP_VERSION,
   RECENT_TRIPS_KEY,
@@ -11,9 +12,19 @@ import {
   readPref,
   rememberTrip,
 } from "@/lib/client/ui-prefs";
-import { getLastTripCode } from "@/lib/client/identity";
+import { getLastTripCode, saveMe } from "@/lib/client/identity";
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
-import { Button, Card, IconChevronRight, IconClose, TextField } from "@/components/ui";
+import {
+  MAX_ROSTER_SIZE,
+  carryGroomChoice,
+  defaultRosterText,
+  groomChoiceLost,
+  nameKey,
+  parseRosterText,
+  resolveGroomIndex,
+  rosterPayload,
+} from "@/lib/roster";
+import { Button, Card, IconChevronRight, IconClose, TextField, cx } from "@/components/ui";
 import { Wordmark } from "@/components/shell/Splash";
 
 // ---- recent trips straight from localStorage (stable string snapshot; null on the server) ----
@@ -49,6 +60,15 @@ function extractCode(data: unknown): string | null {
   const d = data as Record<string, unknown>;
   const raw = typeof d.code === "string" ? d.code : d.trip && typeof (d.trip as Record<string, unknown>).code === "string" ? ((d.trip as Record<string, unknown>).code as string) : null;
   return normalizeTripCode(raw);
+}
+
+/** The first pre-loaded player's id (the creator) from a POST /api/trips response. */
+function firstPlayerId(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const players = (data as Record<string, unknown>).players;
+  if (!Array.isArray(players) || !players[0] || typeof players[0] !== "object") return null;
+  const id = (players[0] as Record<string, unknown>).id;
+  return typeof id === "string" && id ? id : null;
 }
 
 async function postJson(url: string, body: unknown): Promise<{ status: number; data: unknown }> {
@@ -107,6 +127,17 @@ export default function HomePage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [tripName, setTripName] = useState("");
   const [pin, setPin] = useState("");
+  const [rosterText, setRosterText] = useState(defaultRosterText);
+  /** Groom picker: null = untouched (default groom when he's on the list), "" = none, else a nameKey. */
+  const [groomChoice, setGroomChoice] = useState<string | null>(null);
+  // One past the cap, so "too many" can be called out instead of silently dropping names.
+  const rosterNames = useMemo(() => parseRosterText(rosterText, MAX_ROSTER_SIZE + 1), [rosterText]);
+  const groomIndex = resolveGroomIndex(rosterNames, groomChoice);
+  // Fixing a spelling keeps the crown on that line (carryGroomChoice), never moves it to Caster.
+  const editRoster = (text: string) => {
+    setGroomChoice((c) => carryGroomChoice(rosterNames, parseRosterText(text, MAX_ROSTER_SIZE + 1), c));
+    setRosterText(text);
+  };
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const create = async (e: FormEvent) => {
@@ -116,6 +147,10 @@ export default function HomePage() {
       setCreateError("Name the trip. Something the groom will regret.");
       return;
     }
+    if (rosterNames.length > MAX_ROSTER_SIZE) {
+      setCreateError(`${MAX_ROSTER_SIZE} players max. This is a bachelor party, not the PGA Tour.`);
+      return;
+    }
     if (pin.trim().length < PIN_MIN_LENGTH) {
       setCreateError(`The commissioner PIN is at least ${PIN_MIN_LENGTH} digits.`);
       return;
@@ -123,7 +158,8 @@ export default function HomePage() {
     setCreating(true);
     setCreateError(null);
     try {
-      const { status, data } = await postJson("/api/trips", { pin: pin.trim(), name });
+      const roster = rosterPayload(rosterNames, groomIndex);
+      const { status, data } = await postJson("/api/trips", { pin: pin.trim(), name, roster });
       if (status < 200 || status >= 300) {
         setCreateError(serverError(status, data, "Trip creation isn't live on this server yet."));
         return;
@@ -134,6 +170,9 @@ export default function HomePage() {
         return;
       }
       rememberTrip(code, name);
+      // The first name on the roster is the creator: this phone already knows who it is.
+      const me = firstPlayerId(data);
+      if (me) saveMe(code, me);
       go(`/t/${code}?tab=setup`);
     } catch {
       setCreateError(NO_SIGNAL);
@@ -252,7 +291,7 @@ export default function HomePage() {
           <h2 className="text-2xl font-black">Commissioner</h2>
           {!createOpen ? (
             <>
-              <p className="mt-1 text-base font-semibold text-ink">Running this circus? Set up the roster, teams, course and pots.</p>
+              <p className="mt-1 text-base font-semibold text-ink">Running this circus? Create the trip with the boys already on it, then send them the link.</p>
               <Button variant="secondary" size="lg" full className="mt-3" onClick={() => setCreateOpen(true)}>
                 Create the trip
               </Button>
@@ -261,11 +300,19 @@ export default function HomePage() {
             <form onSubmit={create} className="mt-3 space-y-3" noValidate>
               <TextField
                 label="Trip name"
-                placeholder="Nick's Last Scramble"
+                placeholder="Caster's Last Scramble"
                 value={tripName}
                 onChange={(e) => setTripName(e.target.value)}
                 maxLength={80}
                 autoComplete="off"
+              />
+              <RosterFields
+                text={rosterText}
+                onText={editRoster}
+                names={rosterNames}
+                groomIndex={groomIndex}
+                groomLost={groomChoiceLost(rosterNames, groomChoice)}
+                onGroom={setGroomChoice}
               />
               <TextField
                 label="Commissioner PIN"
@@ -311,5 +358,92 @@ export default function HomePage() {
         Scramble v{APP_VERSION} · Drink responsibly. Golf irresponsibly.
       </footer>
     </div>
+  );
+}
+
+/** "Who's playing" textarea + the groom picker. Names are parsed live (one per line or comma). */
+function RosterFields({
+  text,
+  onText,
+  names,
+  groomIndex,
+  groomLost,
+  onGroom,
+}: {
+  text: string;
+  onText: (v: string) => void;
+  names: readonly string[];
+  groomIndex: number;
+  /** The picked groom's name was edited away: the picker reads "No groom yet". */
+  groomLost: boolean;
+  onGroom: (choice: string) => void;
+}) {
+  const id = useId();
+  const over = names.length > MAX_ROSTER_SIZE;
+  const shown = over ? names.slice(0, MAX_ROSTER_SIZE) : names;
+  const hint =
+    names.length === 0
+      ? "Leave it empty to add everyone later in Setup."
+      : over
+        ? `Over ${MAX_ROSTER_SIZE}. Trim the list.`
+        : `${names.length} player${names.length === 1 ? "" : "s"}. First name is you.`;
+  return (
+    <>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={`${id}-roster`} className="text-sm font-extrabold tracking-wider text-ink uppercase">
+          Who&apos;s playing
+        </label>
+        <textarea
+          id={`${id}-roster`}
+          value={text}
+          onChange={(e) => onText(e.target.value)}
+          rows={10}
+          autoComplete="off"
+          autoCapitalize="words"
+          spellCheck={false}
+          aria-describedby={`${id}-roster-hint`}
+          aria-invalid={over || undefined}
+          data-testid="create-roster"
+          className={cx(
+            "block min-h-36 w-full min-w-0 resize-y rounded-xl border-2 bg-paper px-4 py-3 text-lg leading-snug font-bold break-words text-ink placeholder:font-semibold placeholder:text-muted/80",
+            over ? "border-flag" : "border-ink",
+          )}
+          placeholder={"One name per line.\nYou first."}
+        />
+        <p id={`${id}-roster-hint`} className={cx("text-sm font-bold", over ? "text-flag" : "text-muted")}>
+          {hint}
+        </p>
+      </div>
+      {shown.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor={`${id}-groom`} className="text-sm font-extrabold tracking-wider text-ink uppercase">
+            <span aria-hidden="true">👑 </span>The groom
+          </label>
+          <select
+            id={`${id}-groom`}
+            value={groomIndex >= 0 && groomIndex < shown.length ? nameKey(shown[groomIndex]) : ""}
+            onChange={(e) => onGroom(e.target.value)}
+            data-testid="create-groom"
+            aria-describedby={groomLost ? `${id}-groom-hint` : undefined}
+            className={cx(
+              "h-14 w-full min-w-0 rounded-xl border-2 bg-paper px-3 text-lg font-bold text-ink",
+              groomLost ? "border-flag" : "border-ink",
+            )}
+          >
+            {shown.map((n) => (
+              <option key={nameKey(n)} value={nameKey(n)}>
+                {n}
+              </option>
+            ))}
+            <option value="">No groom yet</option>
+          </select>
+          {groomLost && (
+            <p id={`${id}-groom-hint`} className="text-sm font-bold text-flag" data-testid="create-groom-lost">
+              Your groom isn&apos;t on the list anymore. Pick him again.
+            </p>
+          )}
+        </div>
+      )}
+    </>
   );
 }

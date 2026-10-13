@@ -3,12 +3,13 @@ import {
   detectPlatform,
   forgetTrip,
   getRecentTrips,
-  isOnboarded,
+  isGetSetUpHidden,
   normalizeTripCode,
   readPref,
   rememberTrip,
-  setOnboarded,
+  setGetSetUpHidden,
   writePref,
+  getSetUpHiddenKey,
   RECENT_TRIPS_KEY,
 } from "@/lib/client/ui-prefs";
 
@@ -52,12 +53,15 @@ describe("prefs with localStorage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("onboarding flag", () => {
-    expect(isOnboarded()).toBe(false);
-    setOnboarded();
-    expect(isOnboarded()).toBe(true);
-    setOnboarded(false);
-    expect(isOnboarded()).toBe(false);
+  it("'Get set up' card hidden flag (per trip on this device: hiding it on the dry run keeps it on Saturday's trip)", () => {
+    expect(isGetSetUpHidden("dryrun")).toBe(false);
+    setGetSetUpHidden("dryrun");
+    expect(isGetSetUpHidden("dryrun")).toBe(true);
+    expect(storage.getItem(getSetUpHiddenKey("dryrun"))).toBe("1");
+    expect(isGetSetUpHidden("realtrip")).toBe(false);
+    setGetSetUpHidden("dryrun", false);
+    expect(isGetSetUpHidden("dryrun")).toBe(false);
+    expect(storage.getItem(getSetUpHiddenKey("dryrun"))).toBeNull();
   });
 
   it("recent trips: most recent first, dedupe, keeps name, capped", () => {
@@ -99,7 +103,8 @@ describe("prefs with localStorage", () => {
     expect(readPref("x")).toBeNull();
     expect(() => writePref("x", "1")).not.toThrow();
     expect(() => rememberTrip("abc123", "A")).not.toThrow();
-    expect(isOnboarded()).toBe(false);
+    expect(isGetSetUpHidden("abc123")).toBe(false);
+    expect(() => setGetSetUpHidden("abc123")).not.toThrow();
   });
 
   it("works without window (SSR)", () => {

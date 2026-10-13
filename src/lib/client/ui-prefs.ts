@@ -1,8 +1,9 @@
-// Per-device UI preferences in localStorage: onboarding seen, recent trips, dev mode.
+// Per-device UI preferences in localStorage: "Get set up" card hidden, recent trips, dev mode.
 // Every access is wrapped: private mode / full storage / SSR must never crash the app.
 
 const NS = "scramble:";
-export const ONBOARDED_KEY = `${NS}onboarded`;
+/** Per trip (`scramble:get-set-up-hidden:<code>`): hiding it on the dry run doesn't hide it on Saturday's trip. */
+export const getSetUpHiddenKey = (code: string) => `${NS}get-set-up-hidden:${code}`;
 export const RECENT_TRIPS_KEY = `${NS}recent-trips`;
 export const DEV_KEY = `${NS}dev`;
 const MAX_RECENT = 6;
@@ -35,14 +36,15 @@ export function writePref(key: string, value: string | null): void {
   }
 }
 
-// ---------- Onboarding (once per device) ----------
+// ---------- "Get set up" card (Home Screen + notifications; full pre-round, one row on Play) ----------
 
-export function isOnboarded(): boolean {
-  return readPref(ONBOARDED_KEY) === "1";
+/** Somebody tapped Hide on this trip's "Get set up" card on this device. */
+export function isGetSetUpHidden(code: string): boolean {
+  return readPref(getSetUpHiddenKey(code)) === "1";
 }
 
-export function setOnboarded(done = true): void {
-  writePref(ONBOARDED_KEY, done ? "1" : null);
+export function setGetSetUpHidden(code: string, hidden = true): void {
+  writePref(getSetUpHiddenKey(code), hidden ? "1" : null);
 }
 
 // ---------- Recent trips ----------
