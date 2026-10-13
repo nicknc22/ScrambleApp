@@ -13,10 +13,10 @@
 //   sig = base64url(HMAC-SHA256(secret, "<tripId>.<expMs>.<pin fingerprint>")), valid 12 h.
 // Trusted-device cookie "scramble_dev_<first 8 of trip id>" = "<tripId>.<expMs>.<deviceId>.<sig>",
 //   sig = base64url(HMAC-SHA256(secret, "dev.<tripId>.<expMs>.<deviceId>.<pin fingerprint>")),
-//   valid 60 days. Set when the trip is created and on every successful unlock. It grants nothing
-//   by itself: it only exempts this device from the SHARED wrong-PIN lockouts (trip-wide and per
-//   IP), so friends mashing the pad can't lock the real commissioner out. The device still needs
-//   the PIN and has its own per-device bucket.
+//   valid 60 days. Set when the trip is created and on every successful unlock, and kept on Lock.
+//   It grants nothing by itself: it only exempts this device from the SHARED wrong-PIN limits
+//   (trip-wide and per IP), so friends mashing the pad can't lock the real commissioner out. The
+//   device still needs the PIN and has its own per-device bucket.
 import crypto from "node:crypto";
 import { isValidPin, PIN_RE } from "@/lib/pin";
 import { getDb, type Db } from "./db";
@@ -299,20 +299,27 @@ export function commissionerSessionHeaders(request: Request, tripId: string, pin
 // Wrong-PIN throttle (pin_failures; shared by every server instance, survives cold starts)
 // ---------------------------------------------------------------------------
 //
-// Three buckets, checked BEFORE the PIN is verified (a throttled request never learns whether its
-// PIN was right, so the throttle can't be used as an oracle):
-//   per client   8 wrong PINs per 10 min and 30 per 24 h from one IP (or one trusted device)
-//   per trip    30 wrong PINs per 10 min and 100 per 24 h from everyone together (caps a guesser
-//               who rotates IPs: a 4-digit PIN would take ~50 days on average)
-// A trusted device (see above) skips the shared buckets: only its own per-device bucket applies.
-// tripId null = trip creation, checked against the server's COMMISSIONER_PIN_HASH.
+// Checked BEFORE the PIN is verified (a throttled request never learns whether its PIN was right,
+// so the throttle can't be used as an oracle). attemptPin reserves the attempt as a failure under
+// a per-bucket advisory lock before the slow scrypt check runs, so a burst of simultaneous guesses
+// can never check more PINs than the limits below.
+//   per client (primary)  8 wrong PINs per 10 min and 30 per 24 h from one IP (or one trusted
+//                         device). Only this bucket can lock anyone out for long.
+//   per trip (shared)     a slow global cap on everyone together that only ever costs a short wait:
+//                         30 per 10 min, and past 100 in 24 h one attempt per 10 min (~250 a day
+//                         at most for a guesser rotating IPs), so strangers can't lock the
+//                         commissioner out of a new device for more than ~10 minutes at a time.
+// A trusted device (see above) skips the shared bucket: only its own per-device bucket applies.
+// tripId null = trip creation, checked against the server's COMMISSIONER_PIN_HASH (same buckets).
 
 export const PIN_WINDOW_MS = 10 * 60 * 1000;
 export const PIN_DAY_MS = 24 * 60 * 60 * 1000;
 export const MAX_FAILS_PER_CLIENT = 8;
 export const MAX_FAILS_PER_CLIENT_DAY = 30;
 export const MAX_FAILS_PER_TRIP = 30;
+/** Shared failures in 24 h after which the shared bucket admits one attempt per PIN_SLOW_SPACING_MS. */
 export const MAX_FAILS_PER_TRIP_DAY = 100;
+export const PIN_SLOW_SPACING_MS = 10 * 60 * 1000;
 
 /** Best-effort client address (Vercel sets x-forwarded-for). */
 export function clientKey(request: Request): string {
@@ -326,9 +333,11 @@ export const deviceClientKey = (deviceId: string) => `dev:${deviceId}`;
 /** Seconds until the oldest failure that keeps `rows` (newest first) at the limit leaves the window. */
 function waitFor(rows: { created_at: string }[], limit: number, windowMs: number, now: number): number {
   if (rows.length < limit) return 0;
-  const edge = Date.parse(rows[limit - 1].created_at);
-  if (!(edge + windowMs > now)) return 0;
-  return Math.max(1, Math.ceil((edge + windowMs - now) / 1000));
+  return secondsUntil(Date.parse(rows[limit - 1].created_at) + windowMs, now);
+}
+
+function secondsUntil(at: number, now: number): number {
+  return at > now ? Math.max(1, Math.ceil((at - now) / 1000)) : 0;
 }
 
 export interface PinThrottleOptions {
@@ -355,7 +364,9 @@ export async function pinRetryAfter(db: Db, tripId: string | null, client: strin
         order by created_at desc limit $3`,
       [tripId, since(PIN_DAY_MS), MAX_FAILS_PER_TRIP_DAY],
     );
-    wait = Math.max(wait, waitFor(all, MAX_FAILS_PER_TRIP, PIN_WINDOW_MS, now), waitFor(all, MAX_FAILS_PER_TRIP_DAY, PIN_DAY_MS, now));
+    wait = Math.max(wait, waitFor(all, MAX_FAILS_PER_TRIP, PIN_WINDOW_MS, now));
+    // A busy day: no lockout, just one shared attempt per spacing.
+    if (all.length >= MAX_FAILS_PER_TRIP_DAY) wait = Math.max(wait, secondsUntil(Date.parse(all[0].created_at) + PIN_SLOW_SPACING_MS, now));
   }
   return wait;
 }
@@ -364,6 +375,44 @@ export async function recordPinFailure(db: Db, tripId: string | null, client: st
   await db.query("insert into pin_failures (trip_id, client, created_at) values ($1, $2, $3)", [tripId, client, new Date(now).toISOString()]);
   // Housekeeping: nothing older than the longest window matters.
   await db.query("delete from pin_failures where created_at < $1", [new Date(now - 2 * PIN_DAY_MS).toISOString()]);
+}
+
+export type PinAttemptResult = { status: "ok" } | { status: "wrong" } | { status: "throttled"; retryAfter: number };
+
+/**
+ * One throttled PIN attempt, safe under concurrency. In one transaction holding a per-bucket
+ * advisory lock (transaction-scoped: fine on PGlite and the Supavisor transaction pooler), check
+ * the throttle and RESERVE the attempt as a failure; only then run `verify` (scrypt, outside the
+ * transaction so no pooled connection waits on it). The right PIN deletes the reservation and
+ * clears the client's own bucket; a wrong one keeps it as the recorded failure.
+ */
+export async function attemptPin(
+  db: Db,
+  tripId: string | null,
+  client: string,
+  verify: () => Promise<boolean>,
+  opts: PinThrottleOptions = {},
+): Promise<PinAttemptResult> {
+  const now = opts.now ?? Date.now();
+  const wait = await db.tx(async (tx) => {
+    await tx.query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`pin:${tripId ?? "create"}`]);
+    const w = await pinRetryAfter(tx, tripId, client, { ...opts, now });
+    if (w === 0) await recordPinFailure(tx, tripId, client, now); // the reservation
+    return w;
+  });
+  if (wait > 0) return { status: "throttled", retryAfter: wait };
+  if (!(await verify())) return { status: "wrong" };
+  await recordPinSuccess(db, tripId, client); // drops the reservation with the rest of the bucket
+  return { status: "ok" };
+}
+
+/** "Try again in 4 minutes" for a throttle wait in seconds (the copy has to match the real wait). */
+export function retryAfterText(seconds: number): string {
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const hours = Math.ceil(minutes / 60);
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
 }
 
 /** The right PIN clears that client's own bucket (the shared ones keep counting). */

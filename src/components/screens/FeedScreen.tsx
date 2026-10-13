@@ -174,6 +174,7 @@ export function FeedScreen() {
                   photoSrc={ev.photo_path ? store.photoUrl(ev.photo_path) : null}
                   pending={!confirmedIds.has(ev.id)}
                   photoPending={store.isPhotoPending(ev.photo_path)}
+                  photoRefreshKey={ev.photo_path ? serverTime : null}
                   reactions={reactions.get(ev.id) ?? EMPTY_SUMMARY}
                   meId={me ? meId : null}
                   canDelete={canDeleteEvent(ev, meId, isCommissioner)}

@@ -338,7 +338,7 @@ describe("last write wins (by client time)", () => {
     await expectMatchesDb(lt, r2);
 
     // A third phone was offline and entered a 6 BEFORE phone 2's correction; it syncs last. It
-    // loses, and is told so (the phone toasts the reason).
+    // loses, and is told so (the phone toasts the reason); the feed records the dispute.
     const feedBefore = await count(db, "feed_events", lt.trip.id);
     const stale = mk("score.set", { team_id: A, hole: 1, strokes: 6, at: cli(45), by: A1 });
     const r3 = await sync(lt, [stale], { now: 600 });
@@ -349,10 +349,47 @@ describe("last write wins (by client time)", () => {
       strokes_at: cli(50),
       updated_by: A2,
     });
-    expect(r3.events.feed).toEqual([]);
-    expect(feedOf(r3, "score_edit")).toHaveLength(1);
-    expect(await count(db, "feed_events", lt.trip.id)).toBe(feedBefore);
+    expect(r3.events.feed).toEqual([
+      expect.objectContaining({
+        type: "score_edit",
+        team_id: A,
+        actor_id: A1,
+        dedupe_key: `overruled:${stale.id}`,
+        payload: { kind: "overruled", hole: 1, from: 6, to: 4, par: 4, edit_count: 1, overruled_by: A2 },
+      }),
+    ]);
+    expect(r3.events.push_triggers).toEqual([]);
+    expect(r3.events.roast_triggers).toEqual([]);
+    expect(feedOf(r3, "score_edit")).toHaveLength(2);
+    expect(await count(db, "feed_events", lt.trip.id)).toBe(feedBefore + 1);
     await expectMatchesDb(lt, r3);
+    // A resend gets the recorded rejection and posts nothing new.
+    const again = await sync(lt, [stale], { now: 700 });
+    expect(again.results).toEqual(r3.results);
+    expect(again.events.feed).toEqual([]);
+    expect(await count(db, "feed_events", lt.trip.id)).toBe(feedBefore + 1);
+  });
+
+  it("offline review repro: the dispute reaches the feed in either sync order (the later entry syncing first included)", async () => {
+    for (const order of ["earlier first", "later first"] as const) {
+      const lt = await liveTrip(db, [2, 2]);
+      const A = lt.team.A;
+      const { A1, A2 } = lt.player;
+      await sync(lt, [mk("tee.open", { team_id: A, hole: 1, at: cli(10), by: A1 })], { now: 20 });
+      const dave = mk("score.set", { team_id: A, hole: 1, strokes: 5, at: cli(30), by: A1 });
+      const mike = mk("score.set", { team_id: A, hole: 1, strokes: 3, at: cli(50), by: A2 });
+      const [first, second] = order === "earlier first" ? [dave, mike] : [mike, dave];
+      await sync(lt, [first], { now: 60 });
+      const out = await sync(lt, [second], { now: 70 });
+      expect(out.snapshot.state.hole_scores.find((h) => h.team_id === A && h.hole === 1)!.strokes, order).toBe(3);
+      const edits = feedOf(out, "score_edit");
+      expect(edits, order).toHaveLength(1);
+      // Either way the feed names both values: Dave's 5 and Mike's 3.
+      const p = edits[0].payload;
+      expect([p.from, p.to], order).toEqual([5, 3]);
+      expect(p.kind, order).toBe(order === "later first" ? "overruled" : undefined);
+      await expectMatchesDb(lt, out);
+    }
   });
 
   it("orders by client time within one batch too (the later edit wins regardless of position)", async () => {
@@ -363,7 +400,10 @@ describe("last write wins (by client time)", () => {
     const out = await sync(lt, [later, earlier], { now: 100 });
     expect(statuses(out)).toEqual(["applied", "rejected"]);
     expect(out.snapshot.state.hole_scores.find((h) => h.team_id === A && h.hole === 1)).toMatchObject({ strokes: 3, edit_count: 0 });
-    expect(feedOf(out, "score_edit")).toEqual([]);
+    // The losing 7 is on the feed as overruled (not as an edit of the scorecard).
+    expect(feedOf(out, "score_edit").map((e) => e.payload)).toEqual([
+      { kind: "overruled", hole: 1, from: 7, to: 3, par: 4, edit_count: 0, overruled_by: null },
+    ]);
     await expectMatchesDb(lt, out);
   });
 });
@@ -661,6 +701,138 @@ describe("offline phones vs the end of the round", () => {
     // The commissioner can still add one by hand (Day-of fallback).
     const fix = drinkOp(lt, "B", "B2", 18, "drink", { at: cli(3000), by: null, as_commissioner: true });
     expect((await sync(lt, [fix], { now: 3000, commish: true })).results).toEqual([{ id: fix.id, status: "applied" }]);
+  });
+
+  /** $20 team match; A plays 18 fours, B the same but a 5 on 18; both tap Round complete at 900. */
+  async function closeMatch(lt: LiveTrip): Promise<void> {
+    await sync(lt, [mk("trip.update", { patch: { settings: { team_match_ante_cents: 2000 } } })], { now: 1, commish: true });
+    const ops: Op[] = [];
+    for (const letter of ["A", "B"]) {
+      for (let hole = 1; hole <= 18; hole++) {
+        ops.push(mk("tee.open", { team_id: lt.team[letter], hole, at: cli(hole * 40) }));
+        ops.push(mk("score.set", { team_id: lt.team[letter], hole, strokes: letter === "B" && hole === 18 ? 5 : 4, at: cli(hole * 40 + 30) }));
+      }
+      ops.push(mk("round.complete", { team_id: lt.team[letter], at: cli(900) }));
+    }
+    expect(statuses(await sync(lt, ops, { now: 905 })).every((st) => st === "applied")).toBe(true);
+  }
+  const payments = (out: ApplyOpsResult) =>
+    derive(out.snapshot.state).money.payments.map((p) => `${p.from_player_id}>${p.to_player_id} ${p.amount_cents}`).sort();
+
+  it("rules/money review repro: a late sync that flips the champion and reverses the settle-up is LOUD, never a NEW LEADER", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    const { A1, A2, B1, B2 } = lt.player;
+    await closeMatch(lt);
+    // B2's phone logged a shotgun on 18 at 880 in a dead zone; the commissioner finalizes at 1000.
+    const shotgun = drinkOp(lt, "B", "B2", 18, "shotgun", { at: cli(880) });
+    const fin = await sync(lt, [mk("trip.finalize", {})], { now: 1000, commish: true });
+    expect(payments(fin)).toEqual([`${B1}>${A1} 2000`, `${B2}>${A2} 2000`].sort());
+    const finalPost = feedOf(fin, "final_results")[0];
+    expect(finalPost.payload.champion_team_ids).toEqual([lt.team.A]);
+
+    // The phone is opened two hours later.
+    const late = await sync(lt, [shotgun], { now: 1000 + 2 * 3600 });
+    expect(late.results).toEqual([{ id: shotgun.id, status: "applied" }]);
+    expect(late.snapshot.state.trip.status).toBe("final");
+    expect(payments(late)).toEqual([`${A1}>${B1} 2000`, `${A2}>${B2} 2000`].sort());
+    expect(late.events.feed.map((e) => e.type)).not.toContain("lead_change");
+    const changed = late.events.feed.filter((e) => e.type === "results_changed");
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toMatchObject({
+      actor_id: B2,
+      payload: { champion_before: [lt.team.A], champion_after: [lt.team.B], late_op_ids: [shotgun.id] },
+    });
+    expect(late.events.push_triggers).toEqual([
+      expect.objectContaining({ feed_event_id: changed[0].id, audience: { kind: "all" }, collapse_key: "results_changed" }),
+    ]);
+    expect(late.events.roast_triggers).toEqual([]);
+    // The FINAL RESULTS post stays as history; the new event supersedes it.
+    expect(feedOf(late, "final_results")).toEqual([finalPost]);
+    await expectMatchesDb(lt, late);
+  });
+
+  it("security review repro: late sync is bounded by arrival (12 h after the finalize), so a backdated op can't rewrite the final card days later", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    await closeMatch(lt);
+    await sync(lt, [mk("trip.finalize", {})], { now: 1000, commish: true });
+    const H = 3600;
+    const queued = drinkOp(lt, "B", "B2", 18, "drink", { at: cli(880) });
+    const tooLate = await sync(lt, [queued], { now: 1000 + 12 * H + 60 });
+    expect(tooLate.results).toEqual([{ id: queued.id, status: "rejected", code: "not_live", reason: expect.stringMatching(/final/) }]);
+    const forged = mk("score.set", { team_id: lt.team.B, hole: 16, strokes: 1, at: cli(999), by: lt.player.B1 });
+    expect((await sync(lt, [forged], { now: 1000 + 48 * H })).results[0]).toMatchObject({ status: "rejected", code: "not_live" });
+    // Within the window it still lands (the Oct 13 decision), loudly.
+    const inTime = drinkOp(lt, "B", "B1", 18, "shotgun", { at: cli(870) });
+    const ok = await sync(lt, [inTime], { now: 1000 + 11 * H });
+    expect(statuses(ok)).toEqual(["applied"]);
+    expect(ok.events.feed.map((e) => e.type)).toContain("results_changed");
+    expect(await count(db, "drinks", lt.trip.id)).toBe(1);
+  });
+
+  it("rules review repro: clubhouse beers that reach the server before the scorer's Round complete stop counting once it lands", async () => {
+    const lt = await liveTrip(db, [3, 3]);
+    await sync(lt, [mk("trip.update", { patch: { settings: { team_match_ante_cents: 2000 } } })], { now: 1, commish: true });
+    const ops: Op[] = [];
+    for (const letter of ["A", "B"]) {
+      for (let hole = 1; hole <= 18; hole++) {
+        ops.push(mk("tee.open", { team_id: lt.team[letter], hole, at: cli(hole * 40) }));
+        ops.push(mk("score.set", { team_id: lt.team[letter], hole, strokes: letter === "B" && hole === 18 ? 5 : 4, at: cli(hole * 40 + 30) }));
+      }
+    }
+    ops.push(mk("round.complete", { team_id: lt.team.A, at: cli(900) }));
+    await sync(lt, ops, { now: 905 });
+    // B1 taps Round complete on the 18th green with no signal (queued). B2's phone is online and
+    // still shows 18 open: two bar beers 10 and 12 minutes later sync right away.
+    const complete = mk("round.complete", { team_id: lt.team.B, at: cli(1000), by: lt.player.B1 });
+    const beers = [drinkOp(lt, "B", "B2", 18, "drink", { at: cli(1600) }), drinkOp(lt, "B", "B2", 18, "drink", { at: cli(1720) })];
+    const early = await sync(lt, beers, { now: 1725 });
+    expect(statuses(early)).toEqual(["applied", "applied"]);
+    // B1's phone finds signal.
+    const out = await sync(lt, [complete], { now: 1900 });
+    expect(statuses(out)).toEqual(["applied"]);
+    const d = derive(out.snapshot.state);
+    expect(d.standings.map((r) => [r.team_id, r.net])).toEqual([
+      [lt.team.A, 72],
+      [lt.team.B, 73],
+    ]);
+    expect(d.money.payments.every((p) => [lt.player.A1, lt.player.A2, lt.player.A3].includes(p.to_player_id))).toBe(true);
+    // Same result as if the Round complete had synced first (the beers would have been refused).
+    expect(d.drinkers.find((r) => r.player_id === lt.player.B2)!.total).toBe(0);
+  });
+
+  it("security review repro: a teammate pulling a drink and a closest-to-pin entry 40 minutes later leaves a 'removed' post", async () => {
+    const lt = await liveTrip(db, [2, 2]);
+    const { A1, A2 } = lt.player;
+    await sync(lt, [mk("tee.open", { team_id: lt.team.A, hole: 3, at: cli(100), by: A1 })], { now: 100 });
+    const d = drinkOp(lt, "A", "A1", 3, "shotgun", { at: cli(110) });
+    const e = mk("contest.submit", {
+      entry_id: newId(),
+      hole: 3,
+      player_id: A1,
+      contest_type: "ctp",
+      distance_value: 3,
+      angle_deg: 45,
+      lat: null,
+      lng: null,
+      gps_accuracy_m: null,
+      low_accuracy: false,
+      photo_path: null,
+      at: cli(120),
+      by: A1,
+    });
+    await sync(lt, [d, e], { now: 125 });
+    const pull = [
+      mk("drink.delete", { drink_id: d.drink_id, at: cli(110 + 2400), by: A2 }),
+      mk("contest.delete", { entry_id: e.entry_id, at: cli(120 + 2400), by: A2 }),
+    ];
+    const out = await sync(lt, pull, { now: 125 + 2400 });
+    expect(statuses(out)).toEqual(["applied", "applied"]);
+    const removed = feedOf(out, "removed").map((x) => [x.actor_id, x.player_id, x.payload.kind]);
+    expect(removed.sort((a, b) => String(a[2]).localeCompare(String(b[2])))).toEqual([
+      [A2, A1, "contest_entry"],
+      [A2, A1, "drink"],
+    ]);
+    await expectMatchesDb(lt, out);
   });
 
   it("a lost response doesn't hide a rejection: the resend answers with the recorded rejection", async () => {

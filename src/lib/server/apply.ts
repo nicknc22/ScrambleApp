@@ -12,7 +12,10 @@
 //                         not win every last-write-wins comparison forever)
 //       applyOp           the SAME reducer the phones run optimistically (side: "server")
 //       validateWrites    rows the database would choke on reject this op only
-//     deriveFeedEvents    feed rows from the accepted steps (new events + updated drink batches)
+//     deriveFeedEvents    feed rows from the accepted steps (new events + updated drink batches),
+//                         plus an "overruled" score_edit for each score.set that lost last-write-wins
+//                         to a newer, different value (rejected ops make no steps, but the spec
+//                         wants the dispute on the feed in either sync order)
 //     persist             reducer writes + feed rows + applied_ops bookkeeping
 //   → results (one per op, request order) + snapshot (final in-memory state + snapshotMeta)
 //
@@ -31,7 +34,7 @@
 // Everything inside a transaction uses the handle `t` it was given (never the root db: on PGlite
 // that would deadlock, see db.ts).
 import { applyOp, CLOCK_GRACE_MS, type ApplyCtx, type Write } from "@/lib/reducer";
-import { deriveFeedEvents, type DeriveEventsResult, type OpStep } from "@/lib/events/derive";
+import { deriveFeedEvents, overruledScoreEvent, type DeriveEventsResult, type OpStep } from "@/lib/events/derive";
 import type { Op, OpResult, OpType, RejectCode } from "@/lib/ops";
 import { ROW_TABLES, type FeedEvent, type RowTable, type Snapshot, type Trip, type TripState, type UUID } from "@/lib/types";
 import { pgErrorCode, type Db } from "./db";
@@ -172,6 +175,8 @@ interface BatchRun {
   records: AppliedOpRecord[];
   /** State after the last accepted op (reducer output only; derived feed rows not merged). */
   state: TripState;
+  /** "Overruled" score_edit rows for score.set ops rejected as stale (see overruledScoreEvent). */
+  overruled: FeedEvent[];
 }
 
 const BAD_DATA_REASON = "That one didn't compute. Malformed data?";
@@ -194,7 +199,7 @@ function runOps(
   prior: ReadonlyMap<string, AppliedOpRow>,
   ctx: ApplyCtx,
 ): BatchRun {
-  const run: BatchRun = { results: [], steps: [], writes: [], applied: [], records: [], state: initial };
+  const run: BatchRun = { results: [], steps: [], writes: [], applied: [], records: [], state: initial, overruled: [] };
   const nowMs = Date.parse(ctx.now);
   const seen = new Map<string, number>(); // lowercase id handled earlier in this batch -> its result's index
 
@@ -239,6 +244,10 @@ function runOps(
     const r = applyOp(run.state, op, ctx);
     if (!r.ok) {
       reject(op.id, op.type, r.code, r.reason);
+      if (op.type === "score.set" && r.code === "conflict") {
+        const ev = overruledScoreEvent(run.state, op, ctx.now);
+        if (ev && !run.overruled.some((x) => x.id === ev.id)) run.overruled.push(ev);
+      }
       continue;
     }
     if (r.writes.length > 0) {
@@ -264,16 +273,17 @@ function runOps(
 // Feed events
 // ---------------------------------------------------------------------------
 
-/** Derive feed rows for the accepted steps. Never throws (the ops must commit regardless). */
+/** Derive feed rows for the accepted steps (+ overruled scores). Never throws (the ops must commit regardless). */
 function deriveEvents(tripId: UUID, run: BatchRun, existingFeed: FeedEvent[], now: string): DeriveEventsResult {
-  if (run.steps.length === 0) return NO_EVENTS;
+  if (run.steps.length === 0 && run.overruled.length === 0) return NO_EVENTS;
   let ev: DeriveEventsResult;
   try {
     ev = deriveFeedEvents({ steps: run.steps, existingFeed, now });
   } catch (e) {
     console.error("[sync] deriving feed events failed; committing the ops without them", e);
-    return NO_EVENTS;
+    ev = NO_EVENTS;
   }
+  if (run.overruled.length > 0) ev = { ...ev, feed: [...ev.feed, ...run.overruled] };
   // A malformed row would make persistWrites throw for the whole batch: drop it instead.
   const bad = new Set<UUID>();
   for (const row of ev.feed) {

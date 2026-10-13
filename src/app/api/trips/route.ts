@@ -1,18 +1,18 @@
 // POST /api/trips {pin, name?, app_name?} → 201 {code, trip_id, url} + commissioner cookie (and
 // this device trusted for the new trip, see auth.ts).
 // With COMMISSIONER_PIN_HASH set, the PIN must match it and the new trip uses that hash. Wrong
-// PINs share the database throttle (bucket: trip_id null).
+// PINs share the database throttle (bucket: trip_id null; per IP, plus a slow global cap whose
+// waits stay short, so strangers can't keep the commissioner from creating the trip).
 // Without it, only outside production (dev convenience): the trip's PIN becomes `pin`.
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
 import {
+  attemptPin,
   clientKey,
   commissionerSessionHeaders,
   hashPin,
   isValidPin,
   isWellFormedPinHash,
-  pinRetryAfter,
-  recordPinFailure,
-  recordPinSuccess,
+  retryAfterText,
   verifyPin,
 } from "@/lib/server/auth";
 import { getDb } from "@/lib/server/db";
@@ -40,19 +40,14 @@ export const POST = withErrors(async (request: Request) => {
         code: "not_configured",
       });
     }
-    const client = clientKey(request);
-    const wait = await pinRetryAfter(db, null, client);
-    if (wait > 0) {
-      return errorJson(429, "Easy, tiger. Too many wrong PINs. Wait a few minutes.", {
+    const attempt = await attemptPin(db, null, clientKey(request), () => verifyPin(pin, envHash));
+    if (attempt.status === "throttled") {
+      return errorJson(429, `Easy, tiger. Too many wrong PINs. Try again in ${retryAfterText(attempt.retryAfter)}.`, {
         code: "throttled",
-        retry_after: wait,
+        retry_after: attempt.retryAfter,
       });
     }
-    if (!(await verifyPin(pin, envHash))) {
-      await recordPinFailure(db, null, client);
-      return errorJson(401, "Wrong PIN. Only the commissioner gets to start a trip.", { code: "bad_pin" });
-    }
-    await recordPinSuccess(db, null, client);
+    if (attempt.status === "wrong") return errorJson(401, "Wrong PIN. Only the commissioner gets to start a trip.", { code: "bad_pin" });
     pinHash = envHash;
   } else {
     if (isProduction()) {

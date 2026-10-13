@@ -220,9 +220,10 @@ describe("computeAwards", () => {
     const f = makeTrip({ teams: [2, 2] });
     card(f, "A", { 1: 3 });
     card(f, "B", { 1: 6 });
-    f.drink("B", "B1", 5);
-    f.drink("B", "B2", 5);
-    f.drink("B", "B1", 6);
+    // Logged during the round (before B's Round complete).
+    f.drink("B", "B1", 5, "drink", { min: 25 });
+    f.drink("B", "B2", 5, "drink", { min: 25.5 });
+    f.drink("B", "B1", 6, "drink", { min: 26 });
     const a = awards(f);
     expect(a.champions).toMatchObject({ team_ids: [f.team.B], value_label: "-4 net" });
     expect(a.didnt_need_the_beer).toMatchObject({ team_ids: [f.team.A], value_label: "-1 gross" });
@@ -256,6 +257,29 @@ describe("computeAwards", () => {
       feed_events: [...f.state.feed_events, { ...f.state.feed_events[0], id: "ghost-actor", actor_id: "no-such-player", deleted_at: null }],
     };
     expect(awards(f).edit_bandit).toMatchObject({ awarded: false, value_label: "", player_ids: [] });
+  });
+
+  it("Most Suspicious counts every flag the AI raised, even on an entry later retaken or withdrawn; one photo is one flag", () => {
+    const f = makeTrip({ teams: [2, 2] });
+    // A1 claims 2 ft, the AI says ~20 ft: flagged. A re-measure on the same photo carried the flag.
+    const flagged = f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 2, photo_path: "trips/x/ctp/p1.jpg", ai_suspicious: true });
+    const carried = f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 2.5, photo_path: "trips/x/ctp/p1.jpg", ai_suspicious: true });
+    // Then A1 retakes with a new photo; the AI comes back low-confidence: not flagged.
+    f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 3, photo_path: "trips/x/ctp/p2.jpg", ai_suspicious: false });
+    f.state = {
+      ...f.state,
+      contest_entries: f.state.contest_entries.map((e) => (e.id === flagged || e.id === carried ? { ...e, deleted_at: at(90) } : e)),
+    };
+    expect(awards(f).most_suspicious).toMatchObject({ awarded: true, player_ids: [f.player.A1], value_label: "1 AI flag" });
+  });
+
+  it("Edit Bandit doesn't count an overruled entry (it lost last-write-wins and changed nothing)", () => {
+    const f = makeTrip({ teams: [2, 2] });
+    feed(f, "score_edit", "A1");
+    for (let i = 0; i < 3; i++) feed(f, "score_edit", "B1");
+    const overruled = (e: FeedEvent) => (e.actor_id === f.player.B1 ? { ...e, payload: { kind: "overruled", from: 5, to: 4 } } : e);
+    f.state = { ...f.state, feed_events: f.state.feed_events.map(overruled) };
+    expect(awards(f).edit_bandit).toMatchObject({ awarded: true, player_ids: [f.player.A1], value_label: "1 score edit" });
   });
 
   it("Most Drinks breaks out shotguns and shots", () => {

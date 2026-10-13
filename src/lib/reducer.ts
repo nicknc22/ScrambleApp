@@ -63,7 +63,7 @@ import {
 } from "./ops";
 import { contestForPar } from "./course";
 import { deriveId } from "./ids";
-import { openWindowHole } from "./engine/windows";
+import { CLOCK_GRACE_MS, loggedAfterRound, openWindowHole } from "./engine/windows";
 import { isTripPhotoPath } from "./photos";
 
 export interface ApplyCtx {
@@ -109,8 +109,18 @@ const MAX_NAME_CHARS = 80;
 /**
  * Clock-skew allowance between phones and the server: a play op stamped up to this long after the
  * trip was finalized (or after its team tapped Round complete) still counts as "during the round".
+ * Defined next to the window rules (engine/windows.ts), which use the same allowance.
  */
-export const CLOCK_GRACE_MS = 2 * 60_000;
+export { CLOCK_GRACE_MS };
+/**
+ * A late sync of plays from the course (stamped before the finalize) is accepted on a final trip
+ * only while the server receives it within this long of the finalize. After that the results stay
+ * put: the commissioner can reopen the round to add anything that really happened.
+ */
+export const LATE_SYNC_WINDOW_MS = 12 * 3600_000;
+/** Posts per trip (player posts; storage and abuse bound). Demo trips are public: much lower. */
+export const MAX_POSTS_PER_TRIP = 1500;
+export const MAX_POSTS_PER_DEMO_TRIP = 150;
 
 // ---------------------------------------------------------------------------
 // Rejections
@@ -446,6 +456,9 @@ function scoreSet(tx: Tx, op: ScoreSetOp): void {
     reject("invalid", `Strokes must be a whole number from 1 to ${MAX_STROKES}. Pick up, my guy.`);
   }
   const existing = tx.state.hole_scores.find((r) => r.team_id === team.id && r.hole === hole);
+  // "Fill only if empty" (an untouched par default saved on advance): never overwrites anything,
+  // never rejected. The commissioner's override ignores the flag.
+  if (op.if_empty === true && existing && existing.strokes !== null && !tx.override) return;
   // LWW by client time: an older (e.g. offline) edit never clobbers a newer one. It's rejected
   // (so the losing phone hears about it) unless it agrees with the stored value. A commissioner
   // override always wins, so a phone with a clock set in the future can't lock a hole forever.
@@ -589,8 +602,11 @@ function mulliganUse(tx: Tx, op: MulliganUseOp): void {
     }
   }
   if (op.source === "earned") {
-    // Bank = active shotgun + shot drinks minus active earned uses (deleting the drink voids it).
-    const earned = s.drinks.filter((d) => d.team_id === team.id && isActive(d) && (d.type === "shotgun" || d.type === "shot")).length;
+    // Bank = active shotgun + shot drinks minus active earned uses (deleting the drink voids it; one
+    // logged after Round complete never counted).
+    const earned = s.drinks.filter(
+      (d) => d.team_id === team.id && isActive(d) && (d.type === "shotgun" || d.type === "shot") && !loggedAfterRound(d, rs),
+    ).length;
     const used = s.mulligans.filter((m) => m.team_id === team.id && isActive(m) && m.source === "earned").length;
     if (earned - used <= 0) reject("conflict", "No mulligans in the bank. Shotgun something.");
   } else if (op.source === "groom") {
@@ -684,10 +700,11 @@ function contestSubmit(tx: Tx, op: ContestSubmitOp): void {
 
   // Long drive: a position we can't trust routes to the commissioner instead of counting. The
   // sanity range is NOT stored: the engine re-checks it against the current tee point and settings.
-  let status: ContestEntry["status"] = "ok";
+  // An entry the commissioner makes (override) is a ruling: official as typed, no range check.
+  let status: ContestEntry["status"] = tx.override ? "overridden" : "ok";
   let flagReason: string | null = null;
-  if (type === "ld") {
-    if (op.simulated === true && !tx.override && !s.trip.is_demo) {
+  if (type === "ld" && !tx.override) {
+    if (op.simulated === true && !s.trip.is_demo) {
       status = "flagged";
       flagReason = "Simulated GPS";
     } else if (lowAccuracy) {
@@ -763,6 +780,10 @@ function postCreate(tx: Tx, op: PostCreateOp): void {
   if (text.length > MAX_POST_CHARS) reject("invalid", `Keep it under ${MAX_POST_CHARS} characters, Hemingway.`);
   const photo = optPhoto(s, op.photo_path);
   if (!text && !photo) reject("invalid", "Say something (or post a photo). Silence isn't content.");
+  const cap = s.trip.is_demo ? MAX_POSTS_PER_DEMO_TRIP : MAX_POSTS_PER_TRIP;
+  if (s.feed_events.filter((f) => f.type === "post").length >= cap) {
+    reject("conflict", `The feed is full: ${cap} posts and the group chat is still going. Save some material for the toast.`);
+  }
   const author = actorId(s, op);
   const row: FeedEvent = {
     id,
@@ -1237,11 +1258,16 @@ function applyOrThrow(state: TripState, op: Op, ctx: ApplyCtx): ApplyResult {
     reject("forbidden", "Commissioner only. Nice try, though.");
   }
   // 2. Play ops need a live round. A commissioner override may also fix a final one, and a late
-  //    sync of something that happened before the finalize (+ clock grace) still lands. A fresh
+  //    sync of something that happened before the finalize (+ clock grace) still lands, if it
+  //    reaches the server within LATE_SYNC_WINDOW_MS of the finalize (server time). A fresh
   //    dispatch on a phone that already shows the round final is not late: it's after.
   if (PLAY_OPS.has(op.type)) {
     const { status, finalized_at } = state.trip;
-    const late = ctx.side === "server" && finalized_at !== null && !pastGrace(op.at, finalized_at);
+    const late =
+      ctx.side === "server" &&
+      finalized_at !== null &&
+      !pastGrace(op.at, finalized_at) &&
+      time(ctx.now) <= time(finalized_at) + LATE_SYNC_WINDOW_MS;
     const allowed = status === "live" || (status === "final" && (!!op.as_commissioner || late));
     if (!allowed) {
       reject(

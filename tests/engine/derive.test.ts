@@ -299,10 +299,10 @@ describe("derive — strict end to end (needs every engine module)", () => {
       for (let h = 1; h <= 18; h++) {
         f.teeOff(t, h);
         f.score(t, h, 4, `${t}1`);
+        if (t === "B" && h === 7) f.drink("B", "B1", 7, "shotgun");
       }
       f.complete(t);
     }
-    f.drink("B", "B1", 7, "shotgun");
     let d: Derived;
     try {
       d = derive(f.state, { strict: true });

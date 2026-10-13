@@ -1,6 +1,8 @@
 "use client";
 // "Whose tee shot?" — one chip per teammate, tap the selected chip again to clear. Directly under
 // it: the drive-minimum status for the nine (per-player counts, soft/hard/impossible/missed).
+// Compact on purpose: it is the first card under the hole, and a foursome's two rows of chips must
+// clear the action bar on a small phone without scrolling.
 import type { Player, UUID } from "@/lib/types";
 import type { DriveNineStatus } from "@/lib/engine/types";
 import { Card, Chip, IconCheck, displayName, cx } from "@/components/ui";
@@ -18,6 +20,14 @@ const TONE: Record<DriveTone, string> = {
 const ICON: Record<DriveTone, string> = { done: "✅", ok: "🏌️", soft: "⚠️", hard: "🚨", impossible: "💀", missed: "🚩" };
 
 export function DriveStatusLine({ view, className }: { view: DriveView; className?: string }) {
+  if (view.tone === "ok") {
+    // Nothing urgent yet (the chips' red 0s already show who needs a drive): one quiet line.
+    return (
+      <p className={cx("truncate px-1 text-[13px] leading-5 font-bold text-muted", className)} data-testid="drive-status" data-tone={view.tone}>
+        {ICON.ok} {view.text}
+      </p>
+    );
+  }
   return (
     <p
       className={cx("flex items-start gap-2 rounded-xl border-2 px-3 py-2 text-[15px] leading-snug font-extrabold", TONE[view.tone], className)}
@@ -48,8 +58,8 @@ export function TeeShotPanel({
   onSelect: (playerId: UUID | null) => void;
 }) {
   return (
-    <Card className="space-y-3 border-ink" data-testid="teeshot-panel">
-      <div className="flex items-baseline justify-between gap-2">
+    <Card padded={false} className="space-y-2 border-ink px-3 pt-2 pb-2.5" data-testid="teeshot-panel">
+      <div className="flex items-baseline justify-between gap-2 px-1">
         <h2 className="text-lg leading-tight font-black uppercase">Whose tee shot?</h2>
         <span className="shrink-0 text-xs font-black tracking-wide text-muted uppercase">Drives · {nine?.nine === 2 ? "back" : "front"} 9</span>
       </div>
@@ -65,7 +75,7 @@ export function TeeShotPanel({
               disabled={disabled}
               onClick={() => onSelect(on ? null : p.id)}
               aria-label={`${displayName(p)}'s tee shot${on ? " (selected, tap to clear)" : ""}, ${count} ${count === 1 ? "drive" : "drives"} this nine`}
-              className="min-h-14 w-full justify-start gap-2 pr-3 pl-2 text-[17px]"
+              className="w-full justify-start gap-2 pr-3 pl-1.5 text-[17px]"
               leading={
                 <span
                   className={cx(

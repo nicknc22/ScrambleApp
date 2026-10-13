@@ -52,6 +52,14 @@ export interface ScoreEditPayload {
   par: number;
   /** hole_scores.edit_count after this edit. */
   edit_count: number;
+  /**
+   * "overruled": a stale (offline) entry that LOST last-write-wins to a newer, different value. The
+   * scorecard didn't change; the feed still records the dispute. `from` is the losing value (by
+   * actor_id), `to` the stored newer one (by overruled_by). Absent = an ordinary edit.
+   */
+  kind?: "overruled";
+  /** overruled only: who entered the newer value that won. */
+  overruled_by?: UUID | null;
 }
 
 /** Batched plain drinks: same team + hole within 60 s of the batch's first drink. */
@@ -167,7 +175,11 @@ export interface ContestLeadPayload {
   unit: "ft" | "yd";
 }
 
-/** Written by the AI judge route (not by derive). Templates read it leniently. */
+/**
+ * Written by the AI judge (server/judge.ts), or by derive when a re-measure on the same photo
+ * carries the verdict over and the new claim is newly suspicious (`carried: true`). Templates read
+ * it leniently.
+ */
 export interface AiJudgePayload {
   entry_id: UUID;
   hole: number;
@@ -176,6 +188,8 @@ export interface AiJudgePayload {
   confidence: "low" | "medium" | "high";
   suspicious: boolean;
   roast: string | null;
+  /** The verdict came from an earlier read of the same photo (no new AI call). */
+  carried?: boolean;
 }
 
 export interface DriveWarningPayload extends Retractable {
@@ -230,6 +244,59 @@ export interface FinalResultsPayload {
   champion_player_ids: UUID[];
 }
 
+/** Compact standings row for results_changed. */
+export interface ResultsStandingRow {
+  team_id: UUID;
+  pos_label: string;
+  net: number;
+  net_to_par: number;
+}
+
+export interface ResultsPayment {
+  from_player_id: UUID;
+  to_player_id: UUID;
+  amount_cents: number;
+}
+
+/**
+ * A batch applied to a FINAL trip (a late sync of plays from the course, or a commissioner fix)
+ * changed the champion(s), a standings position/net or a settle-up payment. Supersedes the
+ * FINAL RESULTS post (which stays as history). Big card, pushed to everyone, never roasted.
+ */
+export interface ResultsChangedPayload {
+  champion_before: UUID[];
+  champion_after: UUID[];
+  standings_before: ResultsStandingRow[];
+  standings_after: ResultsStandingRow[];
+  payments_before: ResultsPayment[];
+  payments_after: ResultsPayment[];
+  /** Play ops from the course that landed after the finalize (empty for commissioner fixes). */
+  late_op_ids: UUID[];
+}
+
+export type RemovedKind = "drink" | "contest_entry" | "mulligan";
+
+/**
+ * Someone other than the logger (or the logger, long after the 10-second undo) removed a drink,
+ * contest entry or mulligan: posted for transparency (actor_id = who removed it). Commissioner
+ * deletes post commissioner_override instead.
+ */
+export interface RemovedPayload {
+  kind: RemovedKind;
+  /** The removed row's id (drink, contest entry or mulligan). */
+  row_id: UUID;
+  /** Whose it was: the drinker, the entrant, or who used the mulligan (null if unknown). */
+  owner_id: UUID | null;
+  hole: number;
+  /** drink: drink type; contest_entry: ctp | ld; mulligan: earned | groom. */
+  detail: string;
+  /** contest_entry only: the withdrawn distance (official at the time) and unit. */
+  distance?: number | null;
+  unit?: "ft" | "yd" | null;
+  /** Seconds between logging the row and removing it (client clocks; server clock for entries). */
+  after_sec: number;
+}
+
 /** AI roast (written by the roast route). The roast text is FeedEvent.text. */
 export interface RoastPayload {
   trigger_event_id: UUID;
@@ -259,6 +326,8 @@ export interface FeedPayloadMap {
   commissioner_override: CommissionerOverridePayload;
   round_complete: RoundCompletePayload;
   final_results: FinalResultsPayload;
+  results_changed: ResultsChangedPayload;
+  removed: RemovedPayload;
   roast: RoastPayload;
 }
 

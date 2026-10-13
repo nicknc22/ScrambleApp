@@ -4,7 +4,7 @@
 import { useEffect, useRef } from "react";
 import type { TeamHoleLine } from "@/lib/engine/types";
 import { Card, cx } from "@/components/ui";
-import { nineTotals, stripCells, type ScoreTone } from "./model";
+import { nineTotals, stripCells, stripHint, type ScoreTone } from "./model";
 
 const STROKE_SHAPE: Record<ScoreTone, string> = {
   ace: "rounded-full bg-gold text-ink ring-2 ring-ink",
@@ -23,6 +23,7 @@ export function ScorecardStrip({
   unsavedHoles,
   onSelect,
   title = "Scorecard",
+  canEdit = true,
 }: {
   lines: TeamHoleLine[];
   currentHole: number;
@@ -30,6 +31,8 @@ export function ScorecardStrip({
   unsavedHoles: number[];
   onSelect: (hole: number) => void;
   title?: string;
+  /** Scores can still change from this phone ("Tap a hole to fix it" vs "... to see it"). */
+  canEdit?: boolean;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const cells = stripCells(lines, currentHole, viewing ?? -1, unsavedHoles);
@@ -48,7 +51,7 @@ export function ScorecardStrip({
     <Card padded={false} className="overflow-hidden border-ink" data-testid="scorecard-strip">
       <div className="flex items-baseline justify-between gap-2 px-4 pt-3">
         <h2 className="text-lg font-black uppercase">{title}</h2>
-        <span className="text-sm font-bold text-muted">Tap a hole to fix it</span>
+        <span className="text-sm font-bold text-muted">{stripHint(canEdit)}</span>
       </div>
       <div ref={scroller} className="no-scrollbar mt-2 flex gap-1.5 overflow-x-auto overscroll-x-contain px-3 pb-3" role="list">
         {cells.map((c) => (

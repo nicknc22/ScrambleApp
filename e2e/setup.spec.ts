@@ -3,6 +3,10 @@
 // groom, set antes with a 70/30 split, start the round, and check Play unlocks for a player.
 import { randomUUID } from "node:crypto";
 import { devices, expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { LOCAL_TEAM_NAMES } from "../src/components/setup/teamNames";
+
+/** Typed for Team 2: not on (or inside a name of) the generator's house list Team 1 picks from. */
+const TEAM2_NAME = "Dew Sweepers";
 
 const PLAYERS = ["Nick", "Dave", "Mike", "Chris", "Tom", "Jimmy", "Rob", "Steve", "Pete", "Gus"];
 
@@ -126,21 +130,24 @@ test("commissioner sets up the trip from scratch and starts the round", async ({
 
   // Type Team 2's name, then tap a tee-time chip straight away: the blur saves the name and the
   // "Saved" row must not shove the chips down mid-tap (the tee time used to be silently lost).
+  // The name isn't on the generator's house list, so it can never collide with Team 1's pick.
+  expect(LOCAL_TEAM_NAMES.filter((n) => n.includes(TEAM2_NAME))).toEqual([]);
+  expect(picked).not.toContain(TEAM2_NAME);
   await page.getByTestId("team-zone").filter({ hasText: "Team 2" }).getByTestId("edit-team").click();
   const sheet2 = page.getByRole("dialog");
-  await sheet2.getByTestId("team-name-input").fill("Fore Play");
+  await sheet2.getByTestId("team-name-input").fill(TEAM2_NAME);
   await sheet2.getByRole("button", { name: "1:00 PM" }).click();
   await expect(sheet2.getByTestId("tee-time-input")).toHaveValue("13:00");
   await expect(sheet2.getByTestId("team-name-status")).toContainText("Saved");
   await sheet2.getByTestId("team-done").click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  const team2 = page.getByTestId("team-zone").filter({ hasText: "Fore Play" });
+  const team2 = page.getByTestId("team-zone").filter({ hasText: TEAM2_NAME });
   await expect(team2).toContainText("1:00 PM");
   await expect
     .poll(async () => {
       const res = await page.request.get(`/api/t/${code}/state`);
       const body = (await res.json()) as { state: { teams: { name: string; tee_time: string | null }[] } };
-      return body.state.teams.find((t) => t.name === "Fore Play")?.tee_time ?? null;
+      return body.state.teams.find((t) => t.name === TEAM2_NAME)?.tee_time ?? null;
     })
     .toBe("13:00");
 

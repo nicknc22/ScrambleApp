@@ -24,7 +24,12 @@ function playRound(f: TripFixture, team: string, opts: { skip?: number[]; stroke
 
 function issuesOf(f: TripFixture): FinalizeIssues {
   const d = derive(f.state);
-  return { unfinished: unfinishedTeams(f.state), gaps: scoreGaps(f.state), rulings: pendingRulings(d.contests) };
+  return { unfinished: unfinishedTeams(f.state), gaps: scoreGaps(f.state), rulings: pendingRulings(d.contests, d.money.pots) };
+}
+
+function rulingsOf(f: TripFixture) {
+  const d = derive(f.state);
+  return pendingRulings(d.contests, d.money.pots);
 }
 
 function render(f: TripFixture, onFix: (x: FinalizeFix) => void = () => {}) {
@@ -88,6 +93,8 @@ describe("finalize check: missing scores", () => {
     playRound(f, "B");
     const html = render(f);
     expect(html).toContain("Every team tapped Round complete, every hole has a score and no ruling is pending.");
+    // Late syncs after finalize are accepted for 12 hours and announced (CLAUDE.md decisions).
+    expect(html).toContain("Phones still offline can sync plays from the round for 12 hours.");
     expect(html).not.toContain("You can still finalize");
     expect(finalizeIssueCount(issuesOf(f))).toBe(0);
   });
@@ -110,7 +117,7 @@ describe("finalize check: pending rulings", () => {
     const { f, weak4, weak9, short } = flaggedDrives();
     playRound(f, "A");
     playRound(f, "B");
-    const rulings = pendingRulings(derive(f.state).contests);
+    const rulings = rulingsOf(f);
     expect(rulings.map((r) => r.view.entry.id)).toEqual([weak4, weak9]);
     expect(rulings.map((r) => r.view.entry.id)).not.toContain(short);
 
@@ -134,8 +141,41 @@ describe("finalize check: pending rulings", () => {
     const susLeader = f.entry({ hole: 3, player_id: f.player.A2, type: "ctp", distance_value: 2, ai_suspicious: true, ai_estimate_ft: 14, ai_confidence: "high" });
     f.entry({ hole: 8, player_id: f.player.A1, type: "ctp", distance_value: 3 });
     f.entry({ hole: 8, player_id: f.player.B1, type: "ctp", distance_value: 9, ai_suspicious: true, ai_estimate_ft: 20, ai_confidence: "high" });
-    const ids = pendingRulings(derive(f.state).contests).map((r) => r.view.entry.id);
+    const ids = rulingsOf(f).map((r) => r.view.entry.id);
     expect(ids).toEqual([susLeader, far]);
     expect(ids).not.toContain(approved);
+  });
+
+  it("judges rulings against the pot's participants: an opted-out leader doesn't hide a money-moving flag", () => {
+    // Teams [2,2,2]; A1 opted out of hole 4's pot. A1 320 yd (valid), B1 310 yd flagged, C1 250 yd.
+    // C1 wins the pot now; approving B1 would hand it to B1, so finalize must ask.
+    const f = makeTrip({ teams: [2, 2, 2], status: "live", settings: { contest_ante_cents: 500 } });
+    f.optOut("A1", "contest:4");
+    f.entry({ hole: 4, player_id: f.player.A1, type: "ld", distance_value: 320 });
+    const flagged = f.entry({ hole: 4, player_id: f.player.B1, type: "ld", distance_value: 310, low_accuracy: true, status: "flagged", flag_reason: "GPS was weak" });
+    f.entry({ hole: 4, player_id: f.player.C1, type: "ld", distance_value: 250 });
+    for (const t of ["A", "B", "C"]) playRound(f, t);
+    const d = derive(f.state);
+    expect(d.money.pots.find((p) => p.key === "contest:4")?.winners).toEqual([f.player.C1]);
+    expect(rulingsOf(f).map((r) => r.view.entry.id)).toEqual([flagged]);
+  });
+
+  it("an AI-suspicious entry that wins the pot (because the contest leader opted out) needs a ruling", () => {
+    const f = makeTrip({ teams: [2, 2, 2], status: "live", settings: { contest_ante_cents: 500 } });
+    f.optOut("A1", "contest:3");
+    f.entry({ hole: 3, player_id: f.player.A1, type: "ctp", distance_value: 2 });
+    const sus = f.entry({ hole: 3, player_id: f.player.B1, type: "ctp", distance_value: 4, ai_suspicious: true, ai_estimate_ft: 25, ai_confidence: "high" });
+    f.entry({ hole: 3, player_id: f.player.C1, type: "ctp", distance_value: 12 });
+    for (const t of ["A", "B", "C"]) playRound(f, t);
+    expect(rulingsOf(f).map((r) => r.view.entry.id)).toEqual([sus]);
+  });
+
+  it("an opted-out player's flagged entry can't move the pot, so it isn't a pending ruling", () => {
+    const f = makeTrip({ teams: [2, 2], status: "live", settings: { contest_ante_cents: 500 } });
+    f.optOut("A1", "contest:4");
+    f.entry({ hole: 4, player_id: f.player.A1, type: "ld", distance_value: 330, low_accuracy: true, status: "flagged", flag_reason: "GPS was weak" });
+    f.entry({ hole: 4, player_id: f.player.B1, type: "ld", distance_value: 250 });
+    for (const t of ["A", "B"]) playRound(f, t);
+    expect(rulingsOf(f)).toEqual([]);
   });
 });

@@ -17,6 +17,14 @@ export function onboardingSteps(standalone: boolean): OnboardingStep[] {
   return standalone ? ["location", "notify"] : ["install", "location", "notify"];
 }
 
+const COUNT_WORDS = ["Zero", "One", "Two", "Three", "Four"];
+
+/** "You're in, Tom. Two quick things, then golf." The count always matches the steps shown. */
+export function onboardingIntro(playerName: string, stepCount: number): string {
+  const n = COUNT_WORDS[stepCount] ?? String(stepCount);
+  return `You're in, ${playerName}. ${n} quick ${stepCount === 1 ? "thing" : "things"}, then golf.`;
+}
+
 export interface OnboardingProps {
   code: string;
   playerId: string;
@@ -143,8 +151,8 @@ export function Onboarding({ code, playerId, playerName, vapidPublicKey, onDone 
 
       <div className="mx-auto w-full max-w-xl flex-1 px-gutter pt-4">
         {index === 0 && (
-          <p className="mb-2 text-base font-extrabold text-fairway-dark">
-            You&apos;re in, {playerName}. Three quick things, then golf.
+          <p className="mb-2 text-base font-extrabold text-fairway-dark" data-testid="onboarding-intro">
+            {onboardingIntro(playerName, steps.length)}
           </p>
         )}
         {body}

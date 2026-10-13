@@ -2,12 +2,20 @@
 // Photo compression and photo-path helpers.
 // compressPhoto: 1600px longest side, JPEG q0.7 via browser-image-compression; if that fails
 // (e.g. HEIC on a browser that can't decode it in the worker), redraw through a canvas so the
-// result is always a JPEG. Last resort: an original JPEG is used as-is.
+// result is always a JPEG. Last resort: a smaller, lower-quality canvas redraw. An uncompressed
+// original is never uploaded (a full-size phone JPEG can top the host's 4.5 MB request limit);
+// when nothing can shrink it, compressPhoto throws and the caller logs the action without the
+// photo (with a toast).
 import imageCompression from "browser-image-compression";
 import type { Op } from "../ops";
 
 export const PHOTO_MAX_DIMENSION = 1600;
 export const PHOTO_QUALITY = 0.7;
+/** Last-resort redraw: smaller and lower quality, still plenty for a feed photo. */
+export const PHOTO_FALLBACK_DIMENSION = 1024;
+export const PHOTO_FALLBACK_QUALITY = 0.5;
+/** Largest photo the client will queue (the server takes 4 MB; Vercel refuses bodies over 4.5 MB). */
+export const PHOTO_MAX_BYTES = 4 * 1024 * 1024;
 export const PHOTO_KINDS = ["drinks", "ld", "ctp", "posts"] as const;
 
 const PHOTO_PATH_RE = /^trips\/[A-Za-z0-9_-]+\/(drinks|ld|ctp|posts)\/[A-Za-z0-9_-]+\.jpg$/;
@@ -41,7 +49,7 @@ export interface CompressDeps {
   /** browser-image-compression (injectable for tests). */
   compressLib?: (file: File, options: Parameters<typeof imageCompression>[1]) => Promise<Blob>;
   /** Canvas redraw fallback (injectable for tests). */
-  redraw?: (file: Blob) => Promise<Blob>;
+  redraw?: (file: Blob, opts?: RedrawOptions) => Promise<Blob>;
   /** Max time for the web-worker attempt before falling back to the main thread. */
   workerTimeoutMs?: number;
 }
@@ -56,6 +64,11 @@ function asFile(blob: Blob): File {
 
 function isJpeg(blob: Blob | null | undefined): blob is Blob {
   return !!blob && blob.size > 0 && /^image\/jpe?g$/i.test(blob.type);
+}
+
+/** A JPEG small enough to upload. */
+function usable(blob: Blob | null | undefined): blob is Blob {
+  return isJpeg(blob) && blob.size <= PHOTO_MAX_BYTES;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, onTimeout?: () => void): Promise<T> {
@@ -79,7 +92,8 @@ function withTimeout<T>(p: Promise<T>, ms: number, onTimeout?: () => void): Prom
 
 /**
  * Compress a camera photo to a ≤1600px JPEG (quality 0.7). Always resolves to an image/jpeg Blob
- * or throws PhotoError when the image can't be decoded at all.
+ * of at most PHOTO_MAX_BYTES, or throws PhotoError when nothing could shrink it (never hands back
+ * the uncompressed original).
  */
 export async function compressPhoto(file: Blob, deps: CompressDeps = {}): Promise<Blob> {
   if (!file || file.size === 0) throw new PhotoError("That photo is empty");
@@ -100,27 +114,32 @@ export async function compressPhoto(file: Blob, deps: CompressDeps = {}): Promis
       deps.workerTimeoutMs ?? 20_000,
       () => ctrl?.abort(),
     );
-    if (isJpeg(out)) return out;
+    if (usable(out)) return out;
   } catch {
     /* fall through */
   }
   // 2) Main thread.
   try {
     const out = await withTimeout(lib(asFile(file), { ...options, useWebWorker: false }), 30_000);
-    if (isJpeg(out)) return out;
+    if (usable(out)) return out;
   } catch {
     /* fall through */
   }
   // 3) Canvas redraw (HEIC -> JPEG where the browser can decode it).
   try {
     const out = await redraw(file);
-    if (isJpeg(out)) return out;
+    if (usable(out)) return out;
   } catch {
     /* fall through */
   }
-  // 4) Already a JPEG: ship it uncompressed rather than lose it.
-  if (isJpeg(file)) return file;
-  throw new PhotoError("Couldn't read that photo. Try again or pick a different one.");
+  // 4) Smaller and rougher, but it uploads.
+  try {
+    const out = await redraw(file, { maxDimension: PHOTO_FALLBACK_DIMENSION, quality: PHOTO_FALLBACK_QUALITY });
+    if (usable(out)) return out;
+  } catch {
+    /* fall through */
+  }
+  throw new PhotoError("Couldn't shrink that photo. Try again or pick a different one.");
 }
 
 function fitWithin(w: number, h: number, max: number): { w: number; h: number } {
@@ -154,11 +173,17 @@ async function decode(file: Blob): Promise<{ source: CanvasImageSource; width: n
   }
 }
 
-/** Redraw any decodable image through a canvas into a ≤1600px JPEG at quality 0.7. */
-export async function redrawToJpeg(file: Blob): Promise<Blob> {
+export interface RedrawOptions {
+  maxDimension?: number;
+  quality?: number;
+}
+
+/** Redraw any decodable image through a canvas into a JPEG (default ≤1600px, quality 0.7). */
+export async function redrawToJpeg(file: Blob, opts: RedrawOptions = {}): Promise<Blob> {
+  const quality = opts.quality ?? PHOTO_QUALITY;
   const img = await decode(file);
   try {
-    const { w, h } = fitWithin(img.width, img.height, PHOTO_MAX_DIMENSION);
+    const { w, h } = fitWithin(img.width, img.height, opts.maxDimension ?? PHOTO_MAX_DIMENSION);
     if (typeof OffscreenCanvas !== "undefined") {
       try {
         const canvas = new OffscreenCanvas(w, h);
@@ -167,7 +192,7 @@ export async function redrawToJpeg(file: Blob): Promise<Blob> {
           ctx.fillStyle = "#fff";
           ctx.fillRect(0, 0, w, h);
           ctx.drawImage(img.source, 0, 0, w, h);
-          return await canvas.convertToBlob({ type: "image/jpeg", quality: PHOTO_QUALITY });
+          return await canvas.convertToBlob({ type: "image/jpeg", quality });
         }
       } catch {
         /* fall back to a DOM canvas */
@@ -183,7 +208,7 @@ export async function redrawToJpeg(file: Blob): Promise<Blob> {
     ctx.fillRect(0, 0, w, h);
     ctx.drawImage(img.source, 0, 0, w, h);
     return await new Promise<Blob>((resolve, reject) =>
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new PhotoError("Canvas export failed"))), "image/jpeg", PHOTO_QUALITY),
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new PhotoError("Canvas export failed"))), "image/jpeg", quality),
     );
   } finally {
     img.close();

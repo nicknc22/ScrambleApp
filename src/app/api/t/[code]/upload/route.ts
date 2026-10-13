@@ -1,7 +1,8 @@
 // POST /api/t/<code>/upload?path=trips/<trip_id>/<kind>/<uuid>.jpg with a raw image/jpeg body
-// (≤ 4 MB: Vercel refuses bodies over 4.5 MB before this handler runs) → {path}. Idempotent:
-// re-uploading the same path overwrites it. Each trip has a photo quota (800 photos; 80 on a
-// public demo trip).
+// (≤ 4 MB: Vercel refuses bodies over 4.5 MB before this handler runs) → {path}. Write-once:
+// re-uploading the same bytes to a stored path is a harmless retry (200), different bytes are
+// refused with 409 (nobody gets to swap out closest-to-pin evidence). Each trip has a photo quota
+// (800 photos; 80 on a public demo trip, plus one ceiling for all demos), reserved atomically.
 // Status codes matter to the client's outbox: 400/413/415 are permanent (stop retrying this
 // photo), anything else is retried with backoff.
 // A closest-to-pin photo that lands after its entry synced (photos never hold ops back) gets the
@@ -14,6 +15,7 @@ import {
   isTripPhotoPath,
   MAX_PHOTO_BYTES,
   parsePhotoPath,
+  PhotoConflictError,
   PhotoPathError,
   PhotoQuotaError,
   savePhotoUpload,
@@ -62,6 +64,11 @@ export const POST = withErrors(async (request: Request, ctx: { params: Promise<{
     if (e instanceof PhotoQuotaError) {
       // 413 = permanent for the phone's outbox: it stops retrying this photo.
       return errorJson(413, `${e.message} The commissioner has seen enough.`, { code: "photo_quota" });
+    }
+    if (e instanceof PhotoConflictError) {
+      return errorJson(409, "Nice try. A different photo is already filed under that name, and evidence is final.", {
+        code: "photo_exists",
+      });
     }
     if (e instanceof PhotoPathError) return badRequest(e.message);
     throw e;

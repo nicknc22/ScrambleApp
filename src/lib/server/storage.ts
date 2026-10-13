@@ -4,8 +4,10 @@
 //   Otherwise → files under UPLOADS_DIR, served by GET /api/photos/[...path]. Never on Vercel (no
 //   writable disk): there missing Storage config is a ConfigError, not a silently lost photo.
 // Photo URL on the client = meta.photo_base_url + path.
-// Uploads through the API (savePhotoUpload) are JPEG-only, at most 4 MB each and count against a
-// per-trip quota recorded in photo_uploads; demo seed photos go straight through putPhoto.
+// Uploads through the API (savePhotoUpload) are JPEG-only, at most 4 MB each, count against a
+// per-trip quota (demo trips also against one ceiling for all demos together) recorded in
+// photo_uploads, and are write-once: a stored path only takes the same bytes again (a retry).
+// Demo seed photos go straight through putPhoto.
 import fs from "node:fs/promises";
 import nodePath from "node:path";
 import crypto from "node:crypto";
@@ -29,6 +31,12 @@ export const PHOTO_QUOTA = {
   demo: { files: 80, bytes: 40 * 1024 * 1024 },
 } as const;
 
+/**
+ * Every demo trip together ("Try the demo" is public): far under the Supabase free tier's 1 GB,
+ * whatever the number of demos created per hour. Pruning old demos frees it up again.
+ */
+export const DEMO_PHOTO_CEILING = { files: 1000, bytes: 200 * 1024 * 1024 } as const;
+
 /** JPEG: the SOI marker FF D8 followed by another marker (FF C0..FE: APPn, DQT, SOF, COM...). */
 export function isJpeg(bytes: Uint8Array): boolean {
   return bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff && bytes[3] >= 0xc0 && bytes[3] <= 0xfe;
@@ -46,6 +54,14 @@ export class PhotoQuotaError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PhotoQuotaError";
+  }
+}
+
+/** A different photo is already stored at that path (photos are write-once evidence). */
+export class PhotoConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PhotoConflictError";
   }
 }
 
@@ -143,7 +159,10 @@ export async function readLocalPhoto(path: string): Promise<Uint8Array<ArrayBuff
 // Upload
 // ---------------------------------------------------------------------------
 
-/** Store a photo. Idempotent: re-uploading the same path overwrites it. */
+/**
+ * Store a photo (no quota, no write-once check: savePhotoUpload does those). Re-uploading the same
+ * path overwrites it.
+ */
 export async function putPhoto(tripId: string, path: string, bytes: Uint8Array, contentType = "image/jpeg"): Promise<void> {
   if (!isTripPhotoPath(path, tripId)) throw new PhotoPathError("Bad photo path");
   if (bytes.byteLength === 0) throw new PhotoPathError("Empty photo");
@@ -182,28 +201,62 @@ export function photoQuotaFor(trip: { is_demo: boolean }): { files: number; byte
   return trip.is_demo ? PHOTO_QUOTA.demo : PHOTO_QUOTA.real;
 }
 
+export function sha256Hex(bytes: Uint8Array): string {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
 /**
- * Store a photo uploaded through the API: within the trip's quota (PhotoQuotaError otherwise),
- * then recorded in photo_uploads. Re-uploading a path that is already stored (a retry) is always
- * allowed. Concurrent uploads can overshoot the cap by a photo or two; that's fine.
+ * Store a photo uploaded through the API.
+ * 1. Under an advisory lock (per trip; one lock for all demo trips, which share a ceiling), check
+ *    the quota and RESERVE the path in photo_uploads with its size and sha256, then commit. Parallel
+ *    uploads therefore can't overshoot the quota (PhotoQuotaError).
+ * 2. Write the file. If that fails, release the reservation.
+ * A path that is already stored takes only the same bytes again (an outbox retry: rewritten, no
+ * new quota); different bytes are a PhotoConflictError, so nobody can swap out evidence later.
  */
 export async function savePhotoUpload(db: Db, trip: { id: string; is_demo: boolean }, path: string, bytes: Uint8Array): Promise<void> {
   if (!isTripPhotoPath(path, trip.id)) throw new PhotoPathError("Bad photo path");
+  const sha = sha256Hex(bytes);
   const quota = photoQuotaFor(trip);
-  const [used] = await db.query<{ files: number; bytes: number; same: number }>(
-    `select count(*)::int as files, coalesce(sum(bytes), 0)::bigint as bytes, count(*) filter (where path = $2)::int as same
-       from photo_uploads where trip_id = $1`,
-    [trip.id, path],
-  );
-  if (!used?.same && (Number(used?.files ?? 0) >= quota.files || Number(used?.bytes ?? 0) + bytes.byteLength > quota.bytes)) {
-    throw new PhotoQuotaError(`This trip is out of photo space (${quota.files} photos max).`);
+  const reserved = await db.tx(async (tx) => {
+    await tx.query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))", [trip.is_demo ? "photos:demo" : `photos:${trip.id}`]);
+    const [stored] = await tx.query<{ trip_id: string; bytes: number; sha256: string | null }>(
+      "select trip_id, bytes, sha256 from photo_uploads where path = $1",
+      [path],
+    );
+    if (stored) {
+      // Rows from before 003_photo_sha256 have no hash: the same size is the best retry check.
+      const same = stored.trip_id === trip.id && (stored.sha256 === null ? Number(stored.bytes) === bytes.byteLength : stored.sha256 === sha);
+      if (!same) throw new PhotoConflictError("A different photo is already stored there.");
+      if (stored.sha256 === null) await tx.query("update photo_uploads set sha256 = $2 where path = $1", [path, sha]);
+      return false;
+    }
+    const [used] = await tx.query<{ files: number; bytes: number }>(
+      "select count(*)::int as files, coalesce(sum(bytes), 0)::bigint as bytes from photo_uploads where trip_id = $1",
+      [trip.id],
+    );
+    if (Number(used?.files ?? 0) >= quota.files || Number(used?.bytes ?? 0) + bytes.byteLength > quota.bytes) {
+      throw new PhotoQuotaError(`This trip is out of photo space (${quota.files} photos max).`);
+    }
+    if (trip.is_demo) {
+      const [all] = await tx.query<{ files: number; bytes: number }>(
+        `select count(*)::int as files, coalesce(sum(p.bytes), 0)::bigint as bytes
+           from photo_uploads p join trips t on t.id = p.trip_id where t.is_demo`,
+      );
+      if (Number(all?.files ?? 0) >= DEMO_PHOTO_CEILING.files || Number(all?.bytes ?? 0) + bytes.byteLength > DEMO_PHOTO_CEILING.bytes) {
+        throw new PhotoQuotaError("The demo is out of photo space for now.");
+      }
+    }
+    await tx.query("insert into photo_uploads (trip_id, path, bytes, sha256) values ($1, $2, $3, $4)", [trip.id, path, bytes.byteLength, sha]);
+    return true;
+  });
+  try {
+    await putPhoto(trip.id, path, bytes, "image/jpeg");
+  } catch (e) {
+    // A retry of a stored path keeps its row: the earlier upload (or a later retry) holds the file.
+    if (reserved) await db.query("delete from photo_uploads where path = $1 and sha256 = $2", [path, sha]).catch(() => {});
+    throw e;
   }
-  await putPhoto(trip.id, path, bytes, "image/jpeg");
-  await db.query(
-    `insert into photo_uploads (trip_id, path, bytes) values ($1, $2, $3)
-     on conflict (path) do update set bytes = excluded.bytes`,
-    [trip.id, path, bytes.byteLength],
-  );
 }
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;

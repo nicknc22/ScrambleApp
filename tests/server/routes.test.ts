@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createTestDb, openDb, setDbForTests, type DbConnection } from "@/lib/server/db";
 import { hashPin, resetPinThrottle } from "@/lib/server/auth";
 import { createTrip } from "@/lib/server/trips";
-import { broadcastTripChanged, realtimeMeta } from "@/lib/server/realtime";
+import { broadcastTripChanged, isJwtKey, realtimeMeta } from "@/lib/server/realtime";
 import { MAX_PHOTO_BYTES, PHOTO_QUOTA, photoBaseUrl, putPhoto, readLocalPhoto } from "@/lib/server/storage";
 import { ConfigError } from "@/lib/server/env";
 import { newId } from "@/lib/ids";
@@ -249,11 +249,9 @@ describe("/api/t/[code]/commissioner", () => {
     const lock = await commLock(jsonReq(url, "DELETE", undefined, { cookie }), p);
     expect(lock.status).toBe(200);
     expect(lock.headers.get("set-cookie")).toMatch(/Max-Age=0/);
-    // Locking clears both cookies: a borrowed phone doesn't stay a trusted device.
-    expect(lock.headers.getSetCookie()).toEqual([
-      expect.stringMatching(/^scramble_comm_[^=]+=; .*Max-Age=0/),
-      expect.stringMatching(/^scramble_dev_[^=]+=; .*Max-Age=0/),
-    ]);
+    // Locking clears the commissioner cookie only: the phone stays a trusted device (that grants
+    // nothing without the PIN) so other people's wrong guesses can't keep it waiting later.
+    expect(lock.headers.getSetCookie()).toEqual([expect.stringMatching(/^scramble_comm_[^=]+=; .*Max-Age=0/)]);
     const cleared = cookiePair(lock);
     expect(await (await commCheck(jsonReq(url, "GET", undefined, { cookie: cleared }), p)).json()).toEqual({ is_commissioner: false });
   });
@@ -375,7 +373,7 @@ describe("uploads and local photos", () => {
     );
   const getPhoto = (p: string) => photoRoute(new Request(`${BASE}/api/photos/${p}`), params({ path: p.split("/") }));
 
-  it("stores a JPEG and serves it back with immutable caching; re-upload overwrites", async () => {
+  it("stores a JPEG and serves it back with immutable caching; a re-upload of other bytes is refused", async () => {
     const t = await trip();
     const p = `trips/${t.id}/drinks/${newId()}.jpg`;
     const res = await upload(t.code, p, JPEG);
@@ -389,9 +387,11 @@ describe("uploads and local photos", () => {
     expect(got.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     expect(new Uint8Array(await got.arrayBuffer())).toEqual(JPEG);
 
+    // Photos are write-once evidence: other bytes → 409, the same bytes (a retry) → 200.
     const v2 = new Uint8Array([...JPEG.slice(0, -2), 9, 9, 0xff, 0xd9]);
-    expect((await upload(t.code, p, v2)).status).toBe(200);
-    expect(new Uint8Array(await (await getPhoto(p)).arrayBuffer())).toEqual(v2);
+    expect((await upload(t.code, p, v2)).status).toBe(409);
+    expect((await upload(t.code, p, JPEG)).status).toBe(200);
+    expect(new Uint8Array(await (await getPhoto(p)).arrayBuffer())).toEqual(JPEG);
     expect(fs.readdirSync(path.dirname(path.join(uploads, p))).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 
@@ -517,6 +517,7 @@ describe("missing production config fails loudly (Vercel)", () => {
     expect(body.code).toBe("not_configured");
     expect(body.error).toMatch(/SUPABASE_SERVICE_ROLE_KEY/);
     expect(fs.existsSync(path.join(uploads, p))).toBe(false);
+    expect(await db.query("select 1 from photo_uploads where path = $1", [p])).toEqual([]); // reservation released
     err.mockRestore();
   });
 });
@@ -529,10 +530,12 @@ describe("realtime broadcast", () => {
     expect(realtimeMeta(newId())).toBeNull();
   });
 
+  const LEGACY_SERVICE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.c2lnbmF0dXJl";
+
   it("POSTs the invalidation with the service key; swallows failures", async () => {
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://abc.supabase.co");
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon");
-    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "service");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", LEGACY_SERVICE_KEY);
     const tripId = newId();
     const fetchSpy = vi.fn(async () => new Response("{}", { status: 202 }));
     expect(await broadcastTripChanged(tripId, fetchSpy as unknown as typeof fetch)).toBe(true);
@@ -540,7 +543,7 @@ describe("realtime broadcast", () => {
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://abc.supabase.co/realtime/v1/api/broadcast");
     expect(init.method).toBe("POST");
-    expect(init.headers).toMatchObject({ apikey: "service", Authorization: "Bearer service" });
+    expect(init.headers).toMatchObject({ apikey: LEGACY_SERVICE_KEY, Authorization: `Bearer ${LEGACY_SERVICE_KEY}` });
     expect(init.signal).toBeInstanceOf(AbortSignal);
     const body = JSON.parse(String(init.body));
     expect(body.messages).toHaveLength(1);
@@ -551,5 +554,21 @@ describe("realtime broadcast", () => {
     expect(await broadcastTripChanged(tripId, (async () => { throw new Error("offline"); }) as unknown as typeof fetch)).toBe(false);
     expect(warn).toHaveBeenCalledTimes(2);
     warn.mockRestore();
+  });
+
+  it("sends a new-format sb_secret_ key only as apikey (it isn't a JWT, so never as a Bearer token)", async () => {
+    // Built at runtime so secret scanners don't mistake the test value for a real Supabase key.
+    const FAKE_SB_SECRET = ["sb", "secret", "test", "only", "not", "a", "real", "key"].join("_");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://abc.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "sb_publishable_abc123");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", FAKE_SB_SECRET);
+    const fetchSpy = vi.fn(async () => new Response("{}", { status: 202 }));
+    expect(await broadcastTripChanged(newId(), fetchSpy as unknown as typeof fetch)).toBe(true);
+    const [, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers.apikey).toBe(FAKE_SB_SECRET);
+    expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain("authorization");
+    expect(isJwtKey(LEGACY_SERVICE_KEY)).toBe(true);
+    expect(isJwtKey(FAKE_SB_SECRET)).toBe(false);
   });
 });

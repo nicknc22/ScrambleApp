@@ -36,7 +36,7 @@ export function HoleHeader({
       data-testid="hole-header"
     >
       {(!isMyTeam || canSwitch) && (
-        <div className="flex items-center gap-2 px-4 pt-3">
+        <div className="flex items-center gap-2 px-4 pt-2">
           <TeamPill team={team} size="sm" you={isMyTeam} className="max-w-[60%] border-white" />
           <span className="min-w-0 flex-1" />
           {canSwitch && (

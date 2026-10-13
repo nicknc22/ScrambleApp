@@ -130,7 +130,7 @@ function LiveRound() {
   const teams = liveTeams(view);
   const complete = teams.length - unfinished.length;
   const leader = derived?.leaderTeamIds.length ? derived.teamById[derived.leaderTeamIds[0]] : null;
-  const issues: FinalizeIssues = { unfinished, gaps: scoreGaps(view), rulings: derived ? pendingRulings(derived.contests) : [] };
+  const issues: FinalizeIssues = { unfinished, gaps: scoreGaps(view), rulings: derived ? pendingRulings(derived.contests, derived.money.pots) : [] };
   const issueCount = finalizeIssueCount(issues);
   const loose = [
     issues.gaps.length > 0 ? `${issues.gaps.length} team${issues.gaps.length === 1 ? "" : "s"} missing a score` : null,

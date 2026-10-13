@@ -2,15 +2,20 @@
 import { describe, expect, it } from "vitest";
 import type { FeedEvent, FeedEventType, Reaction } from "@/lib/types";
 import {
+  ALWAYS_BIG,
   canDeleteEvent,
   canSubmitPost,
   cardVariant,
   cleanPostText,
   deleteNeedsCommissioner,
   feedNow,
+  isRecentEvent,
   matchesFilter,
   MAX_POST_CHARS,
   photoAspect,
+  photoPlaceholder,
+  photoRetryDelay,
+  PHOTO_RETRY_DELAYS_MS,
   relativeTime,
   sortFeed,
   summarizeReactions,
@@ -58,6 +63,14 @@ describe("sortFeed", () => {
     expect(out).toEqual(["commissioner_override", "lead_change", "ghost_beer", "score_notable", "drinks"]);
   });
 
+  it("results_changed supersedes FINAL RESULTS (shown above it); removed sits with score edits", () => {
+    const fin = ev("final_results");
+    const changed = ev("results_changed");
+    const removed = ev("removed", { payload: { kind: "drink", hole: 3 } });
+    const drinks = ev("drinks", { payload: { hole: 3 } });
+    expect(sortFeed([fin, removed, changed, drinks]).map((e) => e.type)).toEqual(["results_changed", "final_results", "removed", "drinks"]);
+  });
+
   it("ties beyond type: updated_at desc, then hole desc, then later array position first", () => {
     const d1 = ev("drinks", { payload: { hole: 2 } });
     const d2 = ev("drinks", { payload: { hole: 2 }, updated_at: later(20) });
@@ -90,6 +103,22 @@ describe("filters", () => {
     expect(matchesFilter(edit, "roasts", "alert")).toBe(false);
     expect(matchesFilter(edit, "roasts", "roast")).toBe(true);
     for (const e of [photo, text, edit, ghost, roast]) expect(matchesFilter(e, "all")).toBe(true);
+  });
+
+  it("results_changed is a score event (never a roast); removed files under what was removed", () => {
+    const changed = ev("results_changed");
+    expect(matchesFilter(changed, "scores")).toBe(true);
+    expect(matchesFilter(changed, "drinks")).toBe(false);
+    expect(matchesFilter(changed, "roasts", "roast")).toBe(false);
+    const drink = ev("removed", { payload: { kind: "drink" } });
+    const mulligan = ev("removed", { payload: { kind: "mulligan" } });
+    const entry = ev("removed", { payload: { kind: "contest_entry" } });
+    expect([drink, mulligan, entry].map((e) => [matchesFilter(e, "drinks"), matchesFilter(e, "scores")])).toEqual([
+      [true, false],
+      [true, false],
+      [false, true],
+    ]);
+    expect(matchesFilter(entry, "all")).toBe(true);
   });
 });
 
@@ -196,5 +225,31 @@ describe("cardVariant", () => {
     expect(cardVariant("lead_change", "hype")).toBe("lead");
     expect(cardVariant("score_notable", "roast")).toBe("roast");
     expect(cardVariant("drinks", "hype")).toBe("hype");
+    expect(cardVariant("results_changed", "info")).toBe("results_changed");
+    expect(cardVariant("removed", "info")).toBe("removed");
+    expect(ALWAYS_BIG.has("results_changed")).toBe(true);
+  });
+});
+
+describe("photos from other phones (finding: photo backfill placeholder stuck)", () => {
+  it("retries a photo that didn't load with backoff for about 3 minutes, then waits for a snapshot or a tap", () => {
+    expect(photoRetryDelay(0)).toBeNull();
+    expect(photoRetryDelay(1)).toBe(3_000);
+    const total = PHOTO_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+    expect(total).toBeGreaterThanOrEqual(150_000);
+    expect(total).toBeLessThanOrEqual(240_000);
+    for (let i = 1; i < PHOTO_RETRY_DELAYS_MS.length; i++) expect(PHOTO_RETRY_DELAYS_MS[i]).toBeGreaterThanOrEqual(PHOTO_RETRY_DELAYS_MS[i - 1]);
+    expect(photoRetryDelay(PHOTO_RETRY_DELAYS_MS.length + 1)).toBeNull();
+  });
+
+  it("a recent event's missing photo reads 'on its way', not 'didn't load'", () => {
+    const now = Date.parse(T);
+    expect(isRecentEvent(later(-60), now)).toBe(true);
+    expect(isRecentEvent(later(-4 * 60), now)).toBe(true);
+    expect(isRecentEvent(later(-6 * 60), now)).toBe(false);
+    expect(isRecentEvent("garbage", now)).toBe(false);
+    expect(photoPlaceholder({ uploadingHere: false, recent: true })).toMatchObject({ state: "coming", text: "Photo on its way…" });
+    expect(photoPlaceholder({ uploadingHere: true, recent: false })).toMatchObject({ state: "uploading", text: "Uploading…" });
+    expect(photoPlaceholder({ uploadingHere: false, recent: false })).toMatchObject({ state: "failed", text: "Photo didn't load. Tap to retry." });
   });
 });

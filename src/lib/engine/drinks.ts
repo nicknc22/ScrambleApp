@@ -2,7 +2,7 @@
 // d = the drink's 1-based position among the team's ACTIVE drinks ordered by (logged_at, id).
 import type { Drink, TeamRoundState, TripState, UUID } from "../types";
 import type { DrinkValue } from "./types";
-import { effectiveDrinkHole } from "./windows";
+import { effectiveDrinkHole, loggedAfterRound } from "./windows";
 
 /** Spec default base team size, used only if the trip row carries something unusable. */
 const DEFAULT_BASE = 4;
@@ -36,20 +36,31 @@ export function compareDrinkOrder(a: Drink, b: Drink): number {
 }
 
 /**
- * Values for every active (non-deleted) drink of every team. teamSize: team_id -> member count.
- * DrinkValue.hole is the EFFECTIVE hole (effectiveDrinkHole): every per-hole consumer reads it.
+ * Drinks that count: active (not deleted), on an active team, and not logged after the team's
+ * Round complete (+ clock grace; see loggedAfterRound). Every drink tally reads this.
  */
-export function computeDrinkValues(state: TripState, teamSize: Record<UUID, number>): Record<UUID, DrinkValue> {
-  const base = state.trip.base_team_size;
+export function countedDrinks(state: TripState): Drink[] {
   const activeTeams = new Set<UUID>();
   for (const t of state.teams) if (t.deleted_at === null) activeTeams.add(t.id);
   const roundState = new Map<UUID, TeamRoundState>();
   for (const rs of state.team_round_state) roundState.set(rs.team_id, rs);
+  return state.drinks.filter(
+    (d) => d.deleted_at === null && activeTeams.has(d.team_id) && !loggedAfterRound(d, roundState.get(d.team_id)),
+  );
+}
 
-  // Group active drinks of active teams by team.
+/**
+ * Values for every counted drink (countedDrinks) of every team. teamSize: team_id -> member count.
+ * DrinkValue.hole is the EFFECTIVE hole (effectiveDrinkHole): every per-hole consumer reads it.
+ */
+export function computeDrinkValues(state: TripState, teamSize: Record<UUID, number>): Record<UUID, DrinkValue> {
+  const base = state.trip.base_team_size;
+  const roundState = new Map<UUID, TeamRoundState>();
+  for (const rs of state.team_round_state) roundState.set(rs.team_id, rs);
+
+  // Group counted drinks by team.
   const byTeam = new Map<UUID, Drink[]>();
-  for (const d of state.drinks) {
-    if (d.deleted_at !== null || !activeTeams.has(d.team_id)) continue;
+  for (const d of countedDrinks(state)) {
     let list = byTeam.get(d.team_id);
     if (!list) byTeam.set(d.team_id, (list = []));
     list.push(d);

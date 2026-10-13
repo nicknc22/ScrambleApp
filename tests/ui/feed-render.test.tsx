@@ -67,6 +67,24 @@ describe("FeedCard", () => {
     expect(html).toContain("repeating-linear-gradient");
   });
 
+  it("results_changed is a big alert card with its own badge; removed is a quiet transparency card", () => {
+    const changed = card(
+      ev("results_changed", {
+        team_id: null,
+        payload: { champion_before: [], champion_after: [], standings_before: [], standings_after: [], payments_before: [], payments_after: [], late_op_ids: [] },
+      }),
+    );
+    expect(changed).toContain('data-type="results_changed"');
+    expect(changed).toContain('data-big="true"');
+    expect(changed).toContain("Final results changed");
+    expect(changed).toContain("bg-flag");
+    expect(changed).toContain("repeating-linear-gradient");
+    const removed = card(ev("removed", { actor_id: f.player.A2, payload: { kind: "drink", row_id: "d", owner_id: f.player.A1, hole: 3, detail: "drink", after_sec: 90 } }));
+    expect(removed).toContain('data-type="removed"');
+    expect(removed).toContain("Removed");
+    expect(removed).not.toContain('data-big="true"');
+  });
+
   it("big events get the oversized card", () => {
     const html = card(ev("groom_mulligan", { payload: { mulligan_id: "m", hole: 5, source: "groom", used_by: f.player.A1, groom_id: f.player.A1 } }));
     expect(html).toContain('data-big="true"');

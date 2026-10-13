@@ -350,7 +350,13 @@ describe("POST /api/t/[code]/sync: scenarios", () => {
     const r3 = await syncOk(s.trip.code, [stale]);
     expect(r3.results).toEqual([{ id: stale.id, status: "rejected", code: "conflict", reason: expect.stringMatching(/Hole 1 already got a newer edit: 5/) }]);
     expect(r3.snapshot.state.hole_scores.find((h) => h.team_id === A && h.hole === 1)).toMatchObject({ strokes: 5, edit_count: 1 });
-    expect(feedOf(r3, "score_edit")).toHaveLength(1);
+    // The feed shows the dispute too: the stale 7 was overruled by phone 2's 5.
+    const after = feedOf(r3, "score_edit");
+    expect(after).toHaveLength(2);
+    expect(after.find((e) => e.payload.kind === "overruled")).toMatchObject({
+      actor_id: s.player.A1,
+      payload: { hole: 1, from: 7, to: 5, overruled_by: s.player.A2 },
+    });
   });
 
   it("a resend after a lost response gets the original rejection, not a silent 'duplicate'", async () => {

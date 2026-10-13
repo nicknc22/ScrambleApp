@@ -9,7 +9,8 @@
 // deriveId(trip_id, dedupe_key). Everything else gets deriveId(op.id, type, extra). Pure: time
 // comes from `now`, ids from ops.
 import type { ContestEntry, Drink, FeedEvent, FeedEventType, ISODate, Mulligan, TripSettings, TripState, UUID } from "../types";
-import { COMMISSIONER_ONLY_OPS, type Op, type OpType } from "../ops";
+import { COMMISSIONER_ONLY_OPS, type Op, type OpType, type ScoreSetOp } from "../ops";
+import { PLAY_OPS } from "../reducer";
 import { derive } from "../engine";
 import type { Derived, DriveNineStatus, StandingRow } from "../engine/types";
 import { effectiveDrinkHole } from "../engine/windows";
@@ -17,6 +18,7 @@ import { formatCents, formatFeetInches } from "../engine/format";
 import { deriveId } from "../ids";
 import { renderFeedEvent } from "./templates";
 import type {
+  AiJudgePayload,
   CommissionerOverridePayload,
   ContestEntryPayload,
   ContestLeadPayload,
@@ -29,6 +31,10 @@ import type {
   GroomMulliganPayload,
   LeadChangePayload,
   MulliganUsedPayload,
+  RemovedPayload,
+  ResultsChangedPayload,
+  ResultsPayment,
+  ResultsStandingRow,
   RoundCompletePayload,
   RoundStartedPayload,
   ScoreEditPayload,
@@ -74,6 +80,11 @@ export interface DeriveEventsResult {
 
 /** Plain drinks from the same team on the same hole join one post for this long after it was created. */
 export const DRINK_BATCH_WINDOW_MS = 60_000;
+/**
+ * Removing your own drink, contest entry or mulligan within this long of logging it is a quick undo
+ * (the 10-second undo toast, with room for a slow tap): no "removed" post. Anything else posts one.
+ */
+export const QUICK_UNDO_MS = 60_000;
 
 /** Ops that never post a commissioner override: not game edits, or covered by their own event. */
 const NO_OVERRIDE_OPS: ReadonlySet<OpType> = new Set<OpType>([
@@ -378,7 +389,9 @@ function eventsForStep(ctx: Ctx, step: OpStep): void {
   if (A.hole_scores !== B.hole_scores) scoreChanges(ctx, step, actor, override);
   if (A.drinks !== B.drinks) drinkChanges(ctx, step, actor);
   if (A.mulligans !== B.mulligans) mulliganChanges(ctx, step, actor);
-  if (A.contest_entries !== B.contest_entries) contestChanges(ctx, step, actor);
+  if (A.contest_entries !== B.contest_entries) contestChanges(ctx, step, actor, override);
+  // A commissioner delete already posts commissioner_override.
+  if (!override) removals(ctx, step, actor);
   // Anything that can move a hole net: strokes, drinks, the window timeline (a late-synced tee.open
   // re-homes drinks, see effectiveDrinkHole), team sizes (ghost credit), base team size.
   const netsMayMove =
@@ -852,14 +865,17 @@ function mulliganUsed(ctx: Ctx, A: TripState, op: Op, m: Mulligan, actor: UUID |
 
 // ---- Contests ----
 
-function contestChanges(ctx: Ctx, step: OpStep, actor: UUID | null): void {
+function contestChanges(ctx: Ctx, step: OpStep, actor: UUID | null, override: boolean): void {
   const { before: B, after: A, op } = step;
   const prev = byId(B.contest_entries);
   for (const e of A.contest_entries) {
     const old = prev.get(e.id);
     if (old === e) continue;
-    if (!old && isActive(e)) contestEntered(ctx, step, e, actor);
-    else if (old && isActive(old) && !isActive(e) && op.type === "contest.delete" && op.entry_id === e.id) {
+    if (!old && isActive(e)) {
+      contestEntered(ctx, step, e, actor);
+      // The commissioner's entry is a ruling, not a claim to judge.
+      if (!override) carriedVerdict(ctx, A, e);
+    } else if (old && isActive(old) && !isActive(e) && op.type === "contest.delete" && op.entry_id === e.id) {
       // Withdrawn (not replaced by a re-measure): its post goes away.
       for (const ev of ctx.fb.all()) {
         if (ev.type === "contest_entry" && isActive(ev) && ev.payload.entry_id === e.id) ctx.fb.softDelete(ev, ctx.now);
@@ -897,6 +913,95 @@ function contestEntered(ctx: Ctx, step: OpStep, e: ContestEntry, actor: UUID | n
     op_id: op.id,
     id_extra: [e.id],
   });
+}
+
+/**
+ * A re-measure on the same photo carries the AI judge's read over (reducer keptJudgement), so the
+ * judge never runs on it. If the new claim is suspicious and this photo was never announced as
+ * suspicious, that's news: post the AI JUDGE flag (push + roast follow from the ai_judge rules).
+ * Same dedupe key as the judge's own post, so the judge treats the entry as judged.
+ */
+function carriedVerdict(ctx: Ctx, A: TripState, e: ContestEntry): void {
+  if (e.type !== "ctp" || e.ai_suspicious !== true || e.ai_estimate_ft === null || e.ai_confidence === null || !e.photo_path) return;
+  if (photoVerdictPosted(ctx.fb.all(), A.contest_entries, e.photo_path, true)) return;
+  const payload: AiJudgePayload = {
+    entry_id: e.id,
+    hole: e.hole,
+    claimed_ft: e.distance_value,
+    estimate_ft: e.ai_estimate_ft,
+    confidence: e.ai_confidence,
+    suspicious: true,
+    roast: null,
+    carried: true,
+  };
+  emit(ctx, { type: "ai_judge", team_id: e.team_id, player_id: e.player_id, payload, dedupe_key: `judge:${e.id}` });
+}
+
+/**
+ * Some ai_judge post already announced this verdict (suspicious or not) for an entry with this
+ * photo (any entry, deleted ones included; any post, deleted ones included). One photo, one story:
+ * re-measures and undo restores never re-announce it. Used by the AI judge too (server/judge.ts).
+ */
+export function photoVerdictPosted(
+  feed: readonly FeedEvent[],
+  entries: readonly ContestEntry[],
+  photoPath: string,
+  suspicious: boolean,
+): boolean {
+  const samePhoto = new Set(entries.filter((x) => x.photo_path === photoPath).map((x) => x.id));
+  return feed.some(
+    (ev) => ev.type === "ai_judge" && samePhoto.has(String(ev.payload?.entry_id)) && (ev.payload?.suspicious === true) === suspicious,
+  );
+}
+
+// ---- Removals (transparency) ----
+
+/**
+ * A drink, contest entry or mulligan removed by somebody other than whoever logged it, or long
+ * after the quick undo (QUICK_UNDO_MS), posts "removed" naming who removed what. (The original
+ * posts still go away: drinkDeleted, contestChanges, mulliganChanges.)
+ */
+function removals(ctx: Ctx, step: OpStep, actor: UUID | null): void {
+  const { before: B, after: A, op } = step;
+  const elapsed = (from: ISODate, to: number) => Math.max(0, to - timeOf(from));
+  const post = (row: { id: UUID; team_id: UUID }, owner: UUID | null, loggedBy: UUID | null, ms: number, p: Omit<RemovedPayload, "row_id" | "owner_id" | "after_sec">) => {
+    if (op.by === loggedBy && ms <= QUICK_UNDO_MS) return;
+    const payload: RemovedPayload = { ...p, row_id: row.id, owner_id: owner, after_sec: Math.round(ms / 1000) };
+    emit(ctx, {
+      type: "removed",
+      team_id: row.team_id,
+      player_id: owner,
+      actor_id: actor,
+      payload,
+      op_id: op.id,
+      id_extra: [row.id],
+    });
+  };
+  const opAt = timeOf(op.at);
+  if (op.type === "drink.delete") {
+    const was = B.drinks.find((x) => x.id === op.drink_id);
+    const now = A.drinks.find((x) => x.id === op.drink_id);
+    if (!was || !now || !isActive(was) || isActive(now)) return;
+    post(was, was.player_id, was.logged_by, elapsed(was.logged_at, opAt), { kind: "drink", hole: drinkHoleIn(B, was), detail: was.type });
+  } else if (op.type === "contest.delete") {
+    const was = B.contest_entries.find((x) => x.id === op.entry_id);
+    const now = A.contest_entries.find((x) => x.id === op.entry_id);
+    if (!was || !now || !isActive(was) || isActive(now)) return;
+    // Entries carry server times only: compare with this batch's server time.
+    const view = ctx.d(B).contests.find((c) => c.hole === was.hole)?.entries.find((v) => v.entry.id === was.id);
+    post(was, was.player_id, was.player_id, elapsed(was.created_at, ctx.nowMs), {
+      kind: "contest_entry",
+      hole: was.hole,
+      detail: was.type,
+      distance: view?.distance ?? was.distance_value,
+      unit: was.unit,
+    });
+  } else if (op.type === "mulligan.undo") {
+    const was = B.mulligans.find((x) => x.id === op.mulligan_id);
+    const now = A.mulligans.find((x) => x.id === op.mulligan_id);
+    if (!was || !now || !isActive(was) || isActive(now)) return;
+    post(was, was.used_by, was.used_by, elapsed(was.used_at, opAt), { kind: "mulligan", hole: was.used_on_hole, detail: was.source });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,6 +1357,53 @@ function driveMinimum(ctx: Ctx, first: TripState, last: TripState, actorByTeam: 
   }
 }
 
+function resultsView(d: Derived): { champions: UUID[]; standings: ResultsStandingRow[]; payments: ResultsPayment[] } {
+  return {
+    champions: sortIds(d.leaderTeamIds),
+    standings: d.standings.map((r) => ({ team_id: r.team_id, pos_label: r.pos_label, net: r.net, net_to_par: r.net_to_par })),
+    payments: d.money.payments.map((p) => ({ from_player_id: p.from_player_id, to_player_id: p.to_player_id, amount_cents: p.amount_cents })),
+  };
+}
+
+/**
+ * A batch applied to a FINAL trip (plays from the course synced after the finalize, or a
+ * commissioner fix) changed the champion(s), a team's position or net, or a settle-up payment:
+ * one loud results_changed post (pushed to everyone; people may already have paid). The FINAL
+ * RESULTS post stays as history.
+ */
+function resultsChanged(ctx: Ctx, steps: OpStep[], first: TripState, last: TripState): void {
+  const dFirst = ctx.d(first);
+  const dLast = ctx.d(last);
+  const before = resultsView(dFirst);
+  const after = resultsView(dLast);
+  const standingKey = (d: Derived) => d.standings.map((r) => `${r.team_id}:${r.pos}:${r.net}`).sort().join("|");
+  const paymentKey = (ps: ResultsPayment[]) => ps.map((p) => `${p.from_player_id}>${p.to_player_id}:${p.amount_cents}`).sort().join("|");
+  const changed =
+    !sameIds(before.champions, after.champions) ||
+    standingKey(dFirst) !== standingKey(dLast) ||
+    paymentKey(before.payments) !== paymentKey(after.payments);
+  if (!changed) return;
+  const lastStep = steps[steps.length - 1];
+  const payload: ResultsChangedPayload = {
+    champion_before: before.champions,
+    champion_after: after.champions,
+    standings_before: before.standings,
+    standings_after: after.standings,
+    payments_before: before.payments,
+    payments_after: after.payments,
+    late_op_ids: steps
+      .filter((st) => st.after !== st.before && PLAY_OPS.has(st.op.type) && !st.op.as_commissioner)
+      .map((st) => st.op.id),
+  };
+  emit(ctx, {
+    type: "results_changed",
+    team_id: after.champions.length === 1 ? after.champions[0] : null,
+    actor_id: actorOf(last, lastStep.op.by),
+    payload,
+    op_id: lastStep.op.id,
+  });
+}
+
 /** Team and contest hole an op touched (for attributing batch-level events). */
 function opTargets(op: Op, B: TripState): { team: UUID | null; contestHole: number | null } {
   const entryOf = (id: UUID) => B.contest_entries.find((e) => e.id === id);
@@ -1320,6 +1472,9 @@ export function pushTriggerFor(ev: FeedEvent, state: TripState, d: Derived): Pus
     case "final_results":
       collapse = "final";
       break;
+    case "results_changed":
+      collapse = "results_changed";
+      break;
     case "ai_judge":
       if (p.suspicious !== true) return null;
       collapse = `judge:${typeof p.entry_id === "string" ? p.entry_id : ev.id}`;
@@ -1342,6 +1497,49 @@ export function pushTriggerFor(ev: FeedEvent, state: TripState, d: Derived): Pus
     console.error("[feed] push copy failed", err);
   }
   return { feed_event_id: ev.id, title, body, audience, collapse_key: collapse };
+}
+
+// ---------------------------------------------------------------------------
+// Overruled scores (rejected ops: called by the server apply pipeline, not by deriveFeedEvents)
+// ---------------------------------------------------------------------------
+
+/**
+ * A score.set rejected as stale because a NEWER, DIFFERENT value is stored (last write wins by
+ * client time): nothing changed on the scorecard, but the spec wants the dispute on the feed in
+ * either sync order. A score_edit post with payload.kind "overruled" (from = the losing value,
+ * to = the stored one), keyed by op id so it posts once. null when there is no such dispute.
+ */
+export function overruledScoreEvent(state: TripState, op: ScoreSetOp, now: ISODate): FeedEvent | null {
+  const row = state.hole_scores.find((r) => r.team_id === op.team_id && r.hole === op.hole);
+  if (!row || row.strokes === null || row.strokes === op.strokes || row.strokes_at === null) return null;
+  if (!(timeOf(row.strokes_at) > timeOf(op.at))) return null;
+  if (!state.teams.some((t) => t.id === op.team_id && isActive(t))) return null;
+  const key = `overruled:${op.id}`;
+  if (state.feed_events.some((e) => e.dedupe_key === key)) return null;
+  const payload: ScoreEditPayload = {
+    hole: op.hole,
+    from: op.strokes,
+    to: row.strokes,
+    par: parOf(state, op.hole),
+    edit_count: row.edit_count,
+    kind: "overruled",
+    overruled_by: actorOf(state, row.updated_by),
+  };
+  return {
+    id: deriveId(state.trip.id, key),
+    trip_id: state.trip.id,
+    type: "score_edit",
+    team_id: op.team_id,
+    player_id: null,
+    actor_id: actorOf(state, op.by),
+    payload: { ...payload } as Record<string, unknown>,
+    photo_path: null,
+    text: null,
+    dedupe_key: key,
+    created_at: now,
+    updated_at: now,
+    deleted_at: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,12 +1593,18 @@ export function deriveFeedEvents(args: {
 
   const first = steps[0].before;
   const last = steps[steps.length - 1].after;
+  // The round was already over and still is (a late sync, a commissioner fix): no "takes the lead"
+  // posts and no roasts; a change to the results gets one loud results_changed post instead.
+  const afterFinal = first.trip.status === "final" && last.trip.status === "final";
   if (last !== first) {
     const lastOp = steps[steps.length - 1].op;
     safely("ghost beers", () => ghostBeers(ctx, first, last, actorByTeam));
-    safely("lead change", () => leadChange(ctx, last, lastOp));
-    safely("contest leads", () => contestLeads(ctx, last, lastOp, actorByContestHole));
+    if (!afterFinal) {
+      safely("lead change", () => leadChange(ctx, last, lastOp));
+      safely("contest leads", () => contestLeads(ctx, last, lastOp, actorByContestHole));
+    }
     safely("drive minimum", () => driveMinimum(ctx, first, last, actorByTeam));
+    if (afterFinal) safely("results changed", () => resultsChanged(ctx, steps, first, last));
   }
 
   const roast_triggers: RoastTrigger[] = [];
@@ -1408,7 +1612,7 @@ export function deriveFeedEvents(args: {
   safely("triggers", () => {
     const d = ctx.d(last);
     for (const ev of [...ctx.fb.createdRows(), ...ctx.fb.foreign]) {
-      const r = roastTriggerFor(ev);
+      const r = afterFinal ? null : roastTriggerFor(ev);
       if (r) roast_triggers.push(r);
       const p = pushTriggerFor(ev, last, d);
       if (p) push_triggers.push(p);

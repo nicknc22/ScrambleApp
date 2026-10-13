@@ -5,7 +5,8 @@
 // decisions ONLY. Never partners/fiancées, families, jobs or appearance (tests scan every variant).
 import type { FeedEvent, FeedEventType, Player, TripState, UUID } from "../types";
 import type { Derived } from "../engine/types";
-import { formatFeetInches, formatToPar, ordinal } from "../engine/format";
+import { formatCents, formatFeetInches, formatToPar, ordinal } from "../engine/format";
+import { loggedAfterRound } from "../engine/windows";
 
 export type FeedTone = "hype" | "roast" | "info" | "alert" | "fanfare";
 
@@ -106,6 +107,12 @@ function loggedForOthers(state: TripState, drinkers: UUID[], loggers: (UUID | nu
   return [...forWhom]
     .map(([by, whom]) => ` Logged by ${playerName(state, by)} for ${list(whom.map((id) => playerName(state, id)))}.`)
     .join("");
+}
+
+/** The drink row was logged after its team's Round complete (+ grace): it doesn't count. */
+function afterRound(state: TripState, drink: { team_id: UUID; logged_at: string; moved_from_hole: number | null } | undefined): boolean {
+  if (!drink) return false;
+  return loggedAfterRound(drink, state.team_round_state.find((rs) => rs.team_id === drink.team_id));
 }
 
 /** Where a drink's credit lands NOW (effective hole, or where the commissioner moved it); else the payload's hole. */
@@ -263,6 +270,30 @@ const SCORE_EDIT: V<EditC> = [
   (c) => `${c.who} ${c.phrase}${c.forTeam}. The audit committee has been notified.`,
 ];
 
+interface OverruledC { loser: string; winner: string; h: number; from: number; to: number; team: string }
+const SCORE_OVERRULED: V<OverruledC> = [
+  (c) => `${c.loser}'s ${c.from} on hole ${c.h} lost to ${c.winner}'s later ${c.to}. Last write wins, ${c.team}.`,
+  (c) => `Scorecard dispute on hole ${c.h}: ${c.loser} says ${c.from}, ${c.winner} said ${c.to} later. The ${c.to} stands. Settle it at the bar.`,
+  (c) => `${c.loser} tried to make hole ${c.h} a ${c.from}. ${c.winner} already had it at ${c.to}, and later wins. Overruled.`,
+  (c) => `Hole ${c.h} for ${c.team}: ${c.loser}'s ${c.from} got overruled by ${c.winner}'s newer ${c.to}. Somebody can't count.`,
+];
+
+interface RemovedC { who: string; what: string }
+const REMOVED: V<RemovedC> = [
+  (c) => `${c.who} removed ${c.what}. Noted, for the record.`,
+  (c) => `${c.who} quietly deleted ${c.what}. Not quietly enough.`,
+  (c) => `Paper trail: ${c.who} took back ${c.what}.`,
+  (c) => `${c.who} made ${c.what} disappear. The feed sees everything.`,
+];
+
+interface ResultsC { what: string }
+const RESULTS_CHANGED: V<ResultsC> = [
+  (c) => `Stop the Venmos. ${c.what}`,
+  (c) => `Hold the trophy. ${c.what}`,
+  (c) => `Plot twist after the final whistle. ${c.what}`,
+  (c) => `The scorecard wasn't as locked as we said. ${c.what}`,
+];
+
 interface DriveC { team: string; names: string; nine: string; rem: number; holes: string; need: string; short: number }
 const DRIVE_HARD: V<DriveC> = [
   (c) => `${c.team}: ${c.names} ${c.need} a drive on the ${c.nine} with ${c.rem} ${c.holes} left. Every remaining tee shot is spoken for.`,
@@ -374,6 +405,9 @@ export const TEMPLATE_VARIANT_COUNTS: Readonly<Record<string, number>> = {
   "score_notable:net_zero": NET_ZERO.length,
   "score_notable:last_at_turn": LAST_AT_TURN.length,
   score_edit: SCORE_EDIT.length,
+  "score_edit:overruled": SCORE_OVERRULED.length,
+  removed: REMOVED.length,
+  results_changed: RESULTS_CHANGED.length,
   "drive_warning:hard": DRIVE_HARD.length,
   "drive_warning:impossible": DRIVE_IMPOSSIBLE.length,
   drive_miss: DRIVE_MISS.length,
@@ -392,7 +426,13 @@ export const TEMPLATE_VARIANT_COUNTS: Readonly<Record<string, number>> = {
 // Rendering
 // ---------------------------------------------------------------------------
 
-const BIG_TYPES: ReadonlySet<FeedEventType> = new Set<FeedEventType>(["groom_mulligan", "ghost_beer", "final_results", "lead_change"]);
+const BIG_TYPES: ReadonlySet<FeedEventType> = new Set<FeedEventType>([
+  "groom_mulligan",
+  "ghost_beer",
+  "final_results",
+  "results_changed",
+  "lead_change",
+]);
 
 type Body = Omit<RenderedEvent, "big">;
 
@@ -441,6 +481,17 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
       const actorKnown = !!findPlayer(state, ev.actor_id);
       const from = num(p.from);
       const to = num(p.to);
+      if (p.kind === "overruled") {
+        const c: OverruledC = {
+          loser: actorKnown ? playerName(state, ev.actor_id) : "An older entry",
+          winner: playerName(state, str(p.overruled_by), "somebody"),
+          h: hole,
+          from,
+          to,
+          team,
+        };
+        return { emoji: "⚔️", title: "Scorecard dispute", body: pick(seed, "overruled", SCORE_OVERRULED)(c), tone: "alert" };
+      }
       const c: EditC = {
         who: actorKnown ? playerName(state, ev.actor_id) : team,
         phrase: `changed hole ${hole} from a ${from} to a ${to}`,
@@ -468,11 +519,19 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
       const holes = [...new Set(active.map((r) => drinkHole(d, r.id, r.hole)))].sort((a, b) => a - b);
       const where = holes.length > 1 ? `holes ${list(holes.map(String))}` : `hole ${holes[0] ?? hole}`;
       const phrase = `${count} ${plural(count, "drink", "drinks")} on ${where}`;
+      const late = active.filter((r) => afterRound(state, r)).length;
+      const lateNote =
+        late === 0
+          ? ""
+          : late === count
+            ? ` Logged after Round complete, so ${plural(count, "it doesn't", "they don't")} count.`
+            : ` ${late} of them came after Round complete and don't count.`;
       const body =
         count === 0
           ? `${phrase}. Somebody hit undo. Cowards.`
           : pick(seed, "drinks", DRINKS)({ team, phrase, names: playerIds.length ? names : team }) +
-            loggedForOthers(state, playerIds, loggerIds);
+            loggedForOthers(state, playerIds, loggerIds) +
+            lateNote;
       return { emoji: "🍺", title: `Drinks · ${team}`, body, tone: "hype" };
     }
 
@@ -485,9 +544,11 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
         team,
         lb: loggedBy(state, playerId, p.logged_by),
       };
+      const row = state.drinks.find((x) => x.id === str(p.drink_id));
+      const lateNote = afterRound(state, row) ? " Logged after Round complete: no stroke, no mulligan." : "";
       return ev.type === "shotgun"
-        ? { emoji: "💥", title: "SHOTGUN", body: pick(seed, "shotgun", SHOTGUN)(c), tone: "hype" }
-        : { emoji: "🥃", title: "SHOT", body: pick(seed, "shot", SHOT)(c), tone: "hype" };
+        ? { emoji: "💥", title: "SHOTGUN", body: pick(seed, "shotgun", SHOTGUN)(c) + lateNote, tone: "hype" }
+        : { emoji: "🥃", title: "SHOT", body: pick(seed, "shot", SHOT)(c) + lateNote, tone: "hype" };
     }
 
     case "ghost_beer": {
@@ -649,9 +710,76 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
       return { emoji: "🏆", title: "FINAL RESULTS", body: pick(seed, "final", FINAL)(c), tone: "fanfare" };
     }
 
+    case "results_changed":
+      return renderResultsChanged(ev, p, state);
+
+    case "removed": {
+      const ownerId = str(p.owner_id) ?? ev.player_id;
+      const own = !!ownerId && ownerId === ev.actor_id;
+      const whose = own ? "their own" : `${playerName(state, ownerId, team)}'s`;
+      const detail = str(p.detail);
+      let what: string;
+      if (p.kind === "contest_entry") {
+        const dist = optNum(p.distance);
+        const unit = p.unit ?? (detail === "ld" ? "yd" : "ft");
+        what = `${whose} ${contestName(detail)} entry on hole ${hole}${dist !== null ? ` (${fmtDistance(dist, unit)})` : ""}`;
+      } else if (p.kind === "mulligan") {
+        what = `${team}'s ${detail === "groom" ? "Groom's Mulligan" : "mulligan"} on hole ${hole}`;
+      } else {
+        const kind = detail === "shotgun" || detail === "shot" ? detail : "drink";
+        what = `${whose} ${kind} on hole ${hole}`;
+      }
+      const c: RemovedC = { who: playerName(state, ev.actor_id, "Somebody"), what };
+      return { emoji: "🗑️", title: "Removed", body: pick(seed, "removed", REMOVED)(c), tone: "alert" };
+    }
+
     default:
       return { emoji: "•", title: String(ev.type), body: ev.text ?? "", tone: "info" };
   }
+}
+
+/** results_changed: who wins now (and before), what moved, and what the commissioner can do. */
+function renderResultsChanged(ev: FeedEvent, p: Record<string, unknown>, state: TripState): Body {
+  const before = ids(p.champion_before);
+  const after = ids(p.champion_after);
+  const teams = (xs: UUID[]) => list(xs.map((id) => teamName(state, id)));
+  const rows = (v: unknown) => (Array.isArray(v) ? (v as Record<string, unknown>[]).filter((r) => r && typeof r === "object") : []);
+  const top = rows(p.standings_after).find((r) => r.team_id === after[0]);
+  const sameChamps = before.length === after.length && before.every((id) => after.includes(id));
+  const parts: string[] = [];
+  if (after.length === 0) parts.push("Nobody's on top anymore.");
+  else if (sameChamps) parts.push(`${teams(after)} still ${after.length > 1 ? "share the title" : "wins"}, but the standings moved.`);
+  else {
+    const ntp = top ? ` at ${formatToPar(num(top.net_to_par))}` : "";
+    parts.push(`${teams(after)} now ${after.length > 1 ? "share the title" : "wins"}${ntp}${before.length ? ` (was ${teams(before)})` : ""}.`);
+  }
+  const pays = (v: unknown) =>
+    rows(v)
+      .map((x) => `${String(x.from_player_id)}>${String(x.to_player_id)}:${num(x.amount_cents)}`)
+      .sort()
+      .join("|");
+  const afterPays = rows(p.payments_after);
+  if (pays(p.payments_before) !== pays(p.payments_after)) {
+    const total = afterPays.reduce((sum, x) => sum + num(x.amount_cents), 0);
+    parts.push(
+      afterPays.length === 0
+        ? "Settle-up changed: nobody owes anybody now. Refunds, gentlemen."
+        : `Settle-up changed (${afterPays.length} ${plural(afterPays.length, "payment", "payments")}, ${formatCents(total)}): check the Money tab before you Venmo.`,
+    );
+  }
+  const late = ids(p.late_op_ids).length;
+  parts.push(
+    late > 0
+      ? `${late} ${plural(late, "play", "plays")} from the course synced after the final whistle.`
+      : "A commissioner fix after the final whistle.",
+  );
+  parts.push("Commissioner: Reopen the round to review.");
+  return {
+    emoji: "🚨",
+    title: "RESULTS CHANGED",
+    body: pick(ev.id, "results", RESULTS_CHANGED)({ what: parts.join(" ") }),
+    tone: "alert",
+  };
 }
 
 function renderNotable(ev: FeedEvent, p: Record<string, unknown>, team: string, hole: number): Body {

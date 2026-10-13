@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentHoleFor, effectiveDrinkHole, openWindowHole } from "@/lib/engine/windows";
+import { CLOCK_GRACE_MS, currentHoleFor, effectiveDrinkHole, loggedAfterRound, openWindowHole } from "@/lib/engine/windows";
 import type { TeamRoundState } from "@/lib/types";
 
 function rs(p: Partial<TeamRoundState>): TeamRoundState {
@@ -79,8 +79,23 @@ describe("effectiveDrinkHole", () => {
     expect(effectiveDrinkHole(drinkAt(5, 80), opened)).toBe(5);
   });
 
-  it("a drink logged exactly when the next window opened belongs to the new hole", () => {
-    expect(effectiveDrinkHole(drinkAt(4, 75), opened)).toBe(5);
+  it("phone clocks disagree: a drink within 2 minutes of the next hole opening (on another phone) stays on its stamped hole", () => {
+    expect(CLOCK_GRACE_MS).toBe(2 * 60_000);
+    expect(effectiveDrinkHole(drinkAt(4, 75), opened)).toBe(4);
+    expect(effectiveDrinkHole(drinkAt(4, 77), opened)).toBe(4); // exactly the grace: still hole 4
+    expect(effectiveDrinkHole(drinkAt(4, 77.1), opened)).toBe(5);
+  });
+
+  it("offline review repro: Mike's phone runs fast, Dave tees off the next hole: the drink stays where it was tapped", () => {
+    // Hole 4 opened at minute 36. Mike taps a drink at real minute 46 (hole 4 open on his screen);
+    // Dave tees off hole 5 at real minute 48.
+    const rs4 = rs({ status: "playing", open_hole: 5, hole_opened_at: { "4": t(36), "5": t(48) } });
+    for (const fastBy of [0, 1, 2, 3.5]) expect(effectiveDrinkHole(drinkAt(4, 46 + fastBy), rs4), `${fastBy} min fast`).toBe(4);
+    // Dave's phone 2 minutes slow (stamps 46 for the tee shot): still hole 4.
+    const slowDave = rs({ status: "playing", open_hole: 5, hole_opened_at: { "4": t(36), "5": t(46) } });
+    expect(effectiveDrinkHole(drinkAt(4, 46), slowDave)).toBe(4);
+    // A stale phone that really drank on hole 5 (well after it opened) still moves.
+    expect(effectiveDrinkHole(drinkAt(4, 55), rs4)).toBe(5);
   });
 
   it("never moves a drink earlier than its stamp (a missing or late tee.open can't drag it back)", () => {
@@ -105,9 +120,31 @@ describe("effectiveDrinkHole", () => {
     expect(effectiveDrinkHole(drinkAt(4, 95), rs({ hole_opened_at: { "5": "garbage", x: t(0), "40": t(0) } }))).toBe(4);
   });
 
-  it("with skewed phone clocks, takes the highest hole opened by the drink's time", () => {
+  it("with skewed phone clocks, takes the highest hole opened more than the grace before the drink's time", () => {
     // Hole 3 was opened by a phone whose clock runs slow: its time is before hole 2's.
     const skewed = rs({ status: "playing", open_hole: 3, hole_opened_at: { "1": t(0), "2": t(20), "3": t(18) } });
-    expect(effectiveDrinkHole(drinkAt(1, 19), skewed)).toBe(3);
+    expect(effectiveDrinkHole(drinkAt(1, 19), skewed)).toBe(1);
+    expect(effectiveDrinkHole(drinkAt(1, 21), skewed)).toBe(3);
+  });
+});
+
+describe("loggedAfterRound", () => {
+  const t = (min: number) => new Date(Date.parse("2026-10-24T21:00:00.000Z") + min * 60_000).toISOString();
+  const done = rs({ status: "complete", open_hole: 18, completed_at: t(0) });
+  const drinkAt = (min: number, moved_from_hole: number | null = null) => ({ logged_at: t(min), moved_from_hole });
+
+  it("is true only for a drink logged more than the clock grace after the team's Round complete", () => {
+    expect(loggedAfterRound(drinkAt(-5), done)).toBe(false);
+    expect(loggedAfterRound(drinkAt(1), done)).toBe(false);
+    expect(loggedAfterRound(drinkAt(2), done)).toBe(false);
+    expect(loggedAfterRound(drinkAt(2.1), done)).toBe(true);
+    expect(loggedAfterRound(drinkAt(15), done)).toBe(true);
+  });
+
+  it("a commissioner-pinned drink counts; no completion or unreadable times never exclude", () => {
+    expect(loggedAfterRound(drinkAt(15, 18), done)).toBe(false);
+    expect(loggedAfterRound(drinkAt(15), rs({ status: "playing", open_hole: 18 }))).toBe(false);
+    expect(loggedAfterRound(drinkAt(15), undefined)).toBe(false);
+    expect(loggedAfterRound({ logged_at: "garbage", moved_from_hole: null }, done)).toBe(false);
   });
 });

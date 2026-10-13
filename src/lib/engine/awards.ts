@@ -226,12 +226,14 @@ export function computeAwards(state: TripState, d: D): Award[] {
     awards.push(award);
   }
 
-  // Edit Bandit: the player behind the most score edits (active score_edit feed events).
+  // Edit Bandit: the player behind the most score edits (active score_edit feed events; an
+  // "overruled" post records an edit that lost last-write-wins, which changed nothing).
   {
     const award = base("edit_bandit");
     const counts = new Map<UUID, number>();
     for (const e of state.feed_events) {
       if (e.type !== "score_edit" || e.deleted_at !== null || !e.actor_id || !d.playerById[e.actor_id]) continue;
+      if (e.payload?.kind === "overruled") continue;
       counts.set(e.actor_id, (counts.get(e.actor_id) ?? 0) + 1);
     }
     const top = maxBy([...counts.entries()], ([, n]) => n);
@@ -244,14 +246,19 @@ export function computeAwards(state: TripState, d: D): Award[] {
     awards.push(award);
   }
 
-  // Most Suspicious: most active contest entries the AI judge flagged.
+  // Most Suspicious: most AI judge flags. A flag raised once still counts after the entry was
+  // re-measured, retaken or withdrawn (deleted entries included), and one photo is one flag however
+  // many re-measures carried it over.
   {
     const award = base("most_suspicious");
-    const counts = new Map<UUID, number>();
+    const flagged = new Map<UUID, Set<string>>(); // player -> flagged photos (entry id when no photo)
     for (const e of state.contest_entries) {
-      if (e.deleted_at !== null || e.ai_suspicious !== true || !d.playerById[e.player_id]) continue;
-      counts.set(e.player_id, (counts.get(e.player_id) ?? 0) + 1);
+      if (e.ai_suspicious !== true || !d.playerById[e.player_id]) continue;
+      const photos = flagged.get(e.player_id) ?? new Set<string>();
+      photos.add(e.photo_path ?? e.id);
+      flagged.set(e.player_id, photos);
     }
+    const counts = new Map<UUID, number>([...flagged].map(([id, photos]) => [id, photos.size]));
     const top = maxBy([...counts.entries()], ([, n]) => n);
     if (top.length > 0) {
       award.awarded = true;

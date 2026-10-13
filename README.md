@@ -41,7 +41,7 @@ Budget about 30 minutes. Both free tiers are plenty.
 
 1. Create a project at [supabase.com](https://supabase.com). Pick the region closest to you (for example US East) and save the database password.
 2. **Database URL:** click **Connect** and copy the **Transaction pooler** connection string (host `*.pooler.supabase.com`, port **6543**). Put your password in it. If the password has special characters, URL-encode them (or pick a password without any). This is `DATABASE_URL`. Don't use the direct connection (port 5432): serverless functions need the pooler.
-3. **Keys:** in **Project Settings → API Keys**, copy the project URL, the `anon` key and the `service_role` key. Use the legacy JWT keys (they start with `eyJ`). These are `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY`.
+3. **Keys:** in **Project Settings → API Keys**, copy the project URL, a public key and a secret key. Either format works: the new **publishable** (`sb_publishable_...`) and **secret** (`sb_secret_...`) keys, or the legacy `anon` and `service_role` JWT keys (they start with `eyJ`; Supabase is retiring them). These are `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (publishable / anon) and `SUPABASE_SERVICE_ROLE_KEY` (secret / service_role). Take both keys from the same project.
 4. That's it for Supabase. You don't run any SQL: the tables are created automatically on the first request. The public `photos` storage bucket is created automatically on the first upload. Realtime needs no table setup because the app uses broadcast messages, not database change feeds. (Row-level security is on with no public policies: browsers never touch the database directly.)
 
 ### 2. Secrets you generate on your laptop
@@ -52,7 +52,7 @@ npm run vapid-keys              # Web Push keys -> VAPID_PUBLIC_KEY / VAPID_PRIV
 openssl rand -base64 32         # optional APP_SECRET (signs the commissioner cookie)
 ```
 
-`hash-pin` prints one line like `scrypt:<salt>:<hash>`. Paste it as is (it has no `$`, so nothing needs escaping). Pick at least 6 digits: wrong PINs are throttled (8 per phone per 10 minutes, 100 per trip per day), but anyone with the link can keep guessing for days, and a 4-digit PIN only has 10,000 options. Whatever you pick, the unlock pad takes up to 12 digits.
+`hash-pin` prints one line like `scrypt:<salt>:<hash>`. Paste it as is (it has no `$`, so nothing needs escaping). Pick at least 6 digits: wrong PINs are throttled (8 per phone per 10 minutes and 30 a day; everyone together gets 30 per 10 minutes, then one try every 10 minutes after 100 in a day), but someone rotating phones can keep guessing for days, and a 4-digit PIN only has 10,000 options. The same PIN is the starting PIN of every trip you create, and trip creation (which needs no link) is throttled the same way. Whatever you pick, the unlock pad takes up to 12 digits.
 
 For AI roasts, team names and the closest-to-pin judge, create an API key at [console.anthropic.com](https://console.anthropic.com) (`ANTHROPIC_API_KEY`). Expect a few dollars for the round: the judge is capped at 60 photo checks per trip (3 per player per hole) and never looks at the same photo twice, and roasts have their own cap in Settings. Everything works without it.
 
@@ -67,8 +67,8 @@ For AI roasts, team names and the closest-to-pin judge, create an API key at [co
 | --- | --- | --- |
 | `DATABASE_URL` | yes | Supabase transaction pooler URL (port 6543). Unset = local PGlite, which only works on a laptop: on Vercel every request fails with "Server misconfigured: DATABASE_URL is not set". |
 | `NEXT_PUBLIC_SUPABASE_URL` | yes | `https://<project>.supabase.co` |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | Supabase anon key. Phones use it only to listen for "something changed" broadcasts. |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server only: photo uploads and Realtime broadcasts. Without it, photo uploads on Vercel fail with "Server misconfigured: photo storage needs ..." (scores and drinks still sync), and phones poll every few seconds instead of getting live pushes. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | Supabase publishable key (`sb_publishable_...`) or legacy anon key. Phones use it only to listen for "something changed" broadcasts. |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Supabase secret key (`sb_secret_...`) or legacy service_role key. Server only: photo uploads and Realtime broadcasts. Without it, photo uploads on Vercel fail with "Server misconfigured: photo storage needs ..." (scores and drinks still sync), and phones poll every few seconds instead of getting live pushes. |
 | `COMMISSIONER_PIN_HASH` | yes | From `npm run hash-pin -- <pin>`. Required to create a trip in production; also the starting PIN of each new trip. |
 | `ANTHROPIC_API_KEY` | no | AI judge, roasts and team names. Unset = AI silently off. |
 | `AI_JUDGE_MODEL` | no | Model for the closest-to-pin judge (needs image input). Default `claude-sonnet-5-5`. |
@@ -85,7 +85,7 @@ For AI roasts, team names and the closest-to-pin judge, create an API key at [co
 1. Open your Vercel URL on your phone → **Commissioner → Create the trip**. Name it, enter your PIN. You land in **Setup**.
 2. Fill in the roster (nickname, Venmo handle, groom flag), drag players into teams, set tee times and set the pots.
 3. **Course:** Jack Frost National is mapped in OpenStreetMap, so in **Setup → Course** tap **Try OpenStreetMap import**: it fills in the tee and green points for you. Then check the four par 5 tee points on the satellite map (holes 4, 9, 12 and 18): long drive measures from them, so drag any that sit off the actual tee box. (From a terminal, `DATABASE_URL=... npm run osm-import -- --code <code>` does the same import.)
-4. Send `https://<your-app>/t/<code>` to the group chat. Everyone taps their name and adds it to their Home Screen.
+4. Send `https://<your-app>/t/<code>` to the group chat. Everyone taps their name and adds it to their Home Screen from that page. Each trip gets its own Home Screen icon, and on iPhone the icon keeps its own storage: open it once, tap your name again, and (commissioner) unlock with the PIN there too.
 5. On Saturday, **Setup → Start round** when the first group is on the tee.
 
 ## Testing
@@ -107,15 +107,15 @@ Use a throwaway trip so you exercise exactly what Saturday uses. Check each box:
 - [ ] **Roster + teams (2 min).** Add yourself (groom, your real Venmo handle) and 4 fakes. Make a threesome (with you) and a twosome by dragging players between teams. Tap **Generate names**, re-roll, pick one. Set tee times.
 - [ ] **Pots (30 s).** $20 team match with a 70/30 split, $5 per contest hole. Opt one fake out of one pot.
 - [ ] **Course (2 min).** On the satellite map, place the tee and green for holes 1, 3 and 4 (hole 4 is a par 5: its tee is what long drive measures from).
-- [ ] **Join like a player (2 min).** Copy the `/t/<code>` link, open it in Safari, tap your name, try **Not you?** and back. Follow the onboarding: Share → **Add to Home Screen**, open the app from the icon, allow location and notifications (both one-line asks).
+- [ ] **Join like a player (2 min).** Copy the `/t/<code>` link, open it in Safari, tap your name, try **Not you?** and back. Follow the onboarding: Share → **Add to Home Screen**, open the app from the icon (it starts fresh: tap your name again, and unlock commissioner powers with your PIN once more), allow location and notifications (both one-line asks).
 - [ ] **Start (10 s).** **Setup → Start round.** The feed says so.
 - [ ] **Play three holes (3 min).** Tap **On the tee**, log a Drink, a Shotgun with a photo of the empty, and a drink for a teammate; undo one within 10 seconds. Enter scores and whose tee shot. Use an earned mulligan, then the **Groom's Mulligan** (fanfare). On hole 3, edit hole 1 from the scorecard strip and watch the feed post the edit. A threesome's 3rd drink should post a 👻 ghost beer.
 - [ ] **Airplane mode (2 min).** Turn on airplane mode. Log a score, two drinks and a post. Force-quit the app and reopen it: everything is still there and the badge says "Offline, N changes waiting". Turn airplane mode off: the badge clears and a second phone or laptop shows it all within seconds.
-- [ ] **Contests (2 min).** **Settings →** tap the version line 7 times (dev mode) → **GPS simulator**: drop yourself about 280 yards down hole 4 → Play → **Measure drive** → photo → see where it ranks. On hole 3, **Closest to pin**: photo, 8 ft 6 in, drag the marker around the pin.
+- [ ] **Contests (2 min).** **Settings →** tap the version line 7 times (dev mode) → **GPS simulator**: drop yourself about 280 yards down hole 4 → Play → **Measure drive** → photo. On a real trip a simulated drive never counts on its own: it goes to your review queue ("Simulated GPS"), so there's no rank preview. Approve it in **Setup → Commissioner tools → Entries** and watch it take the lead. (On a demo trip simulated drives count straight away.) On hole 3, **Closest to pin**: photo, 8 ft 6 in, drag the marker around the pin.
 - [ ] **Commissioner fixes (1 min).** **Setup → Commissioner tools:** override a score and move a drink to another hole. The feed shows a Commissioner override and the leaderboard recomputes.
 - [ ] **Money (1 min).** The Money tab shows live projections. On a settle-up payment to your own Venmo handle, tap **Pay with Venmo**: Venmo should open with the amount and note filled in. Back out without paying.
 - [ ] **Finalize + awards (1 min).** **Setup → Finalize round.** Check the Awards, open the gallery, download one photo and the zip, share the recap card.
-- [ ] **Reset.** Don't reuse the dry run for Saturday: create the real trip fresh (section 4 above) and open its link once so the Home Screen icon goes there. In **Settings → GPS simulator**, tap **Turn off** so your phone uses real GPS on Saturday.
+- [ ] **Reset.** Don't reuse the dry run for Saturday: create the real trip fresh (section 4 above). The dry-run Home Screen icon always opens the dry-run trip (each trip's icon is its own app), so long-press it and delete it, then open the real trip's link in Safari and **Add to Home Screen** again from that page. Tap the new icon: it must open the real trip (tap your name and unlock with your PIN there once). If you also used the GPS simulator in Safari, turn it off there (**Settings → GPS simulator → Turn off**) so Saturday uses real GPS; a newly added icon starts with it off.
 
 Short on time? **Try the demo** gives you a round already in progress; **Settings → Demo mode → Replay as full round** jumps straight to awards and settle-up. Demo trips never call the AI (unless the server sets `DEMO_AI=1`), so check the AI judge and roasts on your dry-run trip, not the demo.
 
@@ -123,7 +123,9 @@ Short on time? **Try the demo** gives you a round already in progress; **Setting
 
 - **Each cart keeps a paper scorecard.** If a phone dies, any teammate's phone can score for the team. If the app or the server goes down, keep playing on paper and enter it afterward.
 - **The commissioner can fix anything** in **Setup → Commissioner tools**: any score, drink (delete or move to another hole), contest entry (approve, flag or set the official distance), or a team's current hole. Every number (nets, ghost beers, standings, pots, awards, settle-up) recomputes from the raw data, and every fix posts to the feed.
-- Drinks logged late land on the team's open hole; move them to the right hole if it matters.
+- A drink counts on the hole that was open when it was logged, even if the phone only syncs later. A drink logged more than 2 minutes after the team tapped **Round complete** doesn't count. Move a drink to another hole in Commissioner tools if it matters (a moved drink stays where you put it).
+- Deleting someone else's drink or contest entry (or your own after a minute) posts to the feed, so nothing disappears quietly.
+- **After you finalize,** phones that were offline during the round can still sync what happened on the course for 12 hours. If that changes the winner, the standings or who pays whom, the feed posts a big **Results changed** card (everyone gets a push) that says what moved; open **Setup → Reopen round** to review, then finalize again.
 - **No signal is normal:** everything queues on the phone and syncs exactly once later. Keep the app open for a few seconds once you're back in signal.
 - Weak GPS on a long drive: after 3 tries the entry can be submitted for commissioner review. A wrong tee point can be fixed on the Course screen mid-round and every drive on that hole re-measures.
 
@@ -153,16 +155,17 @@ All of the game settings live in the trip's Setup and change without a redeploy.
 
 - **"Trip creation is locked: the server has no COMMISSIONER_PIN_HASH set."** Add `COMMISSIONER_PIN_HASH` in Vercel and redeploy.
 - **"The server's COMMISSIONER_PIN_HASH is mangled."** An old `scrypt$...` hash got eaten by a `.env` file. Run `npm run hash-pin -- <pin>` again and paste the new `scrypt:...` value.
-- **Wrong PIN, now "Easy, tiger."** Too many wrong PINs: 8 from one phone in 10 minutes (30 a day), or 30 in 10 minutes (100 a day) from everyone on the trip together. Wait it out. The phone you created the trip on, and any phone where you've unlocked before, is a trusted device: other people's wrong guesses never lock it out. You can change a trip's PIN in Setup → Settings; that also signs out every other phone that had commissioner powers.
+- **The right PIN is refused, or "Easy, tiger. Try again in N minutes."** Too many wrong PINs: 8 from one phone in 10 minutes (30 a day), or 30 in 10 minutes from everyone on the trip together (after 100 in a day, one try every 10 minutes). Other people's guesses only ever cost you a few minutes. The phone you created the trip on, and any phone where you've unlocked before (Lock keeps it), is a trusted device: other people's wrong guesses never slow it down. The Home Screen app counts as a new device until you unlock there once. You can change a trip's PIN in Setup → Settings; that also signs out every other phone that had commissioner powers.
 - **"Server misconfigured: DATABASE_URL is not set."** Add `DATABASE_URL` in Vercel and redeploy. (The local PGlite fallback can't run on Vercel.)
 - **"Server misconfigured: photo storage needs ..."** Add `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in Vercel and redeploy.
-- **"This trip is out of photo space."** Each trip takes up to 800 photos (4 MB each at most; phones send about 300 KB). Demo trips take 80.
+- **"This trip is out of photo space."** Each trip takes up to 800 photos (4 MB each at most; phones send about 300 KB). Demo trips take 80, and all demo trips together 200 MB (old demos are pruned after 48 hours). Photos are write-once: a re-upload of a stored photo with different bytes is refused (409), so nobody can swap out closest-to-pin evidence.
 - **Server errors on every request / can't connect to the database.** Use the transaction pooler URL on port 6543, check the password (URL-encode special characters), and make sure the Supabase project isn't paused (free projects pause after a week of no use: open the dashboard to wake it).
-- **Live updates take ~20 seconds.** Realtime isn't connected, so phones are polling. Check all three Supabase variables, redeploy, and in Supabase **Project Settings → Realtime** make sure public channels are allowed. Scores still sync either way.
+- **Live updates take ~20 seconds.** Phones are connected to Realtime but the server's broadcasts fail. Check that `SUPABASE_SERVICE_ROLE_KEY` and `NEXT_PUBLIC_SUPABASE_URL` belong to the same project (a key from another project, or a rotated key, is the usual cause) and look for `realtime: broadcast ... failed` in the Vercel function logs. If Realtime can't connect at all (public channels disallowed in **Project Settings → Realtime**, wrong publishable/anon key), phones poll every 3 seconds instead, so it feels live but costs more requests. Scores sync either way.
 - **Photos show as broken.** Check that `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are both set (without them Vercel refuses uploads, see above) and that the `photos` bucket in Supabase Storage is public. Redeploy after fixing; photos still queued on the phones upload on their next try.
 - **No push notifications.** The phone must use the Home Screen app (iOS 16.4+), have notifications allowed in iOS Settings, and not be muted in the app's Settings. Both VAPID keys must be set.
 - **No roasts or AI judge.** `ANTHROPIC_API_KEY` is missing, roasts are off in Setup → Settings, or the 40-roast cap is used up. AI failures are silent by design: check the Vercel function logs.
 - **The app looks out of date after a deploy.** The service worker serves the cached shell first. Close the app completely and reopen it.
 - **Local scripts hang or say the database is busy.** PGlite can only be opened by one process: stop `npm run dev` before `npm run demo`, `create-trip` or `osm-import`.
 - **"Easy, tiger. That's a lot of fake golf."** The demo endpoint is rate limited. Wait a minute.
+- **A new post is refused.** Each trip holds up to 1,500 posts (150 on a demo trip), so a script can't fill the database. Drinks, scores and contest entries don't count toward it.
 - **e2e can't start.** Something else is on port 3100: stop it, or run with `E2E_PORT=3200 npm run test:e2e`.

@@ -1,6 +1,6 @@
 // Pure helpers for the commissioner's live-round tools (unit-tested in tests/ui/course-commish.test.ts).
 import type { ContestEntry, ContestKind, Drink, DrinkType, Player, RoundStatus, Team, TeamRoundState, TripState, UUID } from "@/lib/types";
-import type { ContestEntryView, ContestHoleSummary, Derived } from "@/lib/engine/types";
+import type { ContestEntryView, ContestHoleSummary, Derived, PotView } from "@/lib/engine/types";
 import type { OpInput } from "@/lib/ops";
 import { contestScore } from "@/lib/engine/contests";
 import { formatFeetInches } from "@/lib/engine/format";
@@ -62,21 +62,27 @@ export function reviewQueue(contests: readonly ContestHoleSummary[]): ReviewItem
 }
 
 /**
- * Queue items whose ruling can move money, for the finalize check: entries that don't count yet
- * (flagged, out of range) but would take or tie the hole if approved, and AI-suspicious entries
- * that currently lead it. Informational items (weak-GPS note on a drive that already counts, a
- * suspicious entry that isn't winning) can't change a pot and stay out.
+ * Queue items whose ruling can move money, for the finalize check, judged against each contest
+ * pot's participants (`pots` = derived.money.pots; a player who opted out of a hole's pot can't
+ * win it): entries that don't count yet (flagged, out of range) but would take or tie the pot if
+ * approved, and AI-suspicious entries that currently win it. Informational items (weak-GPS note on
+ * a drive that already counts, a suspicious entry that isn't winning, anything by a player outside
+ * the pot) can't change a pot and stay out. Without pots, every player counts as in the pot.
  */
-export function pendingRulings(contests: readonly ContestHoleSummary[]): ReviewItem[] {
+export function pendingRulings(contests: readonly ContestHoleSummary[], pots: readonly PotView[] = []): ReviewItem[] {
+  const potByKey = new Map(pots.map((p) => [p.key, p]));
   const out: ReviewItem[] = [];
   for (const c of contests) {
-    const best = c.entries.filter((v) => v.valid).reduce((min, v) => Math.min(min, contestScore(c.type, v.distance)), Number.POSITIVE_INFINITY);
-    for (const v of c.entries) {
+    const pot = potByKey.get(c.pot_key);
+    const inPot = pot ? new Set(pot.participants) : null;
+    const entries = c.entries.filter((v) => !inPot || inPot.has(v.player_id));
+    const best = entries.filter((v) => v.valid).reduce((min, v) => Math.min(min, contestScore(c.type, v.distance)), Number.POSITIVE_INFINITY);
+    for (const v of entries) {
       const reasons = reviewReasons(v);
       if (reasons.length === 0) continue;
       const wouldTake = !v.valid && Number.isFinite(v.distance) && contestScore(c.type, v.distance) <= best;
-      const suspiciousLeader = v.valid && v.suspicious && v.rank === 1;
-      if (wouldTake || suspiciousLeader) out.push({ view: v, hole: c.hole, reasons, needsReview: true });
+      const suspiciousWinner = v.valid && v.suspicious && (pot ? pot.winners.includes(v.player_id) : v.rank === 1);
+      if (wouldTake || suspiciousWinner) out.push({ view: v, hole: c.hole, reasons, needsReview: true });
     }
   }
   return out.sort((a, b) => a.hole - b.hole || a.view.entry.created_at.localeCompare(b.view.entry.created_at));

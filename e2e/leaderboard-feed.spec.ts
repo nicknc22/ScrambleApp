@@ -252,6 +252,31 @@ test.describe("feed", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("a photo still uploading from another phone reads 'on its way' and shows up by itself once it lands", async ({ page }) => {
+    test.setTimeout(120_000);
+    const s = await seedTrip(page.request);
+    const trip = (await (await page.request.get(`/api/t/${s.code}/state`)).json()) as { state: { trip: { id: string } } };
+    const path = `trips/${trip.state.trip.id}/posts/${randomUUID()}.jpg`;
+    // Another phone's post synced (ops never wait for their photo); its upload hasn't landed yet.
+    await sync(page.request, s.code, [op({ type: "post.create", event_id: randomUUID(), text: "Uploading from the 9th tee", photo_path: path }, s.player.B1)]);
+    await openAs(page, s.code, s.player.A1, "feed");
+    const item = page.getByTestId("feed-item").filter({ hasText: "Uploading from the 9th tee" });
+    const placeholder = item.getByTestId("feed-photo-missing");
+    await expect(placeholder).toHaveAttribute("data-state", "coming");
+    await expect(placeholder).toHaveText(/Photo on its way…/);
+    await expect(item.getByText(/didn't load/)).toHaveCount(0);
+
+    // The upload lands; nobody touches this phone. The photo appears on its own.
+    const up = await page.request.post(`/api/t/${s.code}/upload?path=${encodeURIComponent(path)}`, {
+      data: TINY_JPEG,
+      headers: { "content-type": "image/jpeg" },
+    });
+    expect(up.ok(), await up.text()).toBe(true);
+    await expect(item.getByTestId("feed-photo")).toBeVisible({ timeout: 25_000 });
+    await expect(item.getByTestId("feed-photo-missing")).toHaveCount(0);
+    expect(await item.locator("img").evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
+  });
+
   test("lurkers can read but must pick a name to post", async ({ page }) => {
     const s = await seedTrip(page.request);
     // Commissioner without a player: skip the roster, land on the feed.

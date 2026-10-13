@@ -1,9 +1,21 @@
 "use client";
 // After "Round complete" (or once the trip is final): gross, credit, net, net to par, position.
 import { Badge, StatTile } from "@/components/ui";
-import type { RoundSummary } from "./model";
+import { missingScoresNote, type RoundSummary } from "./model";
 
-export function RoundSummaryCard({ summary, final, teamName }: { summary: RoundSummary; final: boolean; teamName: string }) {
+export function RoundSummaryCard({
+  summary,
+  final,
+  teamName,
+  canEdit,
+}: {
+  summary: RoundSummary;
+  final: boolean;
+  teamName: string;
+  /** This phone can still change scores (else the missing-score note says to ask the commissioner). */
+  canEdit: boolean;
+}) {
+  const missingNote = missingScoresNote(summary.missing, canEdit);
   return (
     <section
       className="relative overflow-hidden rounded-3xl border-2 border-ink px-4 pt-4 pb-4 text-white shadow-hard"
@@ -38,9 +50,9 @@ export function RoundSummaryCard({ summary, final, teamName }: { summary: RoundS
         {summary.drinks} {summary.drinks === 1 ? "drink" : "drinks"}
         {summary.ghostBeers > 0 ? ` · ${summary.ghostBeers} ghost ${summary.ghostBeers === 1 ? "beer" : "beers"} 👻` : ""} · thru {summary.thru}
       </p>
-      {summary.missing.length > 0 && (
-        <p className="mt-3 rounded-xl border-2 border-ink bg-hazard px-3 py-2 text-[15px] font-black text-ink">
-          ⚠️ No score on {summary.missing.length === 1 ? "hole" : "holes"} {summary.missing.join(", ")}. Tap {summary.missing.length === 1 ? "it" : "them"} on the scorecard to fix.
+      {missingNote && (
+        <p className="mt-3 rounded-xl border-2 border-ink bg-hazard px-3 py-2 text-[15px] font-black text-ink" data-testid="summary-missing">
+          ⚠️ {missingNote}
         </p>
       )}
     </section>

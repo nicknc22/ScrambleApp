@@ -467,6 +467,15 @@ describe("POST /api/demo", () => {
     expect(res.headers.get("set-cookie")).toBeNull();
   });
 
+  it("the hourly cap holds against a burst of parallel creates", async () => {
+    await db.query("delete from demo_creations");
+    const t0 = new Date("2026-10-21T10:00:00.000Z");
+    const waits = await Promise.all(Array.from({ length: 80 }, (_, i) => claimDemoSlot(db, `10.8.${i}.1`, t0)));
+    expect(waits.filter((w) => w === 0)).toHaveLength(DEMO_CREATES_PER_HOUR);
+    const [row] = await db.query<{ n: number }>("select count(*)::int as n from demo_creations");
+    expect(row.n).toBe(DEMO_CREATES_PER_HOUR);
+  });
+
   it("rate limits per client", async () => {
     for (let i = 0; i < 6; i++) expect(demoRateLimit("10.9.9.9", NOW.getTime() + i)).toBe(0);
     expect(demoRateLimit("10.9.9.9", NOW.getTime() + 10)).toBeGreaterThan(0);

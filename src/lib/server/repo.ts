@@ -227,6 +227,8 @@ export const ROW_SPECS: { readonly [T in RowTable]: TableSpec<RowOf<T>> } = {
           "commissioner_override",
           "round_complete",
           "final_results",
+          "results_changed",
+          "removed",
           "roast",
         ],
       },

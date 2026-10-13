@@ -19,10 +19,12 @@ import {
   MAX_FAILS_PER_TRIP,
   MAX_FAILS_PER_TRIP_DAY,
   parseCookies,
+  PIN_SLOW_SPACING_MS,
   pinRetryAfter,
   recordPinFailure,
   recordPinSuccess,
   resetPinThrottle,
+  retryAfterText,
   trustedDeviceCookie,
   trustedDeviceCookieName,
   trustedDeviceId,
@@ -297,10 +299,11 @@ describe("PIN throttle (pin_failures)", () => {
     expect(await pinRetryAfter(db, trip, "9.9.9.9", { now })).toBe(0);
   });
 
-  it("caps total failures per trip across clients (30 per 10 min), but not for a trusted device", async () => {
+  it("caps total failures per trip across clients (30 per 10 min: a wait of at most 10 minutes), but not for a trusted device", async () => {
     await fresh();
     for (let i = 0; i < MAX_FAILS_PER_TRIP; i++) await recordPinFailure(db, trip, `10.0.0.${i}`, now + i);
     expect(await pinRetryAfter(db, trip, "10.0.1.1", { now: now + 100 })).toBeGreaterThan(0);
+    expect(await pinRetryAfter(db, trip, "10.0.1.1", { now: now + 100 })).toBeLessThanOrEqual(600);
     expect(await pinRetryAfter(db, trip, "dev:commissionerphone", { now: now + 100, trusted: true })).toBe(0);
     expect(await pinRetryAfter(db, other, "10.0.1.1", { now: now + 100 })).toBe(0);
     // The trusted device still has its own bucket.
@@ -308,16 +311,18 @@ describe("PIN throttle (pin_failures)", () => {
     expect(await pinRetryAfter(db, trip, "dev:commissionerphone", { now: now + 300, trusted: true })).toBeGreaterThan(0);
   });
 
-  it("caps a slow guesser rotating IPs at 100 per day", async () => {
+  it("slows a guesser rotating IPs to one attempt per 10 minutes past 100 a day (a short wait, never a day-long lockout)", async () => {
     await fresh();
-    // 100 failures spread over 20 hours: never 30 within 10 minutes, but the daily cap holds.
+    // 100 failures spread over 20 hours: never 30 within 10 minutes.
     for (let i = 0; i < MAX_FAILS_PER_TRIP_DAY; i++) await recordPinFailure(db, trip, `172.16.${i}.1`, now + i * 12 * 60_000);
-    const later = now + 20 * 3600_000;
-    const wait = await pinRetryAfter(db, trip, "172.16.200.1", { now: later });
-    expect(wait).toBeGreaterThan(3 * 3600);
-    expect(wait).toBeLessThanOrEqual(24 * 3600);
-    expect(await pinRetryAfter(db, trip, "dev:phone", { now: later, trusted: true })).toBe(0);
-    expect(await pinRetryAfter(db, trip, "172.16.200.1", { now: now + 24 * 3600_000 + 1 })).toBe(0);
+    const last = now + (MAX_FAILS_PER_TRIP_DAY - 1) * 12 * 60_000;
+    expect(await pinRetryAfter(db, trip, "172.16.200.1", { now: last + 1000 })).toBe(PIN_SLOW_SPACING_MS / 1000 - 1);
+    expect(await pinRetryAfter(db, trip, "172.16.200.1", { now: last + PIN_SLOW_SPACING_MS })).toBe(0);
+    expect(await pinRetryAfter(db, trip, "dev:phone", { now: last + 1000, trusted: true })).toBe(0);
+    // Before the 100th failure of the day the spacing doesn't apply.
+    await fresh();
+    for (let i = 0; i < MAX_FAILS_PER_TRIP_DAY - 1; i++) await recordPinFailure(db, trip, `172.16.${i}.1`, now + i * 12 * 60_000);
+    expect(await pinRetryAfter(db, trip, "172.16.200.1", { now: now + (MAX_FAILS_PER_TRIP_DAY - 2) * 12 * 60_000 + 1000 })).toBe(0);
   });
 
   it("caps one client (a trusted device too) at 30 a day, even when it paces itself", async () => {
@@ -327,6 +332,15 @@ describe("PIN throttle (pin_failures)", () => {
     const later = now + 30 * 15 * 60_000;
     expect(await pinRetryAfter(db, trip, "dev:friendsphone", { now: later, trusted: true })).toBeGreaterThan(0);
     expect(await pinRetryAfter(db, trip, "dev:nicksphone", { now: later, trusted: true })).toBe(0);
+  });
+
+  it("says how long to wait in words that match retry_after", () => {
+    expect(retryAfterText(1)).toBe("1 second");
+    expect(retryAfterText(45)).toBe("45 seconds");
+    expect(retryAfterText(60)).toBe("1 minute");
+    expect(retryAfterText(61)).toBe("2 minutes");
+    expect(retryAfterText(600)).toBe("10 minutes");
+    expect(retryAfterText(86_400)).toBe("24 hours");
   });
 
   it("lives in the database (every server instance sees it) and housekeeps old rows", async () => {

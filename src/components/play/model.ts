@@ -383,10 +383,11 @@ export function drinkFeedback(type: DrinkType, value: number | undefined, player
   return { ghost, mulligan, emoji: ghost ? "👻" : DRINK_EMOJI[type], title, message };
 }
 
-/** One drink in a team's logging burst (the drinks the merged undo toast covers, newest last). */
+/** One drink in a team's logging burst (the drinks the inline Undo chip covers, newest last). */
 export interface BurstDrink {
   opId: UUID;
   drinkId: UUID;
+  playerId: UUID;
   name: string;
   type: DrinkType;
   /** Derived value right after logging (2 = ghost beer). */
@@ -394,29 +395,85 @@ export interface BurstDrink {
   hole: number;
 }
 
-export interface ToastCopy {
-  emoji: string;
-  title: string;
-  message: string;
-}
+/** How long a logged drink can be undone from its row (the spec's 10-second undo). */
+export const DRINK_UNDO_MS = 10_000;
+/** How long a row says "Undone" after its drink was undone. */
+export const DRINK_UNDONE_MS = 2_500;
+/** A tap that lands just as the chip times out still counts. */
+const UNDO_GRACE_MS = 1_000;
 
 /**
- * Copy for the single, compact undo toast a burst of drink logs shares: the count plus the latest
- * drink ("3 drinks logged" / "Last: Rob 👻 −2"). Its Undo removes the latest drink.
+ * Drinks logged in a row on this phone for one team. No toast: the Undo is an inline chip in the
+ * row of the newest drink (a toast stack ended up on top of Save / On the tee and the tab bar).
+ * Each log restarts the 10 s window; Undo removes the newest drink and gives the rest a fresh one.
  */
-export function drinkBurstCopy(burst: readonly BurstDrink[]): ToastCopy {
-  const last = burst[burst.length - 1];
-  if (!last) return { emoji: "🍺", title: "Drinks logged", message: "" };
-  const fb = drinkFeedback(last.type, last.value, last.name, last.hole);
-  if (burst.length === 1) return { emoji: fb.emoji, title: fb.title, message: fb.message };
-  return { emoji: fb.emoji, title: `${burst.length} drinks logged`, message: `Last: ${last.name} ${fb.ghost ? "👻" : DRINK_EMOJI[last.type]} −${last.value ?? 1}` };
+export interface DrinkUndoBurst {
+  drinks: readonly BurstDrink[];
+  /** Date.now() of the last log or undo. */
+  at: number;
+  /** Row whose drink Undo just removed (a brief "Undone" mark there). */
+  undone: { playerId: UUID; at: number } | null;
 }
 
-/** Copy after Undo removed the latest drink of a burst; `remaining` are the burst's other drinks. */
-export function drinkUndoneCopy(remaining: readonly BurstDrink[]): ToastCopy {
-  const last = remaining[remaining.length - 1];
-  if (!last) return { emoji: "↩️", title: "Drink undone", message: "Pretend it never happened." };
-  return { emoji: "↩️", title: "Drink undone", message: `${remaining.length} still logged · last: ${last.name}` };
+export const EMPTY_BURST: DrinkUndoBurst = { drinks: [], at: 0, undone: null };
+
+export function burstAfterLog(b: DrinkUndoBurst, drink: BurstDrink, now: number): DrinkUndoBurst {
+  const live = now - b.at <= DRINK_UNDO_MS ? b.drinks : [];
+  return { drinks: [...live, drink], at: now, undone: null };
+}
+
+/** Pop the newest drink. null when there is nothing left to undo (empty, or the window closed). */
+export function burstAfterUndo(b: DrinkUndoBurst, now: number): { burst: DrinkUndoBurst; removed: BurstDrink } | null {
+  const removed = b.drinks[b.drinks.length - 1];
+  if (!removed || now - b.at > DRINK_UNDO_MS + UNDO_GRACE_MS) return null;
+  return { burst: { drinks: b.drinks.slice(0, -1), at: now, undone: { playerId: removed.playerId, at: now } }, removed };
+}
+
+export interface UndoChipView {
+  /** Row the chip sits in: the newest drink's player. */
+  playerId: UUID;
+  drink: BurstDrink;
+  /** Drinks Undo can still take back, one tap at a time (newest first). */
+  count: number;
+  remainingMs: number;
+  /** Time since the window started (offsets the drain bar after a remount). */
+  elapsedMs: number;
+  /** Second line of the chip: "🍺 −1 stroke", "👻 Ghost beer −2", "🔫 Mulligan banked". */
+  detail: string;
+  /** "Undo Rob's drink". */
+  ariaLabel: string;
+  /** Screen-reader announcement, e.g. "Ghost beer! Rob · hole 1 · −2 strokes 👻". */
+  announce: string;
+}
+
+export function drinkChipDetail(d: Pick<BurstDrink, "type" | "value">): string {
+  const v = d.value ?? 1;
+  if (d.type !== "drink") return `${v > 1 ? "👻" : DRINK_EMOJI[d.type]} Mulligan banked`;
+  return v > 1 ? `👻 Ghost beer −${v}` : `🍺 −${v} stroke`;
+}
+
+/** The inline Undo chip for a team's burst at `now`, or null when there is nothing to undo. */
+export function undoChipView(b: DrinkUndoBurst, now: number): UndoChipView | null {
+  const last = b.drinks[b.drinks.length - 1];
+  const elapsedMs = Math.max(0, now - b.at);
+  if (!last || elapsedMs >= DRINK_UNDO_MS) return null;
+  const fb = drinkFeedback(last.type, last.value, last.name, last.hole);
+  return {
+    playerId: last.playerId,
+    drink: last,
+    count: b.drinks.length,
+    remainingMs: DRINK_UNDO_MS - elapsedMs,
+    elapsedMs,
+    detail: drinkChipDetail(last),
+    ariaLabel: `Undo ${last.name}'s ${DRINK_LABEL[last.type].toLowerCase()}`,
+    announce: `${fb.title}. ${fb.message}. Undo for 10 seconds.`,
+  };
+}
+
+/** Player whose row shows "Undone" right now (null = none). */
+export function undoneMarkFor(b: DrinkUndoBurst, now: number): UUID | null {
+  if (!b.undone || now - b.undone.at >= DRINK_UNDONE_MS) return null;
+  return b.undone.playerId;
 }
 
 export function ghostFanfareCopy(playerName: string, value: number): { title: string; subtitle: string } {
@@ -574,6 +631,22 @@ export function roundSummary(row: StandingRow | null | undefined, lines: readonl
   };
 }
 
+/**
+ * Warning for unscored holes on the round summary. Only phones that can still change scores are
+ * told to tap the scorecard; everyone else (a player once the trip is final) asks the commissioner.
+ */
+export function missingScoresNote(missing: readonly number[], canEdit: boolean): string | null {
+  if (missing.length === 0) return null;
+  const one = missing.length === 1;
+  const holes = `No score on ${one ? "hole" : "holes"} ${missing.join(", ")}.`;
+  return canEdit ? `${holes} Tap ${one ? "it" : "them"} on the scorecard to fix.` : `${holes} Ask the commissioner to fix ${one ? "it" : "them"}.`;
+}
+
+/** The scorecard strip's hint: tapping a hole edits it only where scores can still change. */
+export function stripHint(canEdit: boolean): string {
+  return canEdit ? "Tap a hole to fix it" : "Tap a hole to see it";
+}
+
 // ---------------------------------------------------------------------------
 // Confirm copy for "On the tee: hole N+1" / "Round complete"
 // ---------------------------------------------------------------------------
@@ -586,6 +659,12 @@ export interface AdvanceConfirm {
   tone: "primary" | "hazard" | "danger";
   /** Save the stepper value on `fromHole` before advancing (the primary button). */
   saveFirst: number | null;
+  /**
+   * saveFirst is the untouched par default, not a number anyone entered: it goes out as
+   * score.set with if_empty, so it only fills a hole that is still empty when the server applies
+   * it (a teammate's real score that this phone hasn't seen yet wins).
+   */
+  saveIsDefault: boolean;
   /** Secondary button: advance without a score (only while the hole has none). null = not offered. */
   skipLabel: string | null;
 }
@@ -593,8 +672,8 @@ export interface AdvanceConfirm {
 /**
  * Copy for the advance confirm. `draft` is the scoreDraft of the hole being left (the team's
  * current hole). Whatever the stepper shows is what the primary button saves, including the
- * untouched par default ("Par 4 on hole 3?" -> "Save 4 & tee off hole 4"); a hole with no score
- * also offers "Tee off without a score".
+ * untouched par default ("Par 4 on hole 3?" -> "Save 4 & tee off hole 4", sent fill-if-empty so it
+ * never replaces a teammate's score); a hole with no score also offers "Tee off without a score".
  */
 export function advanceConfirm(opts: {
   fromHole: number;
@@ -625,18 +704,21 @@ export function advanceConfirm(opts: {
       confirmLabel: finishing ? `Save ${draft.value} & finish` : `Save ${draft.value} & tee off ${to}`,
       tone: finishing ? "danger" : "primary",
       saveFirst: draft.value,
+      saveIsDefault: false,
       skipLabel,
     };
   }
   if (draft.dirty) {
-    // Untouched stepper on an unscored hole: it shows par, and par is what gets saved.
+    // Untouched stepper on an unscored hole: it shows par, and par is what gets saved, unless a
+    // teammate's phone already saved a score this phone hasn't received yet (then theirs stays).
     return {
       title: `Par ${draft.value} on hole ${fromHole}?`,
-      body: `Nobody touched the score, so it's ${draft.value} (net ${draft.value - credit}).${closeNote}${missingNote}`,
+      body: `Nobody touched the score, so it's ${draft.value} (net ${draft.value - credit}). If a teammate already saved one, theirs stays.${closeNote}${missingNote}`,
       emoji: finishing ? "🏁" : "⛳",
       confirmLabel: finishing ? `Save ${draft.value} & finish` : `Save ${draft.value} & tee off hole ${to}`,
       tone: finishing ? "danger" : "primary",
       saveFirst: draft.value,
+      saveIsDefault: true,
       skipLabel,
     };
   }
@@ -647,6 +729,7 @@ export function advanceConfirm(opts: {
     confirmLabel: finishing ? "Round complete" : `Tee off ${to}`,
     tone: finishing ? "danger" : "primary",
     saveFirst: null,
+    saveIsDefault: false,
     skipLabel: null,
   };
 }

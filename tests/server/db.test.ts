@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanString, createTestDb, getDb, normalizeRow, normalizeValue, setDbForTests, type DbConnection } from "@/lib/server/db";
-import { ABUSE_LIMITS_SQL, embeddedMigrations, INIT_SQL, loadMigrations, migrationsDir, runMigrations } from "@/lib/server/migrate";
+import { ABUSE_LIMITS_SQL, embeddedMigrations, FEED_EVENT_TYPES_SQL, INIT_SQL, loadMigrations, migrationsDir, runMigrations } from "@/lib/server/migrate";
 import { ROW_SPECS, TRIP_SPEC, type ColDef } from "@/lib/server/repo";
 import { ROW_TABLES } from "@/lib/types";
 
@@ -33,12 +33,13 @@ const ALL_TABLES = [
 ];
 /** Server-wide bookkeeping that outlives any one trip (no trips FK). */
 const GLOBAL_TABLES = ["schema_migrations", "trips", "demo_creations"];
-const VERSIONS = ["001_init", "002_abuse_limits"];
+const VERSIONS = ["001_init", "002_abuse_limits", "003_photo_sha256", "004_feed_event_types"];
 
 describe("migrations", () => {
   it("embedded SQL is byte-identical to db/migrations/*.sql, and every file is embedded", () => {
     expect(INIT_SQL).toBe(fs.readFileSync(path.join(process.cwd(), "db/migrations/001_init.sql"), "utf8"));
     expect(ABUSE_LIMITS_SQL).toBe(fs.readFileSync(path.join(process.cwd(), "db/migrations/002_abuse_limits.sql"), "utf8"));
+    expect(FEED_EVENT_TYPES_SQL).toBe(fs.readFileSync(path.join(process.cwd(), "db/migrations/004_feed_event_types.sql"), "utf8"));
     const files = fs.readdirSync(migrationsDir()).filter((f) => f.endsWith(".sql"));
     const embedded = new Map(embeddedMigrations().map((m) => [m.version, m.sql]));
     expect(files.length).toBeGreaterThan(0);
@@ -72,6 +73,7 @@ describe("migrations", () => {
     expect(await runMigrations(db)).toEqual([]);
     await db.exec(INIT_SQL); // pasting it into the SQL editor again must not break anything
     await db.exec(ABUSE_LIMITS_SQL);
+    await db.exec(FEED_EVENT_TYPES_SQL);
     const versions = await db.query("select version from schema_migrations");
     expect(versions).toHaveLength(VERSIONS.length);
   });
@@ -89,6 +91,19 @@ describe("migrations", () => {
     } finally {
       await old.close();
     }
+  });
+
+  it("feed_events.type accepts exactly the FeedEventTypes (004 adds results_changed and removed)", async () => {
+    const enumOf = ROW_SPECS.feed_events.columns.type as { enum: readonly string[] };
+    const [{ def }] = await db.query<{ def: string }>(
+      "select pg_get_constraintdef(oid) as def from pg_constraint where conrelid = 'feed_events'::regclass and conname = 'feed_events_type_check'",
+    );
+    const allowed = [...def.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+    expect(allowed).toEqual([...enumOf.enum].sort());
+    expect(allowed).toEqual(expect.arrayContaining(["results_changed", "removed"]));
+    // An existing deploy: the 001 constraint is replaced, not duplicated.
+    const checks = await db.query("select conname from pg_constraint where conrelid = 'feed_events'::regclass and contype = 'c'");
+    expect(checks).toEqual([{ conname: "feed_events_type_check" }]);
   });
 
   it("enables RLS on every table and defines no policies", async () => {

@@ -80,13 +80,18 @@ export function Composer({ meId, myName, onPickName }: { meId: string | null; my
     if (busy || !canSubmitPost(text, !!file)) return;
     setBusy(true);
     let photoPath: string | null = null;
+    let photoDropped = false;
     try {
       if (file) photoPath = await store.addPhoto(file, "posts");
     } catch (err) {
       console.error("[feed] photo failed", err);
-      toast.error("Couldn't read that photo. Try another one (or a screenshot of it).", { title: "Photo failed" });
-      setBusy(false);
-      return;
+      // Nothing could shrink it to an uploadable JPEG. Words still post; a photo-only post can't.
+      if (!cleanPostText(text)) {
+        toast.error("Couldn't read that photo. Try another one (or a screenshot of it).", { title: "Photo failed" });
+        setBusy(false);
+        return;
+      }
+      photoDropped = true;
     }
     const eventId = newId();
     const res = store.dispatch({ type: "post.create", event_id: eventId, text: cleanPostText(text), photo_path: photoPath });
@@ -97,6 +102,7 @@ export function Composer({ meId, myName, onPickName }: { meId: string | null; my
     }
     setText("");
     clearPhoto();
+    if (photoDropped) toast.error("The photo wouldn't shrink to something we can upload, so your words went up without it.", { title: "Posted, minus the photo", emoji: "📷" });
     const opId = res.op.id;
     toast.show({
       id: POSTED_TOAST_ID,

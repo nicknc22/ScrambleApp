@@ -5,7 +5,7 @@ import { memo } from "react";
 import type { FeedEvent, Player, ReactionKind, Team } from "@/lib/types";
 import type { RenderedEvent } from "@/lib/events/templates";
 import { Avatar, IconButton, PlayerName, cx, teamColor } from "@/components/ui";
-import { cardVariant, relativeTime, type CardVariant, type ReactionSummary } from "./model";
+import { ALWAYS_BIG, cardVariant, isRecentEvent, relativeTime, type CardVariant, type ReactionSummary } from "./model";
 import { FeedPhoto } from "./FeedPhoto";
 import { ReactionBar } from "./ReactionBar";
 
@@ -13,6 +13,8 @@ const BOX: Record<CardVariant, string> = {
   post: "border-ink bg-paper",
   ai_roast: "border-ink bg-ink text-white",
   override: "border-ink bg-hazard-soft",
+  results_changed: "border-flag-dark bg-flag text-white",
+  removed: "border-line-strong border-dashed bg-sand",
   ghost: "border-ghost-dark bg-ghost text-white",
   groom: "border-ink bg-gold text-ink",
   final: "border-ink bg-gold text-ink",
@@ -24,7 +26,10 @@ const BOX: Record<CardVariant, string> = {
   info: "border-line bg-paper",
 };
 
-const DARK: ReadonlySet<CardVariant> = new Set<CardVariant>(["ai_roast", "ghost"]);
+const DARK: ReadonlySet<CardVariant> = new Set<CardVariant>(["ai_roast", "ghost", "results_changed"]);
+
+/** Hazard-tape band across the top of the cards that are about the rules being bent. */
+const STRIPED: ReadonlySet<CardVariant> = new Set<CardVariant>(["override", "results_changed"]);
 
 export interface FeedCardProps {
   ev: FeedEvent;
@@ -37,6 +42,8 @@ export interface FeedCardProps {
   pending: boolean;
   /** Its photo is still uploading from this phone (the post itself may already be synced). */
   photoPending?: boolean;
+  /** Changes with every fresh snapshot (photo cards only): a photo that didn't load retries. */
+  photoRefreshKey?: string | null;
   reactions: ReactionSummary;
   meId: string | null;
   canDelete: boolean;
@@ -56,6 +63,7 @@ export const FeedCard = memo(function FeedCard({
   photoSrc,
   pending,
   photoPending = false,
+  photoRefreshKey = null,
   reactions,
   meId,
   canDelete,
@@ -66,7 +74,7 @@ export const FeedCard = memo(function FeedCard({
 }: FeedCardProps) {
   const variant = cardVariant(ev.type, r.tone);
   const dark = DARK.has(variant);
-  const big = r.big;
+  const big = r.big || ALWAYS_BIG.has(variant);
   const time = relativeTime(ev.created_at, nowMs);
   const mutedText = dark ? "text-white/75" : "text-muted";
   const whoNames = (kind: ReactionKind) => reactions.who[kind].map(nameOf).join(", ");
@@ -87,7 +95,7 @@ export const FeedCard = memo(function FeedCard({
         pending && "opacity-90",
       )}
     >
-      {variant === "override" && (
+      {STRIPED.has(variant) && (
         <div
           className="absolute inset-x-0 top-0 h-2"
           style={{ background: "repeating-linear-gradient(135deg, var(--color-ink) 0 10px, var(--color-hazard) 10px 20px)" }}
@@ -96,7 +104,7 @@ export const FeedCard = memo(function FeedCard({
       )}
       {variant === "groom" && <div className="fanfare-rays pointer-events-none opacity-60" aria-hidden="true" />}
 
-      <div className={cx("relative flex items-start gap-3", variant === "override" && "pt-1.5")}>
+      <div className={cx("relative flex items-start gap-3", STRIPED.has(variant) && "pt-1.5")}>
         {variant === "post" ? (
           <Avatar player={author} teamSortOrder={team?.sort_order ?? null} size="md" showCrown={false} />
         ) : (
@@ -113,6 +121,19 @@ export const FeedCard = memo(function FeedCard({
           {variant === "override" && (
             <span className="mb-1 inline-flex items-center gap-1 rounded-full border-2 border-ink bg-ink px-2 py-0.5 text-[11px] font-black tracking-wider text-hazard uppercase">
               ⚠️ Commissioner override
+            </span>
+          )}
+          {variant === "results_changed" && (
+            <span
+              className="mb-1 inline-flex items-center gap-1 rounded-full border-2 border-ink bg-hazard px-2 py-0.5 text-[11px] font-black tracking-wider text-ink uppercase"
+              data-testid="results-changed-badge"
+            >
+              🚨 Final results changed
+            </span>
+          )}
+          {variant === "removed" && (
+            <span className="mb-1 inline-flex items-center gap-1 rounded-full border-2 border-line-strong bg-paper px-2 py-0.5 text-[11px] font-black tracking-wider text-muted uppercase">
+              🗑️ Removed
             </span>
           )}
           <h3
@@ -171,7 +192,15 @@ export const FeedCard = memo(function FeedCard({
 
       {ev.photo_path && (
         <div className="relative mt-3">
-          <FeedPhoto src={photoSrc} alt={caption} pending={pending || photoPending} big={big} onOpen={(src) => onOpenPhoto(src, caption)} />
+          <FeedPhoto
+            src={photoSrc}
+            alt={caption}
+            pending={pending || photoPending}
+            big={big}
+            recent={isRecentEvent(ev.created_at, nowMs)}
+            refreshKey={photoRefreshKey}
+            onOpen={(src) => onOpenPhoto(src, caption)}
+          />
         </div>
       )}
 

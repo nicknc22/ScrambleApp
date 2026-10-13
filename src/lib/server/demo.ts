@@ -1138,21 +1138,25 @@ const HOUR_MS = 60 * MIN;
 
 /**
  * Count one demo create/reset against the hourly cap: 0 when allowed (and recorded), else the
- * seconds until a slot frees up (nothing recorded).
+ * seconds until a slot frees up (nothing recorded). Check and record happen under one advisory
+ * lock, so a burst of parallel creates can't sneak past the cap.
  */
 export async function claimDemoSlot(db: Db, client: string, now: Date = new Date()): Promise<number> {
   const since = new Date(now.getTime() - HOUR_MS).toISOString();
-  const recent = await db.query<{ created_at: string }>(
-    "select created_at from demo_creations where created_at > $1 order by created_at desc limit $2",
-    [since, DEMO_CREATES_PER_HOUR],
-  );
-  if (recent.length >= DEMO_CREATES_PER_HOUR) {
-    const edge = Date.parse(recent[DEMO_CREATES_PER_HOUR - 1].created_at);
-    return Math.max(1, Math.ceil((edge + HOUR_MS - now.getTime()) / 1000));
-  }
-  await db.query("insert into demo_creations (client, created_at) values ($1, $2)", [client.slice(0, 100), now.toISOString()]);
-  await db.query("delete from demo_creations where created_at < $1", [new Date(now.getTime() - 24 * HOUR_MS).toISOString()]);
-  return 0;
+  return db.tx(async (tx) => {
+    await tx.query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))", ["demo:create"]);
+    const recent = await tx.query<{ created_at: string }>(
+      "select created_at from demo_creations where created_at > $1 order by created_at desc limit $2",
+      [since, DEMO_CREATES_PER_HOUR],
+    );
+    if (recent.length >= DEMO_CREATES_PER_HOUR) {
+      const edge = Date.parse(recent[DEMO_CREATES_PER_HOUR - 1].created_at);
+      return Math.max(1, Math.ceil((edge + HOUR_MS - now.getTime()) / 1000));
+    }
+    await tx.query("insert into demo_creations (client, created_at) values ($1, $2)", [client.slice(0, 100), now.toISOString()]);
+    await tx.query("delete from demo_creations where created_at < $1", [new Date(now.getTime() - 24 * HOUR_MS).toISOString()]);
+    return 0;
+  });
 }
 
 // ---------------------------------------------------------------------------

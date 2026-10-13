@@ -19,6 +19,20 @@ export function realtimeMeta(tripId: string): SnapshotMeta["realtime"] {
   return { url, anon_key: anon, topic: tripTopic(tripId) };
 }
 
+/**
+ * Legacy Supabase keys (anon / service_role) are JWTs ("eyJ..."). The new-format keys
+ * (sb_publishable_... / sb_secret_...) are not, and must only travel in the apikey header: sent as
+ * "Authorization: Bearer" they get the request rejected.
+ */
+export function isJwtKey(key: string): boolean {
+  return /^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(key);
+}
+
+/** Headers for a server call to Supabase with the service key (either key format). */
+function serviceKeyHeaders(key: string): Record<string, string> {
+  return isJwtKey(key) ? { apikey: key, Authorization: `Bearer ${key}` } : { apikey: key };
+}
+
 /** Returns true when the broadcast was accepted. */
 export async function broadcastTripChanged(tripId: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
   const url = supabaseUrl();
@@ -27,11 +41,7 @@ export async function broadcastTripChanged(tripId: string, fetchImpl: typeof fet
   try {
     const res = await fetchImpl(`${url}/realtime/v1/api/broadcast`, {
       method: "POST",
-      headers: {
-        apikey: key,
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
+      headers: { ...serviceKeyHeaders(key), "Content-Type": "application/json" },
       body: JSON.stringify({
         messages: [{ topic: tripTopic(tripId), event: "changed", payload: { at: new Date().toISOString() } }],
       }),
@@ -39,7 +49,10 @@ export async function broadcastTripChanged(tripId: string, fetchImpl: typeof fet
       cache: "no-store",
     });
     if (!res.ok) {
-      console.warn(`realtime: broadcast for ${tripId} failed with HTTP ${res.status}`);
+      console.warn(
+        `realtime: broadcast for ${tripId} failed with HTTP ${res.status}` +
+          (res.status === 401 || res.status === 403 ? " (check SUPABASE_SERVICE_ROLE_KEY belongs to NEXT_PUBLIC_SUPABASE_URL's project)" : ""),
+      );
       return false;
     }
     return true;

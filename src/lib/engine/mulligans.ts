@@ -1,6 +1,7 @@
 // Mulligan banks. Mulligans are a tracked resource only: they never touch score math.
 import type { TripState, UUID } from "../types";
 import type { MulliganBank } from "./types";
+import { countedDrinks } from "./drinks";
 
 /** Earned = active shotgun/shot drinks; groom gets one Groom's Mulligan for the groom's team. */
 export function computeMulliganBanks(
@@ -28,8 +29,9 @@ export function computeMulliganBanks(
     };
   }
 
-  for (const d of state.drinks) {
-    if (d.deleted_at !== null || (d.type !== "shotgun" && d.type !== "shot")) continue;
+  // A shotgun or shot after the team's Round complete doesn't count, so it banks nothing either.
+  for (const d of countedDrinks(state)) {
+    if (d.type !== "shotgun" && d.type !== "shot") continue;
     const bank = out[d.team_id];
     if (bank) bank.earned += 1;
   }

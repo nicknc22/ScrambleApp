@@ -1,6 +1,7 @@
 // Scorecards, leaderboard standings and the individual drinkers board.
 import type { Hole, HoleContest, HoleScore, Player, RoundStatus, Team, TripState, UUID } from "../types";
 import type { DrinkValue, DrinkerRow, StandingRow, TeamHoleLine } from "./types";
+import { countedDrinks } from "./drinks";
 
 /** Not-started placeholder for pos/thru labels (en dash). */
 export const DASH = "–";
@@ -190,9 +191,6 @@ export function computeStandings(
 
 /** Individual drinking leaderboard for every active player on a team. Sorted by total desc, then name. */
 export function computeDrinkers(state: TripState, teamOfPlayer: Record<UUID, UUID>): DrinkerRow[] {
-  const activeTeams = new Set<UUID>();
-  for (const t of state.teams) if (t.deleted_at === null) activeTeams.add(t.id);
-
   const rows = new Map<UUID, DrinkerRow>();
   const players: Player[] = [];
   for (const p of state.players) {
@@ -203,9 +201,9 @@ export function computeDrinkers(state: TripState, teamOfPlayer: Record<UUID, UUI
     rows.set(p.id, { player_id: p.id, team_id: teamId, drinks: 0, shotguns: 0, shots: 0, total: 0, photos: 0 });
   }
 
-  // A player's drinks count wherever they were logged, as long as that team still exists.
-  for (const d of state.drinks) {
-    if (d.deleted_at !== null || !activeTeams.has(d.team_id)) continue;
+  // A player's drinks count wherever they were logged, as long as that team still exists (and not
+  // after the team's Round complete: countedDrinks).
+  for (const d of countedDrinks(state)) {
     const row = rows.get(d.player_id);
     if (!row) continue;
     if (d.type === "shotgun") row.shotguns += 1;

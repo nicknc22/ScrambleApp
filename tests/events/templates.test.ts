@@ -104,6 +104,21 @@ const SAMPLES: Record<string, FeedEvent> = {
   round_complete: ev("round_complete", { gross: 80, net: 61, net_to_par: -11, gross_to_par: 8, pos_label: "T2", thru: 18, drinks: 19, ghost_beers: 2, last: false }),
   "round_complete:last": ev("round_complete", { gross: 95, net: 90, net_to_par: 18, gross_to_par: 23, pos_label: "3", thru: 18, drinks: 5, ghost_beers: 0, last: true }, { team_id: T.C }),
   final_results: ev("final_results", { finalized_at: "2026-10-24T23:00:00.000Z", champion_team_ids: [T.A], champion_player_ids: [], standings: [{ team_id: T.A, net_to_par: -14 }] }, { team_id: T.A }),
+  "score_edit:overruled": ev("score_edit", { kind: "overruled", hole: 1, from: 5, to: 3, par: 4, edit_count: 0, overruled_by: P.A2 }, { actor_id: P.A3 }),
+  removed: ev("removed", { kind: "drink", row_id: "x9", owner_id: P.A1, hole: 6, detail: "shotgun", after_sec: 2400 }, { player_id: P.A1, actor_id: P.A3 }),
+  results_changed: ev(
+    "results_changed",
+    {
+      champion_before: [T.A],
+      champion_after: [T.B],
+      standings_before: [{ team_id: T.A, pos_label: "1", net: 72, net_to_par: 0 }, { team_id: T.B, pos_label: "2", net: 73, net_to_par: 1 }],
+      standings_after: [{ team_id: T.B, pos_label: "1", net: 71, net_to_par: -1 }, { team_id: T.A, pos_label: "2", net: 72, net_to_par: 0 }],
+      payments_before: [{ from_player_id: P.B1, to_player_id: P.A1, amount_cents: 2000 }],
+      payments_after: [{ from_player_id: P.A1, to_player_id: P.B1, amount_cents: 2000 }],
+      late_op_ids: ["op-1"],
+    },
+    { team_id: T.B },
+  ),
 };
 
 const OTHER_SAMPLES: FeedEvent[] = [
@@ -134,6 +149,8 @@ const ALL_TYPES: FeedEventType[] = [
   "commissioner_override",
   "round_complete",
   "final_results",
+  "results_changed",
+  "removed",
   "roast",
 ];
 
@@ -197,7 +214,7 @@ describe("renderFeedEvent", () => {
   });
 
   it("marks exactly the oversized events as big", () => {
-    const big = new Set(["groom_mulligan", "ghost_beer", "final_results", "lead_change"]);
+    const big = new Set(["groom_mulligan", "ghost_beer", "final_results", "results_changed", "lead_change"]);
     for (const s of [...Object.values(SAMPLES), ...OTHER_SAMPLES]) expect(render(s).big, s.type).toBe(big.has(s.type));
   });
 
@@ -399,6 +416,68 @@ describe("renderFeedEvent", () => {
     expect(r.big).toBe(true);
     const tie = render(ev("final_results", { champion_team_ids: [T.A, T.B], standings: [{ team_id: T.A, net_to_par: -2 }] }));
     expect(tie.body).toContain("Team A and Team B");
+  });
+
+  it("results_changed: who wins now and before, the settle-up warning, and the commissioner's Reopen hint; big, never roast tone", () => {
+    for (const r of allVariants(SAMPLES.results_changed)) {
+      expect(r).toMatchObject({ title: "RESULTS CHANGED", tone: "alert", big: true });
+      expect(r.body).toContain("Team B now wins at -1 (was Team A).");
+      expect(r.body).toContain("Settle-up changed (1 payment, $20): check the Money tab before you Venmo.");
+      expect(r.body).toContain("1 play from the course synced after the final whistle.");
+      expect(r.body).toContain("Commissioner: Reopen the round to review.");
+    }
+    // Same champion, standings moved, money squared up; a commissioner fix.
+    const tie = render(
+      ev("results_changed", {
+        champion_before: [T.A],
+        champion_after: [T.A],
+        payments_before: [{ from_player_id: P.B1, to_player_id: P.A1, amount_cents: 2000 }],
+        payments_after: [],
+        late_op_ids: [],
+      }),
+    );
+    expect(tie.body).toContain("Team A still wins, but the standings moved.");
+    expect(tie.body).toContain("nobody owes anybody now");
+    expect(tie.body).toContain("A commissioner fix after the final whistle.");
+  });
+
+  it("removed: names who removed whose what (drink, entry, mulligan)", () => {
+    for (const r of allVariants(SAMPLES.removed)) {
+      expect(r).toMatchObject({ title: "Removed", tone: "alert", big: false });
+      expect(r.body).toMatch(/^.*Player A3.*Player A1 👑's shotgun on hole 6/);
+    }
+    const entry = render(ev("removed", { kind: "contest_entry", row_id: "e1", owner_id: P.B1, hole: 8, detail: "ctp", distance: 4.5, unit: "ft" }, { actor_id: P.B2 }));
+    expect(entry.body).toContain("Player B1's closest to pin entry on hole 8 (4' 6\")");
+    const own = render(ev("removed", { kind: "drink", row_id: "d1", owner_id: P.A3, hole: 2, detail: "drink" }, { actor_id: P.A3 }));
+    expect(own.body).toContain("their own drink on hole 2");
+    const mull = render(ev("removed", { kind: "mulligan", row_id: "m1", owner_id: P.A2, hole: 9, detail: "groom" }, { actor_id: P.A4 }));
+    expect(mull.body).toContain("Team A's Groom's Mulligan on hole 9");
+  });
+
+  it("an overruled score names both values and both phones' owners", () => {
+    for (const r of allVariants(SAMPLES["score_edit:overruled"])) {
+      expect(r).toMatchObject({ title: "Scorecard dispute", tone: "alert" });
+      expect(r.body).toContain("Player A3");
+      expect(r.body).toContain("Bombs");
+      expect(r.body).toMatch(/\b5\b[^]*\b3\b/);
+      expect(r.body).toMatch(/hole 1\b/i);
+    }
+  });
+
+  it("drinks logged after the team's Round complete say they don't count", () => {
+    const g = makeTrip({ teams: [2, 2] });
+    g.teeOff("A", 18, 10).complete("A", 20);
+    const late = g.drink("A", "A1", 18, "drink", { min: 30 });
+    const onTime = g.drink("A", "A2", 18, "drink", { min: 19 });
+    const sg = g.drink("A", "A2", 18, "shotgun", { min: 31 });
+    const s = g.state;
+    const both = ev("drinks", { hole: 18, drink_ids: [onTime, late], player_ids: [g.player.A2, g.player.A1], logged_by_ids: [null, null], count: 2 });
+    expect(render(both, s).body).toContain("1 of them came after Round complete and don't count.");
+    const lateOnly = ev("drinks", { hole: 18, drink_ids: [late], player_ids: [g.player.A1], logged_by_ids: [null], count: 1 });
+    expect(render(lateOnly, s).body).toContain("Logged after Round complete, so it doesn't count.");
+    const shot = ev("shotgun", { drink_id: sg, drink_type: "shotgun", hole: 18, player_id: g.player.A2, logged_by: null, value: 2, banked_mulligan: true });
+    expect(render(shot, s).body).toContain("Logged after Round complete: no stroke, no mulligan.");
+    expect(render(SAMPLES.drinks).body).not.toContain("Round complete");
   });
 
   it("round complete uses ordinal positions", () => {

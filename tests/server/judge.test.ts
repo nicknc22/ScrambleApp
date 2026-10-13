@@ -461,6 +461,38 @@ describe("cost caps", () => {
     expect(pushed.length).toBeGreaterThan(0); // the new flag is news
   });
 
+  it("money review repro: an edit that keeps the photo and lowers the claim posts the flag (no AI call); undoing it doesn't re-announce", async () => {
+    const s = await setup();
+    const shot = await photo(s);
+    const first = submitOp(s, "A1", 10, shot);
+    await applyOpsToTrip({ db, trip: s.trip, ops: [first], isCommissioner: false });
+    expect(await judgeEntry(s.trip.id, first.entry_id, deps)).toMatchObject({ status: "written", suspicious: false, estimate_ft: 12, posted: true });
+
+    // "Edit my closest to pin" -> keep the photo -> 2 ft. The verdict carries over: flagged, and posted.
+    const edit = submitOp(s, "A1", 2, shot);
+    const out = await applyOpsToTrip({ db, trip: s.trip, ops: [edit], isCommissioner: false });
+    const flag = out.events.feed.find((e) => e.type === "ai_judge")!;
+    expect(flag).toMatchObject({ dedupe_key: `judge:${edit.entry_id}`, payload: { entry_id: edit.entry_id, suspicious: true, carried: true } });
+    expect(out.events.push_triggers.map((p) => p.collapse_key)).toContain(`judge:${edit.entry_id}`);
+    expect(out.events.roast_triggers.map((r) => r.feed_event_id)).toContain(flag.id);
+    expect(await judgeEntry(s.trip.id, edit.entry_id, deps)).toEqual({ status: "skipped", reason: "already_judged" });
+
+    // Undo the edit: pull it and restore the 10-footer under a new id (no verdict carried, no active
+    // entry to carry from). The judge reuses the photo's verdict but doesn't post it a second time.
+    const undo = [mk("contest.delete", { entry_id: edit.entry_id, by: s.player.A1 }), submitOp(s, "A1", 10, shot)];
+    await applyOpsToTrip({ db, trip: s.trip, ops: undo, isCommissioner: false });
+    const restored = undo[1] as OpOf<"contest.submit">;
+    const pushesBefore = pushed.length;
+    expect(await judgeEntry(s.trip.id, restored.entry_id, deps)).toMatchObject({ status: "written", suspicious: false, reused: true, posted: false });
+    expect(await entryOf(s, restored.entry_id)).toMatchObject({ ai_estimate_ft: 12, ai_suspicious: false });
+    expect((await feedOf(s, "ai_judge")).map((e) => [e.payload.entry_id, e.payload.suspicious])).toEqual([
+      [first.entry_id, false],
+      [edit.entry_id, true],
+    ]);
+    expect(pushed.length).toBe(pushesBefore);
+    expect(judgeCalls()).toHaveLength(1);
+  });
+
   it("the same entry is never judged twice at once (upload route vs sync hook race)", async () => {
     const s = await setup();
     const id = await submit(s, "A1", 10);

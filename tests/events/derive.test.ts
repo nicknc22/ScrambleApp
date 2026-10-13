@@ -626,11 +626,13 @@ describe("drinks batching", () => {
     const d1 = drink(A, p.A1, 1);
     const d2 = drink(A, p.A2, 1);
     const ev = one(sim.run([d1, d2], { now: 10 }), "drinks");
-    const r1 = sim.run([mk("drink.delete", { drink_id: d1.drink_id, by: p.A1 })], { now: 12 });
+    // The 10-second undo on the phone that logged it: no "removed" post.
+    const quick = (d: { at: string }) => new Date(Date.parse(d.at) + 10_000).toISOString();
+    const r1 = sim.run([mk("drink.delete", { drink_id: d1.drink_id, by: p.A1, at: quick(d1) })], { now: 12 });
     expect(r1.feed).toHaveLength(1);
     expect(r1.feed[0]).toMatchObject({ id: ev.id, deleted_at: null, updated_at: srv(12) });
     expect(r1.feed[0].payload).toMatchObject({ drink_ids: [d2.drink_id], player_ids: [p.A2], count: 1 });
-    const r2 = sim.run([mk("drink.delete", { drink_id: d2.drink_id, by: p.A2 })], { now: 14 });
+    const r2 = sim.run([mk("drink.delete", { drink_id: d2.drink_id, by: p.A2, at: quick(d2) })], { now: 14 });
     expect(r2.feed[0]).toMatchObject({ id: ev.id, deleted_at: srv(14) });
     expect(sim.active("drinks")).toEqual([]);
   });
@@ -699,7 +701,7 @@ describe("who logged it, and which hole", () => {
     const { sim, A, p } = live();
     sim.run([tee(A, 1, { at: at(0) }), tee(A, 2, { at: at(10) })], { now: 0 });
     const r1 = sim.run([drink(A, p.A1, 2, "drink", { at: at(11) })], { now: 10 });
-    const r2 = sim.run([drink(A, p.A2, 1, "drink", { at: at(12) })], { now: 20 }); // stale phone
+    const r2 = sim.run([drink(A, p.A2, 1, "drink", { at: at(13) })], { now: 20 }); // stale phone (3 min after hole 2 opened)
     expect(one(r1, "drinks").payload.hole).toBe(2);
     expect(one(r2, "drinks").payload).toMatchObject({ hole: 2, count: 2 });
   });
@@ -763,7 +765,8 @@ describe("shotgun / shot", () => {
     const { sim, A, p } = live();
     const op = drink(A, p.A1, 1, "shotgun");
     const ev = one(sim.run([tee(A, 1), op]), "shotgun");
-    const r = sim.run([mk("drink.delete", { drink_id: op.drink_id, by: p.A1 })], { now: 5000 });
+    const undo = mk("drink.delete", { drink_id: op.drink_id, by: p.A1, at: new Date(Date.parse(op.at) + 8000).toISOString() });
+    const r = sim.run([undo], { now: 5000 });
     expect(r.feed).toEqual([expect.objectContaining({ id: ev.id, deleted_at: srv(5000) })]);
   });
 });
@@ -1117,7 +1120,7 @@ describe("contest_entry / contest_lead", () => {
   it("withdrawing an entry removes its post", () => {
     const { sim, p } = live();
     const e = ctp(p.A1, 8, 15);
-    const ev = one(sim.run([e]), "contest_entry");
+    const ev = one(sim.run([e], { now: 9990 }), "contest_entry");
     const r = sim.run([mk("contest.delete", { entry_id: e.entry_id, by: p.A1 })], { now: 9999 });
     expect(r.feed).toEqual([expect.objectContaining({ id: ev.id, deleted_at: srv(9999) })]);
   });
@@ -1472,6 +1475,262 @@ describe("commissioner_override", () => {
     });
     expect(r.feed).toEqual([]);
     expect(sim.active("post")).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// After the final whistle: late syncs and commissioner fixes on a final trip
+// ---------------------------------------------------------------------------
+
+describe("after the final whistle", () => {
+  /** Two twosomes, $20 team match. Every hole a 4 except B's 18 (`b18`); both tap Round complete. */
+  function finalTrip(b18 = 5, settings: Partial<TripFixture["state"]["trip"]["settings"]> = {}) {
+    const f = makeTrip({ teams: [2, 2], settings: { team_match_ante_cents: 2000, ...settings } });
+    currentTripId = f.state.trip.id;
+    const sim = new Sim(f);
+    const A = f.team.A;
+    const B = f.team.B;
+    const p = f.player;
+    const ops: Op[] = [];
+    for (const [team, by] of [[A, p.A1], [B, p.B1]] as const) {
+      for (let h = 1; h <= 18; h++) {
+        ops.push(tee(team, h, { by }), score(team, h, team === B && h === 18 ? b18 : 4, { by }));
+      }
+    }
+    // B2's phone: a shotgun on 18 during the round, stuck in a dead zone (never synced). Client
+    // times here are explicit: the round's ops ran on the shared test clock.
+    const deadZone = drink(B, p.B2, 18, "shotgun", { at: srv(19_900) });
+    ops.push(mk("round.complete", { team_id: A, by: p.A1 }), mk("round.complete", { team_id: B, by: p.B1 }));
+    sim.run(ops, { now: 10_000 });
+    sim.run([mk("trip.finalize", {})], { now: 20_000, commish: true });
+    return { f, sim, A, B, p, deadZone };
+  }
+
+  it("rules review repro: a late shotgun that flips the champion posts RESULTS CHANGED (big, pushed), no NEW LEADER and no roasts", () => {
+    const { sim, A, B, p, deadZone } = finalTrip();
+    const before = derive(sim.state);
+    expect(before.leaderTeamIds).toEqual([A]);
+    const finalPost = sim.active("final_results")[0];
+    expect(finalPost.payload.champion_team_ids).toEqual([A]);
+
+    const r = sim.run([deadZone], { now: 20_300 }); // the phone syncs at the bar, 5 minutes later
+    expect(sim.state.trip.status).toBe("final");
+    expect(derive(sim.state).leaderTeamIds).toEqual([B]);
+    expect(ofType(r, "lead_change")).toEqual([]);
+    expect(r.roast_triggers).toEqual([]);
+    // The drink itself still posts (it happened).
+    expect(ofType(r, "shotgun")).toHaveLength(1);
+    const ev = one(r, "results_changed");
+    expect(ev).toMatchObject({ team_id: B, actor_id: p.B2, dedupe_key: null });
+    expect(ev.payload).toMatchObject({
+      champion_before: [A],
+      champion_after: [B],
+      standings_before: [
+        { team_id: A, pos_label: "1", net: 72, net_to_par: 0 },
+        { team_id: B, pos_label: "2", net: 73, net_to_par: 1 },
+      ],
+      standings_after: [
+        { team_id: B, pos_label: "1", net: 71, net_to_par: -1 },
+        { team_id: A, pos_label: "2", net: 72, net_to_par: 0 },
+      ],
+      late_op_ids: [deadZone.id],
+    });
+    const pays = (xs: unknown) => (xs as { from_player_id: string; to_player_id: string; amount_cents: number }[]).map((x) => `${x.from_player_id}>${x.to_player_id} ${x.amount_cents}`).sort();
+    expect(pays(ev.payload.payments_before)).toEqual([`${p.B1}>${p.A1} 2000`, `${p.B2}>${p.A2} 2000`].sort());
+    expect(pays(ev.payload.payments_after)).toEqual([`${p.A1}>${p.B1} 2000`, `${p.A2}>${p.B2} 2000`].sort());
+    expect(r.push_triggers).toEqual([expect.objectContaining({ feed_event_id: ev.id, audience: { kind: "all" }, collapse_key: "results_changed" })]);
+    expect(r.push_triggers[0].title).toContain("RESULTS CHANGED");
+    expect(sim.render(ev)).toMatchObject({ big: true, tone: "alert" });
+    expect(sim.render(ev).body).toContain("Team B now wins at -1 (was Team A).");
+    expect(sim.render(ev).body).toContain("Reopen");
+    // The FINAL RESULTS post stays as history.
+    expect(sim.active("final_results")).toEqual([finalPost]);
+  });
+
+  it("speccheck tie case: a late drink that only ties the match (no lead change, no NEW LEADER) still posts", () => {
+    const { sim, A, B, deadZone } = finalTrip(6); // B 74, A 72; a twosome's shotgun is worth 2
+    const r = sim.run([deadZone], { now: 20_000 + 11 * 3600 });
+    expect(ofType(r, "lead_change")).toEqual([]);
+    const ev = one(r, "results_changed");
+    expect(ev.team_id).toBeNull();
+    expect(ev.payload).toMatchObject({ champion_before: [A], champion_after: [A, B].sort(), payments_after: [] });
+    expect(sim.render(ev).body).toContain("nobody owes anybody now");
+  });
+
+  it("no change to the results: no results_changed (a late tee-shot correction)", () => {
+    const { sim, A, p } = finalTrip();
+    const r = sim.run([{ ...teeshot(A, 7, p.A2), at: srv(19_950) }], { now: 20_100 });
+    // (Only the front-nine drive-minimum callout is corrected: A2 got a drive after all.)
+    expect(types(r).filter((t) => t !== "drive_miss")).toEqual([]);
+    expect(r.push_triggers).toEqual([]);
+    expect(r.roast_triggers).toEqual([]);
+  });
+
+  it("a commissioner fix on a final trip posts the override and RESULTS CHANGED (no late ops), never NEW LEADER", () => {
+    const { sim, A, B, p } = finalTrip();
+    const r = sim.run([score(B, 1, 2, { as_commissioner: true, by: p.A1 })], { now: 21_000, commish: true });
+    expect(ofType(r, "lead_change")).toEqual([]);
+    expect(one(r, "commissioner_override").payload.summary).toBe("changed Team B hole 1 from a 4 to a 2");
+    const ev = one(r, "results_changed");
+    expect(ev.payload).toMatchObject({ champion_before: [A], champion_after: [B], late_op_ids: [] });
+    expect(sim.render(ev).body).toContain("A commissioner fix after the final whistle.");
+    expect(r.roast_triggers).toEqual([]);
+  });
+
+  it("reopen, fix and finalize again in one batch: final_results for the new finalize, lead changes stay quiet", () => {
+    const { sim, B, p } = finalTrip();
+    const r = sim.run(
+      [mk("trip.reopen", {}), score(B, 1, 2, { as_commissioner: true, by: p.A1 }), mk("trip.finalize", {})],
+      { now: 22_000, commish: true },
+    );
+    expect(ofType(r, "lead_change")).toEqual([]);
+    expect(one(r, "results_changed").payload.champion_after).toEqual([B]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Removals posted for transparency
+// ---------------------------------------------------------------------------
+
+describe("removed", () => {
+  const plus = (iso: string, sec: number) => new Date(Date.parse(iso) + sec * 1000).toISOString();
+
+  it("security review repro: a teammate deleting a drink and a closest-to-pin entry 40 minutes later posts who removed what", () => {
+    const { sim, A, p } = live();
+    sim.run([tee(A, 1), tee(A, 3)], { now: 0 });
+    const d = drink(A, p.A1, 3, "shotgun");
+    const e = ctp(p.A1, 3, 4);
+    sim.run([d, e], { now: 60 });
+    const r = sim.run(
+      [mk("drink.delete", { drink_id: d.drink_id, by: p.A2, at: plus(d.at, 2400) }), mk("contest.delete", { entry_id: e.entry_id, by: p.A2, at: plus(e.at, 2400) })],
+      { now: 2460 },
+    );
+    const removed = ofType(r, "removed");
+    expect(removed.map((x) => x.payload)).toEqual([
+      { kind: "drink", row_id: d.drink_id, owner_id: p.A1, hole: 3, detail: "shotgun", after_sec: 2400 },
+      { kind: "contest_entry", row_id: e.entry_id, owner_id: p.A1, hole: 3, detail: "ctp", distance: 4, unit: "ft", after_sec: 2400 },
+    ]);
+    for (const x of removed) expect(x).toMatchObject({ team_id: A, player_id: p.A1, actor_id: p.A2 });
+    expect(sim.render(removed[0]).body).toContain("Player A2");
+    expect(sim.render(removed[0]).body).toContain("Player A1 👑's shotgun on hole 3");
+    expect(sim.render(removed[1]).body).toContain("Player A1 👑's closest to pin entry on hole 3 (4' 0\")");
+    // The original posts still go away.
+    expect(sim.active("shotgun")).toEqual([]);
+    expect(sim.active("contest_entry")).toEqual([]);
+    expect(r.roast_triggers).toEqual([]);
+  });
+
+  it("a quick self-undo posts nothing; the same undo after 60 s, or by a teammate even right away, posts", () => {
+    const { sim, A, p } = live();
+    sim.run([tee(A, 1)], { now: 0 });
+    const mine = drink(A, p.A1, 1);
+    const slow = drink(A, p.A2, 1);
+    const theirs = drink(A, p.A3, 1);
+    sim.run([mine, slow, theirs], { now: 10 });
+    const r = sim.run(
+      [
+        mk("drink.delete", { drink_id: mine.drink_id, by: p.A1, at: plus(mine.at, 10) }),
+        mk("drink.delete", { drink_id: slow.drink_id, by: p.A2, at: plus(slow.at, 61) }),
+        mk("drink.delete", { drink_id: theirs.drink_id, by: p.A4, at: plus(theirs.at, 5) }),
+      ],
+      { now: 100 },
+    );
+    expect(ofType(r, "removed").map((x) => [x.payload.row_id, x.actor_id])).toEqual([
+      [slow.drink_id, p.A2],
+      [theirs.drink_id, p.A4],
+    ]);
+    expect(sim.render(ofType(r, "removed")[0]).body).toContain("their own drink on hole 1");
+  });
+
+  it("mulligan undo by a teammate posts; the commissioner's delete posts commissioner_override instead", () => {
+    const { sim, A, p } = live();
+    sim.run([tee(A, 1), drink(A, p.A1, 1, "shotgun"), drink(A, p.A2, 1, "shotgun")], { now: 0 });
+    const m = mk("mulligan.use", { mulligan_id: "mull-x", team_id: A, hole: 2, source: "earned", by: p.A1 });
+    sim.run([m], { now: 10 });
+    const r = sim.run([mk("mulligan.undo", { mulligan_id: "mull-x", by: p.A3, at: plus(m.at, 5) })], { now: 20 });
+    expect(one(r, "removed").payload).toMatchObject({ kind: "mulligan", owner_id: p.A1, hole: 2, detail: "earned" });
+    expect(sim.render(one(r, "removed")).body).toContain("Team A's mulligan on hole 2");
+
+    const d = drink(A, p.A2, 1);
+    sim.run([d], { now: 30 });
+    const c = sim.run([mk("drink.delete", { drink_id: d.drink_id, by: p.B1, as_commissioner: true, at: plus(d.at, 3600) })], { now: 3700, commish: true });
+    expect(ofType(c, "removed")).toEqual([]);
+    expect(one(c, "commissioner_override").payload.summary).toBe("deleted Player A2's drink on hole 1");
+  });
+
+  it("re-measuring (a submit that replaces your entry) is not a removal", () => {
+    const { sim, p } = live();
+    sim.run([ctp(p.A1, 3, 12)], { now: 0 });
+    const r = sim.run([ctp(p.A1, 3, 9, { by: p.A2 })], { now: 5000 });
+    expect(ofType(r, "removed")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AI judge verdicts carried over by a re-measure
+// ---------------------------------------------------------------------------
+
+describe("carried AI verdicts", () => {
+  /** A1's ctp on hole 3 with a photo, judged by the AI (fields + its ai_judge post, as judge.ts writes them). */
+  function judged(claim: number, estimate: number, suspicious: boolean) {
+    const ctx = live();
+    const { sim, p } = ctx;
+    const shot = photo("ctp");
+    const first = ctp(p.A1, 3, claim, { photo_path: shot });
+    sim.run([first], { now: 0 });
+    const judgeEv: FeedEvent = {
+      id: deriveId(ctx.tripId, `judge:${first.entry_id}`),
+      trip_id: ctx.tripId,
+      type: "ai_judge",
+      team_id: ctx.A,
+      player_id: p.A1,
+      actor_id: null,
+      payload: { entry_id: first.entry_id, hole: 3, claimed_ft: claim, estimate_ft: estimate, confidence: "high", suspicious, roast: "Sure." },
+      photo_path: null,
+      text: null,
+      dedupe_key: `judge:${first.entry_id}`,
+      created_at: srv(5),
+      updated_at: srv(5),
+      deleted_at: null,
+    };
+    sim.state = {
+      ...sim.state,
+      contest_entries: sim.state.contest_entries.map((e) =>
+        e.id === first.entry_id ? { ...e, ai_estimate_ft: estimate, ai_confidence: "high" as const, ai_suspicious: suspicious, ai_roast: "Sure." } : e,
+      ),
+      feed_events: [...sim.state.feed_events, judgeEv],
+    };
+    return { ...ctx, shot, first };
+  }
+
+  it("money review repro: lowering the claim on the same photo posts the AI JUDGE flag with a push and a roast", () => {
+    const { sim, p, shot, tripId } = judged(10, 12, false);
+    const edit = ctp(p.A1, 3, 2, { photo_path: shot });
+    const r = sim.run([edit], { now: 100 });
+    const entry = sim.state.contest_entries.find((e) => e.id === edit.entry_id)!;
+    expect(entry).toMatchObject({ ai_estimate_ft: 12, ai_suspicious: true });
+    const ev = one(r, "ai_judge");
+    expect(ev).toMatchObject({ id: deriveId(tripId, `judge:${edit.entry_id}`), dedupe_key: `judge:${edit.entry_id}`, player_id: p.A1, actor_id: null });
+    expect(ev.payload).toEqual({ entry_id: edit.entry_id, hole: 3, claimed_ft: 2, estimate_ft: 12, confidence: "high", suspicious: true, roast: null, carried: true });
+    expect(r.push_triggers).toEqual(expect.arrayContaining([expect.objectContaining({ feed_event_id: ev.id, collapse_key: `judge:${edit.entry_id}` })]));
+    expect(r.roast_triggers).toEqual(expect.arrayContaining([expect.objectContaining({ feed_event_id: ev.id, type: "ai_judge" })]));
+    expect(sim.render(ev).title).toContain("SUSPICIOUS");
+    // Lowering it again on the same photo: same story, no second flag.
+    const again = sim.run([ctp(p.A1, 3, 1.5, { photo_path: shot })], { now: 200 });
+    expect(ofType(again, "ai_judge")).toEqual([]);
+  });
+
+  it("an honest re-measure, or one on a photo already flagged, posts no AI JUDGE", () => {
+    const honest = judged(10, 12, false);
+    expect(ofType(honest.sim.run([ctp(honest.p.A1, 3, 11, { photo_path: honest.shot })], { now: 100 }), "ai_judge")).toEqual([]);
+    const flagged = judged(2, 12, true);
+    expect(ofType(flagged.sim.run([ctp(flagged.p.A1, 3, 2.5, { photo_path: flagged.shot })], { now: 100 }), "ai_judge")).toEqual([]);
+  });
+
+  it("the commissioner typing a ruling on the same photo is not judged", () => {
+    const { sim, p, shot } = judged(10, 12, false);
+    const r = sim.run([ctp(p.A1, 3, 2, { photo_path: shot, as_commissioner: true })], { now: 100, commish: true });
+    expect(ofType(r, "ai_judge")).toEqual([]);
   });
 });
 

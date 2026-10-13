@@ -16,6 +16,8 @@ export const MAX_POST_CHARS = 1000;
  * caused it, the ghost beer above the drink. Higher rank = shown first.
  */
 export const TYPE_RANK: Readonly<Record<FeedEventType, number>> = {
+  // A late sync changed the final results: it supersedes (and sits above) FINAL RESULTS.
+  results_changed: 105,
   final_results: 100,
   commissioner_override: 95,
   lead_change: 90,
@@ -29,6 +31,7 @@ export const TYPE_RANK: Readonly<Record<FeedEventType, number>> = {
   ai_judge: 55,
   score_notable: 50,
   score_edit: 45,
+  removed: 44,
   contest_entry: 42,
   mulligan_used: 40,
   shotgun: 38,
@@ -98,6 +101,7 @@ const SCORE_TYPES: ReadonlySet<FeedEventType> = new Set<FeedEventType>([
   "drive_miss",
   "round_complete",
   "final_results",
+  "results_changed",
 ]);
 
 const DRINK_TYPES: ReadonlySet<FeedEventType> = new Set<FeedEventType>([
@@ -109,6 +113,12 @@ const DRINK_TYPES: ReadonlySet<FeedEventType> = new Set<FeedEventType>([
   "groom_mulligan",
 ]);
 
+/** A "removed" event files under what was removed: drinks and mulligans -> Drinks, contest entries -> Scores. */
+function removedFilter(ev: FeedEvent): "scores" | "drinks" {
+  const kind = (ev.payload as Record<string, unknown> | null)?.kind;
+  return kind === "contest_entry" ? "scores" : "drinks";
+}
+
 /** Does the event belong in this filter? `tone` is the rendered tone (roasts include templated burns). */
 export function matchesFilter(ev: FeedEvent, filter: FeedFilter, tone?: FeedTone): boolean {
   switch (filter) {
@@ -117,11 +127,12 @@ export function matchesFilter(ev: FeedEvent, filter: FeedFilter, tone?: FeedTone
     case "photos":
       return !!ev.photo_path;
     case "scores":
-      return SCORE_TYPES.has(ev.type);
+      return SCORE_TYPES.has(ev.type) || (ev.type === "removed" && removedFilter(ev) === "scores");
     case "drinks":
-      return DRINK_TYPES.has(ev.type);
+      return DRINK_TYPES.has(ev.type) || (ev.type === "removed" && removedFilter(ev) === "drinks");
     case "roasts":
-      return ev.type === "roast" || tone === "roast";
+      // results_changed is roast-free by design, whatever its template tone.
+      return ev.type === "roast" || (tone === "roast" && ev.type !== "results_changed");
   }
 }
 
@@ -239,6 +250,41 @@ export function photoAspect(width: number, height: number): number {
 }
 
 // ---------------------------------------------------------------------------
+// Photos from other phones
+// ---------------------------------------------------------------------------
+
+/**
+ * Ops never wait for their photo, so other phones routinely see a photo before its bytes exist
+ * (the upload is still crawling up from the course). A photo on an event younger than this reads
+ * "on its way", not "didn't load".
+ */
+export const PHOTO_RECENT_MS = 5 * 60_000;
+
+/** Waits between automatic retries of a photo that didn't load: about 3 minutes in all. */
+export const PHOTO_RETRY_DELAYS_MS: readonly number[] = [3_000, 5_000, 8_000, 12_000, 20_000, 30_000, 45_000, 60_000];
+
+/** Wait before the next automatic retry after `failures` failed loads; null = stop (a new snapshot or a tap still retries). */
+export function photoRetryDelay(failures: number): number | null {
+  if (failures < 1) return null;
+  return PHOTO_RETRY_DELAYS_MS[failures - 1] ?? null;
+}
+
+/** A fresh snapshot retries a failed photo, but not more often than this. */
+export const PHOTO_REFRESH_RETRY_MIN_MS = 4_000;
+
+export function isRecentEvent(createdAt: string, nowMs: number): boolean {
+  const t = timeOf(createdAt);
+  return t > 0 && nowMs - t < PHOTO_RECENT_MS;
+}
+
+/** What a photo box says while there is nothing to show. */
+export function photoPlaceholder(opts: { uploadingHere: boolean; recent: boolean }): { emoji: string; text: string; state: "uploading" | "coming" | "failed" } {
+  if (opts.uploadingHere) return { emoji: "⏫", text: "Uploading…", state: "uploading" };
+  if (opts.recent) return { emoji: "⏳", text: "Photo on its way…", state: "coming" };
+  return { emoji: "📷", text: "Photo didn't load. Tap to retry.", state: "failed" };
+}
+
+// ---------------------------------------------------------------------------
 // Card look
 // ---------------------------------------------------------------------------
 
@@ -246,6 +292,8 @@ export type CardVariant =
   | "post"
   | "ai_roast"
   | "override"
+  | "results_changed"
+  | "removed"
   | "ghost"
   | "groom"
   | "final"
@@ -256,6 +304,9 @@ export type CardVariant =
   | "fanfare"
   | "info";
 
+/** Variants that always render as a big card, whatever the template says. */
+export const ALWAYS_BIG: ReadonlySet<CardVariant> = new Set<CardVariant>(["results_changed"]);
+
 /** Which card style an event gets: type-specific looks first, then the template's tone. */
 export function cardVariant(type: FeedEventType, tone: FeedTone): CardVariant {
   switch (type) {
@@ -265,6 +316,10 @@ export function cardVariant(type: FeedEventType, tone: FeedTone): CardVariant {
       return "ai_roast";
     case "commissioner_override":
       return "override";
+    case "results_changed":
+      return "results_changed";
+    case "removed":
+      return "removed";
     case "ghost_beer":
       return "ghost";
     case "groom_mulligan":

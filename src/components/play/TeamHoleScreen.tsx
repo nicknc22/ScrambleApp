@@ -35,6 +35,7 @@ import {
   type LocalMove,
 } from "./model";
 import { usePlayActions } from "./usePlayActions";
+import { useDrinkUndo } from "./drinkUndo";
 import { useStickyTop } from "./useStickyTop";
 import { HoleHeader } from "./HoleHeader";
 import { ScorePanel } from "./ScorePanel";
@@ -75,6 +76,7 @@ export function TeamHoleScreen({
   const override = needsOverride({ isCommissioner, myTeamId, teamId, tripStatus });
   const editable = canEditPlay(tripStatus, isCommissioner);
   const actions = usePlayActions({ teamId, override });
+  const drinkUndo = useDrinkUndo(teamId);
 
   const rs = view.team_round_state.find((r) => r.team_id === teamId) ?? null;
   const currentHole = derived.currentHole[teamId] ?? 1;
@@ -216,7 +218,9 @@ export function TeamHoleScreen({
     const p = advancePrompt;
     setAdvancePrompt(null);
     if (!p || choice === null) return;
-    if (choice === "confirm" && p.c.saveFirst !== null && !actions.saveScore(p.from, p.c.saveFirst, { announce: false })) return;
+    // The untouched par default only fills an empty hole: a teammate's score this phone hasn't
+    // received yet must win over a number nobody entered.
+    if (choice === "confirm" && p.c.saveFirst !== null && !actions.saveScore(p.from, p.c.saveFirst, { announce: false, ifEmpty: p.c.saveIsDefault })) return;
     // Skipping drops an unsaved stepper value too (otherwise it would hold the screen on that hole).
     clearDraft(p.from);
     expectMove(p.to);
@@ -274,8 +278,8 @@ export function TeamHoleScreen({
       <Screen>
         {(canSwitch || team.id !== myTeamId) && teamRow}
         {banners}
-        <RoundSummaryCard summary={roundSummary(standing, lines)} final={tripStatus === "final"} teamName={team.name} />
-        <ScorecardStrip lines={lines} currentHole={-1} viewing={null} unsavedHoles={unsavedHoles} onSelect={selectHole} />
+        <RoundSummaryCard summary={roundSummary(standing, lines)} final={tripStatus === "final"} teamName={team.name} canEdit={editable} />
+        <ScorecardStrip lines={lines} currentHole={-1} viewing={null} unsavedHoles={unsavedHoles} onSelect={selectHole} canEdit={editable} />
       </Screen>
     );
   }
@@ -343,14 +347,8 @@ export function TeamHoleScreen({
             </p>
           </Card>
         )}
-        <ScorePanel
-          hole={hole}
-          par={par}
-          credit={line.credit}
-          draft={draft}
-          disabled={disabled}
-          onChange={(v) => setDrafts((d) => ({ ...d, [hole]: v }))}
-        />
+        {/* Tee shots happen first, so the chips sit right under the hole; the stepper follows, next
+            to Save. Both fit the first screen of an iPhone Home Screen app (and the chips Safari's). */}
         <TeeShotPanel
           hole={hole}
           members={members}
@@ -363,7 +361,15 @@ export function TeamHoleScreen({
             actions.setTeeShot(hole, pid);
           }}
         />
-        {/* Below the tee-shot chips so it never pushes them off the first screen. */}
+        <ScorePanel
+          hole={hole}
+          par={par}
+          credit={line.credit}
+          draft={draft}
+          disabled={disabled}
+          onChange={(v) => setDrafts((d) => ({ ...d, [hole]: v }))}
+        />
+        {/* Below the chips and the stepper so it never pushes them off the first screen. */}
         {derived.teamSize[teamId] === 3 && !reminderHidden && <ThreesomeReminder onDismiss={hideReminder} />}
         <ContestPanel
           hole={hole}
@@ -386,6 +392,9 @@ export function TeamHoleScreen({
           forRound={drinksForRound(derived.drinkValues, teamId)}
           disabled={disabled}
           onLog={(pid: UUID, type: DrinkType, photo?: Blob | null) => void actions.logDrink(pid, type, photo)}
+          undo={drinkUndo.chip}
+          undonePlayerId={drinkUndo.undonePlayerId}
+          onUndo={() => void actions.undoLastDrink()}
         />
         <MulliganPanel
           hole={hole}
@@ -395,7 +404,7 @@ export function TeamHoleScreen({
           disabled={disabled}
           onUse={(source: MulliganSource) => actions.spendMulligan(source, hole)}
         />
-        <ScorecardStrip lines={lines} currentHole={currentHole} viewing={hole} unsavedHoles={unsavedHoles} onSelect={selectHole} />
+        <ScorecardStrip lines={lines} currentHole={currentHole} viewing={hole} unsavedHoles={unsavedHoles} onSelect={selectHole} canEdit={editable} />
         {editable && <ActionBarSpacer />}
       </Screen>
 

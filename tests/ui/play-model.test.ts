@@ -7,9 +7,13 @@ import {
   canEditPlay,
   clampHole,
   clampStrokes,
-  drinkBurstCopy,
+  DRINK_UNDO_MS,
+  DRINK_UNDONE_MS,
+  EMPTY_BURST,
+  burstAfterLog,
+  burstAfterUndo,
+  drinkChipDetail,
   drinkFeedback,
-  drinkUndoneCopy,
   drinksForRound,
   drinksOnHole,
   driveView,
@@ -17,6 +21,7 @@ import {
   isEditingOtherHole,
   isOwnMove,
   joinNames,
+  missingScoresNote,
   mulliganOptions,
   needsOverride,
   netPreview,
@@ -32,10 +37,14 @@ import {
   scoreName,
   scoreTone,
   stripCells,
+  stripHint,
   teamMoveNotice,
   teeCtaHole,
+  undoChipView,
+  undoneMarkFor,
   unscoredHoles,
   viewingHole,
+  type BurstDrink,
 } from "@/components/play/model";
 
 const rs = (open_hole: number | null, status: "not_started" | "playing" | "complete", started: number[] = []) => ({
@@ -269,14 +278,49 @@ describe("drinks", () => {
     expect(drinkFeedback("shot", undefined, "Al", 3)).toMatchObject({ mulligan: true, ghost: false });
   });
 
-  it("a burst of drink logs shares one undo toast: count + latest, Undo pops the latest (finding: undo toasts cover drink buttons)", () => {
-    const d = (name: string, value = 1, type: "drink" | "shotgun" | "shot" = "drink") => ({ opId: `op-${name}`, drinkId: `d-${name}`, name, type, value, hole: 6 });
-    expect(drinkBurstCopy([d("Nick")])).toMatchObject({ title: "Drink logged", message: "Nick · hole 6 · −1 stroke" });
-    expect(drinkBurstCopy([d("Nick"), d("Dave"), d("Mike")])).toMatchObject({ title: "3 drinks logged", message: "Last: Mike 🍺 −1" });
-    expect(drinkBurstCopy([d("Tom"), d("Jimmy"), d("Rob", 2)])).toMatchObject({ emoji: "👻", title: "3 drinks logged", message: "Last: Rob 👻 −2" });
-    expect(drinkBurstCopy([d("Tom"), d("Rob", 1, "shotgun")]).message).toBe("Last: Rob 🔫 −1");
-    expect(drinkUndoneCopy([d("Tom"), d("Jimmy")])).toMatchObject({ title: "Drink undone", message: "2 still logged · last: Jimmy" });
-    expect(drinkUndoneCopy([])).toMatchObject({ title: "Drink undone", message: "Pretend it never happened." });
+  it("drink undo is an inline chip on the newest drink's row, never a toast (finding: drink-undo toast over the action bar)", () => {
+    const d = (name: string, value = 1, type: BurstDrink["type"] = "drink"): BurstDrink => ({
+      opId: `op-${name}`,
+      drinkId: `d-${name}`,
+      playerId: `p-${name}`,
+      name,
+      type,
+      value,
+      hole: 6,
+    });
+    const t0 = 1_000_000;
+    expect(undoChipView(EMPTY_BURST, t0)).toBeNull();
+
+    // A burst: each log restarts the 10 s window; the chip sits on the newest drink's row.
+    let b = burstAfterLog(EMPTY_BURST, d("Tom"), t0);
+    b = burstAfterLog(b, d("Jimmy"), t0 + 4_000);
+    b = burstAfterLog(b, d("Rob", 2), t0 + 8_000);
+    const chip = undoChipView(b, t0 + 9_000)!;
+    expect(chip).toMatchObject({ playerId: "p-Rob", count: 3, remainingMs: 9_000, elapsedMs: 1_000, detail: "👻 Ghost beer −2", ariaLabel: "Undo Rob's drink" });
+    expect(chip.announce).toContain("Ghost beer!");
+    expect(undoChipView(b, t0 + 8_000 + DRINK_UNDO_MS)).toBeNull();
+
+    // Undo pops the newest; the chip moves to the previous drink with a fresh window, and the
+    // undone row gets a brief "Undone" mark.
+    const u = burstAfterUndo(b, t0 + 12_000)!;
+    expect(u.removed.drinkId).toBe("d-Rob");
+    expect(undoChipView(u.burst, t0 + 12_000)).toMatchObject({ playerId: "p-Jimmy", count: 2, remainingMs: DRINK_UNDO_MS });
+    expect(undoneMarkFor(u.burst, t0 + 12_000)).toBe("p-Rob");
+    expect(undoneMarkFor(u.burst, t0 + 12_000 + DRINK_UNDONE_MS)).toBeNull();
+    // Too late: the window closed (plus a small grace for a tap on a chip that just timed out).
+    expect(burstAfterUndo(u.burst, t0 + 12_000 + DRINK_UNDO_MS + 500)).not.toBeNull();
+    expect(burstAfterUndo(u.burst, t0 + 12_000 + DRINK_UNDO_MS + 2_000)).toBeNull();
+    expect(burstAfterUndo(EMPTY_BURST, t0)).toBeNull();
+    // A log after the window starts a new burst.
+    expect(burstAfterLog(u.burst, d("Al"), t0 + 30_000).drinks.map((x) => x.name)).toEqual(["Al"]);
+    // Undoing the last drink of a burst leaves no chip.
+    const last = burstAfterUndo(burstAfterLog(EMPTY_BURST, d("Al"), t0), t0 + 1_000)!;
+    expect(undoChipView(last.burst, t0 + 1_000)).toBeNull();
+
+    // The chip keeps the drink feedback, including the banked mulligan.
+    expect(drinkChipDetail({ type: "drink", value: 1 })).toBe("🍺 −1 stroke");
+    expect(drinkChipDetail({ type: "shotgun", value: 1 })).toBe("🔫 Mulligan banked");
+    expect(drinkChipDetail({ type: "shot", value: 2 })).toBe("👻 Mulligan banked");
   });
 
   it("no-window roasts", () => {
@@ -346,6 +390,20 @@ describe("scorecard strip and summary", () => {
     expect(row).toMatchObject({ gross: 5, net: 4, net_to_par: 0, pending_drinks: 1, pending_credit: 1 });
   });
 
+  it("missing-score copy only says 'tap to fix' to phones that can still edit (finding: final summary says tap to fix)", () => {
+    expect(missingScoresNote([], true)).toBeNull();
+    expect(missingScoresNote([13], true)).toBe("No score on hole 13. Tap it on the scorecard to fix.");
+    expect(missingScoresNote([7, 13], true)).toBe("No score on holes 7, 13. Tap them on the scorecard to fix.");
+    // A player once the trip is final (canEditPlay("final", false) === false).
+    expect(canEditPlay("final", false)).toBe(false);
+    expect(missingScoresNote([13], canEditPlay("final", false))).toBe("No score on hole 13. Ask the commissioner to fix it.");
+    expect(missingScoresNote([7, 13], false)).toBe("No score on holes 7, 13. Ask the commissioner to fix them.");
+    // The commissioner can still fix it.
+    expect(missingScoresNote([13], canEditPlay("final", true))).toContain("Tap it on the scorecard");
+    expect(stripHint(true)).toBe("Tap a hole to fix it");
+    expect(stripHint(false)).toBe("Tap a hole to see it");
+  });
+
   it("round summary from the standings row", () => {
     const f = makeTrip({ teams: [4, 3] });
     f.teeOff("A", 1);
@@ -364,6 +422,8 @@ describe("advance confirm", () => {
   it("saves a touched draft first", () => {
     const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(null, 3, 4), credit: 1 });
     expect(c.saveFirst).toBe(3);
+    // A number somebody entered is a normal (last-write-wins) save.
+    expect(c.saveIsDefault).toBe(false);
     expect(c.title).toBe("Save 3 on hole 5 and tee off hole 6?");
     expect(c.confirmLabel).toBe("Save 3 & tee off 6");
     expect(c.body).toContain("net 2");
@@ -373,15 +433,19 @@ describe("advance confirm", () => {
     const c = advanceConfirm({ fromHole: 3, to: 4, draft: scoreDraft(null, undefined, 4), credit: 1 });
     expect(c).toMatchObject({
       saveFirst: 4,
+      // Untouched default: sent fill-if-empty, so it never replaces a teammate's real score
+      // (finding: advance default par clobbers a teammate's score).
+      saveIsDefault: true,
       tone: "primary",
       title: "Par 4 on hole 3?",
       confirmLabel: "Save 4 & tee off hole 4",
       skipLabel: "Tee off without a score",
     });
     expect(c.body).toContain("net 3");
+    expect(c.body).toContain("If a teammate already saved one, theirs stays.");
     // Finishing on 18 with the par default.
     const f = advanceConfirm({ fromHole: 18, to: "complete", draft: scoreDraft(null, undefined, 5), credit: 0, otherMissing: [7, 18] });
-    expect(f).toMatchObject({ saveFirst: 5, tone: "danger", confirmLabel: "Save 5 & finish", skipLabel: "Finish without a score" });
+    expect(f).toMatchObject({ saveFirst: 5, saveIsDefault: true, tone: "danger", confirmLabel: "Save 5 & finish", skipLabel: "Finish without a score" });
     expect(f.body).toContain("Still no score on hole 7.");
     // A touched draft on an unscored hole can also be skipped; a change to a saved score can't.
     expect(advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(null, 3, 4), credit: 0 }).skipLabel).toBe("Tee off without a score");
@@ -390,7 +454,7 @@ describe("advance confirm", () => {
 
   it("plain confirm when saved", () => {
     const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(4, undefined, 4), credit: 2 });
-    expect(c).toMatchObject({ saveFirst: null, skipLabel: null, tone: "primary", title: "On the tee: hole 6?", confirmLabel: "Tee off 6" });
+    expect(c).toMatchObject({ saveFirst: null, saveIsDefault: false, skipLabel: null, tone: "primary", title: "On the tee: hole 6?", confirmLabel: "Tee off 6" });
     expect(c.body).toContain("net 2");
   });
 

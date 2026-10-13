@@ -29,6 +29,8 @@ export function embeddedMigrations(): Migration[] {
   return [
     { version: "001_init", sql: INIT_SQL },
     { version: "002_abuse_limits", sql: ABUSE_LIMITS_SQL },
+    { version: "003_photo_sha256", sql: PHOTO_SHA256_SQL },
+    { version: "004_feed_event_types", sql: FEED_EVENT_TYPES_SQL },
   ];
 }
 
@@ -415,4 +417,35 @@ create index if not exists demo_creations_created_at_idx on demo_creations (crea
 alter table pin_failures enable row level security;
 alter table photo_uploads enable row level security;
 alter table demo_creations enable row level security;
+`;
+
+/** db/migrations/003_photo_sha256.sql */
+export const PHOTO_SHA256_SQL = `-- 003_photo_sha256: the sha256 of every photo uploaded through the API. A re-upload of a stored
+-- path is accepted only with identical bytes (the phone's outbox retrying), so nobody holding the
+-- trip link can replace a closest-to-pin photo or any other evidence after the fact.
+-- Rows from before this migration have null (those are checked by size instead).
+--
+-- Idempotent, never shipped to clients (same rules as 001).
+
+alter table photo_uploads add column if not exists sha256 text;
+`;
+
+/** db/migrations/004_feed_event_types.sql */
+export const FEED_EVENT_TYPES_SQL = `-- 004_feed_event_types: two new automatic feed event types.
+--
+--   results_changed  a batch applied to a FINAL trip (a phone syncing plays from the course after
+--                    the finalize, or a commissioner fix) changed the champion, the standings or
+--                    the settle-up. Loud on purpose: people may already have paid.
+--   removed          a drink, contest entry or mulligan was removed by someone other than whoever
+--                    logged it, or long after the 10-second undo (transparency).
+--
+-- Re-creates the type CHECK constraint from 001 with the full list. Idempotent.
+
+alter table feed_events drop constraint if exists feed_events_type_check;
+alter table feed_events add constraint feed_events_type_check check (type in (
+  'post', 'round_started', 'tee_off', 'score_notable', 'score_edit', 'drinks', 'shotgun', 'shot',
+  'ghost_beer', 'mulligan_used', 'groom_mulligan', 'lead_change', 'contest_entry', 'contest_lead',
+  'ai_judge', 'drive_warning', 'drive_miss', 'commissioner_override', 'round_complete',
+  'final_results', 'results_changed', 'removed', 'roast'
+));
 `;

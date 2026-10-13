@@ -1,10 +1,14 @@
 "use client";
 // One row per teammate: drinks on the open hole, big Drink / Shotgun / Shot buttons and a camera
 // for an optional photo of the empty. Drinks always land on the team's open window.
+// The 10-second Undo for a drink is a chip in the row of the newest drink, in place of the name
+// (the avatar stays) — a spot that was never a button: nothing floats over other buttons, the
+// action bar or the tab bar, and the row's height never changes, so the next tap lands where the
+// thumb aimed.
 import { useState } from "react";
 import type { DrinkType, Player, UUID } from "@/lib/types";
 import { Avatar, BottomSheet, Card, IconCamera, PlayerName, cx } from "@/components/ui";
-import { DRINK_EMOJI, DRINK_LABEL, type PlayerDrinkCount } from "./model";
+import { DRINK_EMOJI, DRINK_LABEL, DRINK_UNDO_MS, type PlayerDrinkCount, type UndoChipView } from "./model";
 
 const TYPES: DrinkType[] = ["drink", "shotgun", "shot"];
 
@@ -26,6 +30,9 @@ export function DrinksPanel({
   forRound,
   disabled,
   onLog,
+  undo,
+  undonePlayerId,
+  onUndo,
 }: {
   members: Player[];
   teamSortOrder: number;
@@ -39,6 +46,11 @@ export function DrinksPanel({
   forRound: Record<UUID, number>;
   disabled: boolean;
   onLog: (playerId: UUID, type: DrinkType, photo?: Blob | null) => void;
+  /** Undo chip for this phone's newest drink (null = none up). */
+  undo: UndoChipView | null;
+  /** Row that just had its drink undone ("Undone" mark). */
+  undonePlayerId: UUID | null;
+  onUndo: () => void;
 }) {
   const [photoFor, setPhotoFor] = useState<Player | null>(null);
   const holeCredit = Object.values(onHole).reduce((s, c) => s + c.credit, 0);
@@ -77,17 +89,27 @@ export function DrinksPanel({
           const total = forRound[p.id] ?? 0;
           return (
             <li key={p.id} className="px-3 py-3" data-testid="drink-row" data-player={p.id}>
-              <div className="flex items-center gap-2.5">
+              <div className="flex min-h-12 items-center gap-2.5">
                 <Avatar player={p} teamSortOrder={teamSortOrder} size="md" showCrown={false} />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-lg leading-tight font-black">
-                    <PlayerName player={p} you={p.id === meId} />
+                {undo && undo.playerId === p.id ? (
+                  <UndoChip key={`${undo.drink.drinkId}:${undo.count}`} view={undo} onUndo={onUndo} />
+                ) : (
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-lg leading-tight font-black">
+                      <PlayerName player={p} you={p.id === meId} />
+                    </div>
+                    {undonePlayerId === p.id ? (
+                      <div className="text-sm font-black text-flag-dark" data-testid="drink-undone">
+                        ↩️ Drink undone
+                      </div>
+                    ) : (
+                      <div className="text-sm font-bold text-muted">
+                        {total} {total === 1 ? "drink" : "drinks"} today
+                        {c && c.ghosts > 0 ? ` · 👻×${c.ghosts}` : ""}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-sm font-bold text-muted">
-                    {total} {total === 1 ? "drink" : "drinks"} today
-                    {c && c.ghosts > 0 ? ` · 👻×${c.ghosts}` : ""}
-                  </div>
-                </div>
+                )}
                 <div className="flex shrink-0 flex-col items-center leading-none" aria-label={`${c?.count ?? 0} on hole ${targetHole}`}>
                   <span className="num text-3xl font-black" data-testid="drink-count">
                     {c?.count ?? 0}
@@ -125,6 +147,9 @@ export function DrinksPanel({
           );
         })}
       </ul>
+      <p className="sr-only" aria-live="polite">
+        {undo?.announce ?? (undonePlayerId ? "Drink undone." : "")}
+      </p>
       <DrinkPhotoSheet
         player={photoFor}
         windowOpen={windowOpen}
@@ -136,6 +161,43 @@ export function DrinksPanel({
         }}
       />
     </Card>
+  );
+}
+
+/**
+ * "↩ Undo" + what was logged ("🍺 −1 stroke", "🔫 Mulligan banked") + seconds left, with a bar that
+ * drains over the 10 seconds. Keyed by the drink, so each log (or undo) restarts it.
+ */
+function UndoChip({ view, onUndo }: { view: UndoChipView; onUndo: () => void }) {
+  const seconds = Math.max(1, Math.ceil(view.remainingMs / 1000));
+  // The bar is a CSS animation: start it once, part-way through after a remount (tab switch).
+  const [startOffset] = useState(view.elapsedMs);
+  return (
+    <button
+      type="button"
+      onClick={onUndo}
+      aria-label={view.ariaLabel}
+      className="btn relative h-12 min-w-0 flex-1 justify-start gap-1.5 overflow-hidden rounded-[14px]! border-ink bg-ink px-2.5! pb-1 text-left text-white shadow-hard-sm active:bg-muted"
+      data-testid="drink-undo"
+      data-count={view.count}
+    >
+      <span className="shrink-0 text-xl leading-none" aria-hidden="true">
+        ↩
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col leading-none">
+        <span className="text-[15px] font-black tracking-wide uppercase">Undo</span>
+        <span className="mt-0.5 truncate text-[12px] font-extrabold opacity-90">{view.detail}</span>
+      </span>
+      <span className="num shrink-0 rounded-full bg-hazard px-1.5 text-sm leading-5 font-black text-ink" aria-hidden="true">
+        {seconds}
+      </span>
+      <span className="absolute inset-x-0 bottom-0 h-1 bg-white/25" aria-hidden="true">
+        <span
+          className="toast-countdown block h-full w-full bg-hazard"
+          style={{ ["--toast-dur" as string]: `${DRINK_UNDO_MS}ms`, animationDelay: `-${startOffset}ms` }}
+        />
+      </span>
+    </button>
   );
 }
 

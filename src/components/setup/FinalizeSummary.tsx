@@ -38,6 +38,9 @@ export function FinalizeSummary({
   return (
     <span className="block" data-testid="finalize-summary">
       Pots lock, settle-up goes official and Awards unlock.
+      <span className="mt-1 block text-sm font-bold text-muted" data-testid="finalize-late-sync">
+        Phones still offline can sync plays from the round for 12 hours. If that moves the results, everyone gets a Results changed post.
+      </span>
       {clean && (
         <span className="mt-2 block text-base text-fairway-dark" data-testid="finalize-clean">
           Every team tapped Round complete, every hole has a score and no ruling is pending.

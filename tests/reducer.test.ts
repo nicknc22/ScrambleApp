@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { applyOp, applyOps, PLAY_OPS, type ApplyCtx, type ApplyResult, type Write } from "@/lib/reducer";
+import {
+  applyOp,
+  applyOps,
+  LATE_SYNC_WINDOW_MS,
+  MAX_POSTS_PER_DEMO_TRIP,
+  MAX_POSTS_PER_TRIP,
+  PLAY_OPS,
+  type ApplyCtx,
+  type ApplyResult,
+  type Write,
+} from "@/lib/reducer";
 import { COMMISSIONER_ONLY_OPS, type Op, type OpType, type RejectCode } from "@/lib/ops";
 import { deriveId } from "@/lib/ids";
 import { openWindowHole } from "@/lib/engine/windows";
+import { derive } from "@/lib/engine";
 import { ROW_TABLES, type AnyRow, type RowTable, type TripState } from "@/lib/types";
 import { at, makeTrip, type TripFixture } from "./fixtures";
 
@@ -289,6 +300,22 @@ describe("general rules", () => {
     // A final trip without a finalized_at (legacy row) never takes late ops.
     const noStamp = { ...finalized, trip: { ...finalized.trip, finalized_at: null } };
     rejected(noStamp, queued[0], "not_live");
+  });
+
+  it("late sync is bounded by arrival: 12 hours (server time) after the finalize, even a play stamped before it is not_live", () => {
+    const f = live();
+    f.teeOff("A", 18).teeOff("B", 18);
+    const finalAt = at(400);
+    const finalized = ok(f.state, mk("trip.finalize", { at: finalAt }), commish({ now: finalAt })).state;
+    const plus = (ms: number) => new Date(Date.parse(finalAt) + ms).toISOString();
+    expect(LATE_SYNC_WINDOW_MS).toBe(12 * 3600_000);
+    const queued = mk("score.set", { team_id: f.team.B, hole: 18, strokes: 2, at: at(395), by: f.player.B2 });
+    expect(run(finalized, queued, server({ now: plus(LATE_SYNC_WINDOW_MS) })).ok).toBe(true);
+    expect(rejected(finalized, queued, "not_live", server({ now: plus(LATE_SYNC_WINDOW_MS + 1000) }))).toMatch(/final/);
+    // A backdated op two days later can't rewrite the final card (security review repro).
+    rejected(finalized, { ...queued, at: plus(-1000) }, "not_live", server({ now: plus(48 * 3600_000) }));
+    // The commissioner's override still works any time.
+    ok(finalized, { ...queued, as_commissioner: true }, commish({ now: plus(48 * 3600_000) }));
   });
 
   it("the play-op list matches the documented semantics", () => {
@@ -589,6 +616,28 @@ describe("score.set", () => {
     // Equal timestamp: the later-arriving op applies.
     s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 6, at: at(220) })).state;
     expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 6, edit_count: 2 });
+  });
+
+  it("if_empty (an untouched par default) fills an empty hole only: never overwrites, never rejected", () => {
+    const f = live();
+    f.teeOff("A", 6);
+    const A = f.team.A;
+    // Empty hole: fills like a normal score.
+    let s = ok(f.state, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, by: f.player.A1 })).state;
+    expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 4, edit_count: 0, updated_by: f.player.A1 });
+    // A teammate's real score is never clobbered by a par default, whether it's newer or older.
+    s = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 7, by: f.player.A2 })).state;
+    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, by: f.player.A1 }));
+    noop(s, mk("score.set", { team_id: A, hole: 6, strokes: 4, if_empty: true, at: at(1) }));
+    expect(scoreOf(s, A, 6)).toMatchObject({ strokes: 7, edit_count: 1 });
+    // A row with only a tee shot has no strokes yet: filled. The implicit window still applies.
+    const t = ok(s, mk("teeshot.set", { team_id: A, hole: 7, player_id: f.player.A3 })).state;
+    const filled = ok(t, mk("score.set", { team_id: A, hole: 7, strokes: 5, if_empty: true })).state;
+    expect(scoreOf(filled, A, 7)).toMatchObject({ strokes: 5, tee_shot_player_id: f.player.A3 });
+    expect(filled.team_round_state.find((rs) => rs.team_id === A)!.open_hole).toBe(7);
+    // The commissioner's override ignores the flag.
+    const fixed = ok(s, mk("score.set", { team_id: A, hole: 6, strokes: 5, if_empty: true, as_commissioner: true }), commish()).state;
+    expect(scoreOf(fixed, A, 6)).toMatchObject({ strokes: 5, edit_count: 2 });
   });
 
   it("a commissioner override beats LWW (e.g. a phone whose clock is in the future)", () => {
@@ -999,6 +1048,16 @@ describe("mulligan.use", () => {
     });
   });
 
+  it("a shotgun logged after the team's Round complete (synced before it) banks nothing", () => {
+    const f = live();
+    f.teeOff("A", 18).complete("A", 300);
+    f.drink("A", "A1", 18, "shotgun", { min: 310 }); // the clubhouse, 10 minutes later
+    // A commissioner fix-up is checked against the same bank.
+    expect(rejected(f.state, mulliganOp(f, "A", "earned", 18, { as_commissioner: true, at: at(299) }), "conflict", commish())).toMatch(/bank/);
+    f.drink("A", "A2", 18, "shot", { min: 299 });
+    ok(f.state, mulliganOp(f, "A", "earned", 18, { as_commissioner: true, at: at(299) }), commish());
+  });
+
   it("earned needs an active shotgun/shot in the team's bank", () => {
     const f = live();
     expect(rejected(f.state, mulliganOp(f, "A", "earned"), "conflict")).toMatch(/bank/);
@@ -1197,7 +1256,7 @@ describe("contest.submit", () => {
     const both = submit(f, "C1", 4, "ld", 287, { simulated: true, low_accuracy: true });
     expect(entryOf(ok(f.state, both).state, both.entry_id)!.flag_reason).toBe("Simulated GPS");
     const commishSim = submit(f, "C1", 4, "ld", 287, { simulated: true, as_commissioner: true });
-    expect(entryOf(ok(f.state, commishSim, commish()).state, commishSim.entry_id)).toMatchObject({ status: "ok", flag_reason: null });
+    expect(entryOf(ok(f.state, commishSim, commish()).state, commishSim.entry_id)).toMatchObject({ status: "overridden", flag_reason: null });
     const demo = { ...f.state, trip: { ...f.state.trip, is_demo: true } };
     const demoSim = submit(f, "C1", 4, "ld", 287, { simulated: true });
     expect(entryOf(ok(demo, demoSim).state, demoSim.entry_id)).toMatchObject({ status: "ok", flag_reason: null });
@@ -1206,6 +1265,23 @@ describe("contest.submit", () => {
     expect(entryOf(ok(f.state, notSim).state, notSim.entry_id)!.status).toBe("ok");
     const ctpSim = submit(f, "C1", 3, "ctp", 12, { simulated: true });
     expect(entryOf(ok(f.state, ctpSim).state, ctpSim.entry_id)!.status).toBe("ok");
+  });
+
+  it("a commissioner-entered distance is official as typed: stored 'overridden', so no range check or GPS flag (speccheck review)", () => {
+    const f = live([4, 3, 3], { settings: { ld_min_yd: 100, ld_max_yd: 400 } });
+    // "Add an entry" in Commissioner Tools: no GPS, no photo, a 405 yd bomb.
+    const typed = submit(f, "B1", 4, "ld", 405, { by: null, as_commissioner: true, lat: null, lng: null });
+    const s = ok(f.state, typed, commish()).state;
+    expect(entryOf(s, typed.entry_id)).toMatchObject({ status: "overridden", flag_reason: null, distance_value: 405 });
+    const view = derive(s).contests.find((c) => c.hole === 4)!.entries.find((v) => v.entry.id === typed.entry_id)!;
+    expect(view).toMatchObject({ distance: 405, valid: true, invalid_reason: null });
+    // Weak GPS on the commissioner's own measurement doesn't route it back to his review queue.
+    const weak = submit(f, "B1", 4, "ld", 300, { as_commissioner: true, low_accuracy: true });
+    expect(entryOf(ok(f.state, weak, commish()).state, weak.entry_id)).toMatchObject({ status: "overridden", flag_reason: null });
+    // The same drive entered by the player is range-checked by the engine as before.
+    const own = submit(f, "B1", 4, "ld", 405, { lat: null, lng: null });
+    const mine = derive(ok(f.state, own).state).contests.find((c) => c.hole === 4)!.entries.find((v) => v.entry.id === own.entry_id)!;
+    expect(mine).toMatchObject({ valid: false, invalid_reason: "Out of range: 405 yd" });
   });
 
   it("re-measuring replaces the player's earlier entry on that hole only", () => {
@@ -1252,7 +1328,7 @@ describe("contest.submit", () => {
     // The commissioner enters a CTP for another team's player, even once final or after the
     // group finished (Day-of fallback: paper scorecard, phone died).
     const fix = submit(f, "B2", 8, "ctp", 6, { by: null, as_commissioner: true });
-    expect(entryOf(ok(f.state, fix, commish()).state, fix.entry_id)).toMatchObject({ player_id: f.player.B2, team_id: f.team.B, status: "ok" });
+    expect(entryOf(ok(f.state, fix, commish()).state, fix.entry_id)).toMatchObject({ player_id: f.player.B2, team_id: f.team.B, status: "overridden" });
     const done = makeTrip({ teams: [4, 3, 3], status: "final" });
     done.teeOff("B", 18).complete("B");
     const late = submit(done, "B2", 4, "ld", 280, { by: done.player.A1, as_commissioner: true });
@@ -1399,6 +1475,27 @@ describe("post.create", () => {
       updated_at: NOW,
       deleted_at: null,
     });
+  });
+
+  it("posts are capped per trip (real 1500, demo 150): past that, a funny conflict; resends stay idempotent", () => {
+    const f = live();
+    const first = ok(f.state, mk("post.create", { event_id: "post-cap-0", text: "first", photo_path: null, by: f.player.A1 })).state;
+    const row = first.feed_events.find((e) => e.id === "post-cap-0")!;
+    // Deleted posts still count (they're still rows in the database).
+    const full = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ ...row, id: `post-cap-${i}`, deleted_at: i % 10 === 0 ? NOW : null }));
+    const real = { ...first, feed_events: full(MAX_POSTS_PER_TRIP) };
+    expect(MAX_POSTS_PER_TRIP).toBe(1500);
+    expect(rejected(real, mk("post.create", { event_id: "post-new", text: "one more", photo_path: null, by: f.player.A1 }), "conflict")).toMatch(/1500/);
+    noop(real, mk("post.create", { event_id: "post-cap-7", text: "resend", photo_path: null, by: f.player.A1 }));
+    ok({ ...first, feed_events: full(MAX_POSTS_PER_TRIP - 1) }, mk("post.create", { event_id: "post-ok", text: "last one", photo_path: null }));
+    // Automatic events don't count toward it.
+    const autos = full(MAX_POSTS_PER_TRIP - 1).concat({ ...row, id: "auto-1", type: "drinks" });
+    ok({ ...first, feed_events: autos }, mk("post.create", { event_id: "post-ok2", text: "still fine", photo_path: null }));
+    // Demo trips are public: 150.
+    expect(MAX_POSTS_PER_DEMO_TRIP).toBe(150);
+    const demo = { ...first, trip: { ...first.trip, is_demo: true }, feed_events: full(MAX_POSTS_PER_DEMO_TRIP) };
+    expect(rejected(demo, mk("post.create", { event_id: "post-demo", text: "spam", photo_path: null }), "conflict")).toMatch(/150/);
   });
 
   it("a photo alone is enough; blank text becomes null", () => {

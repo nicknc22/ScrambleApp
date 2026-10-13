@@ -1,5 +1,6 @@
 "use client";
 // The big strokes stepper with a live net preview ("4 − 2 🍺 = 2 net"). Save lives in the bottom bar.
+// Kept compact: it sits under the tee-shot chips and should still clear the action bar on a phone.
 import { Card, Stepper, cx } from "@/components/ui";
 import { MAX_STROKES, MIN_STROKES, netPreview, scoreName, type ScoreDraftView } from "./model";
 
@@ -25,11 +26,11 @@ export function ScorePanel({
   const over = draft.value - par >= 2;
   return (
     <Card padded={false} className="overflow-hidden border-ink" data-testid="score-panel">
-      <div className="flex items-center justify-between gap-2 border-b-2 border-line px-4 py-1.5">
-        <h2 className="text-lg font-black uppercase">Team score</h2>
+      <div className="flex items-center justify-between gap-2 border-b-2 border-line px-4 py-1">
+        <h2 className="min-w-0 truncate text-lg font-black uppercase">Team score</h2>
         <span
           className={cx(
-            "rounded-full border-2 px-2.5 py-0.5 text-sm font-black uppercase",
+            "shrink-0 rounded-full border-2 px-2.5 py-0.5 text-sm font-black whitespace-nowrap uppercase",
             draft.dirty ? "border-ink bg-hazard text-ink" : "border-fairway-dark bg-fairway text-white",
           )}
           data-testid="score-status"
@@ -37,20 +38,22 @@ export function ScorePanel({
           {draft.dirty ? (draft.saved === null ? "Not saved" : "Unsaved change") : "✓ Saved"}
         </span>
       </div>
-      <div className="px-3 pt-2.5 pb-2.5">
+      <div className="px-3 pt-2 pb-2">
         <Stepper
           value={draft.value}
           onChange={onChange}
           min={MIN_STROKES}
           max={MAX_STROKES}
-          label={`Strokes · hole ${hole}`}
+          // The hole header right above names the hole; the label only names the stepper for screen
+          // readers (a visible line would cost the first screen its net preview).
+          label={<span className="sr-only">Strokes · hole {hole}</span>}
           disabled={disabled}
           decrementLabel="One fewer stroke"
           incrementLabel="One more stroke"
           hint={<span className={cx("font-black uppercase", under ? "text-fairway-dark" : over ? "text-flag-dark" : "text-muted")}>{name}</span>}
         />
         <div
-          className="num mt-2 flex items-center justify-center gap-2 rounded-2xl border-2 border-beer-dark bg-beer-soft px-3 py-1.5 text-center text-xl font-black"
+          className="num mt-1.5 flex items-center justify-center gap-2 rounded-2xl border-2 border-beer-dark bg-beer-soft px-3 py-0.5 text-center text-xl font-black"
           data-testid="net-preview"
           aria-live="polite"
         >

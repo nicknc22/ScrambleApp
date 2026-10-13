@@ -2,24 +2,24 @@
 //   GET                → {is_commissioner}
 //   POST {pin}         → verify against the trip's PIN hash, set the 12 h cookie + trust this
 //                        device for 60 days → {ok: true}
-//   DELETE             → lock: clear both cookies on this device → {ok: true}
+//   DELETE             → lock: clear the commissioner cookie → {ok: true}. The device stays
+//                        trusted (that grants nothing without the PIN; see auth.ts).
 //   PUT {pin, new_pin} → change the trip's PIN (4-12 digits) after verifying the current one.
 //                        Every cookie issued for the old PIN stops working; this device gets new ones.
-// Wrong PINs are throttled in the database (per client, per trip); a trusted device only answers
-// to its own bucket, so other people's wrong guesses can't lock the commissioner out.
+// Wrong PINs are throttled in the database (per client; per trip as a slow cap with short waits),
+// each attempt reserved before the PIN is checked so bursts can't sneak extra guesses in. A trusted
+// device only answers to its own bucket, so other people's wrong guesses can't lock it out.
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin";
 import {
+  attemptPin,
   clearCommissionerCookie,
-  clearTrustedDeviceCookie,
   clientKey,
   commissionerSessionHeaders,
   deviceClientKey,
   hashPin,
   isCommissioner,
   isValidPin,
-  pinRetryAfter,
-  recordPinFailure,
-  recordPinSuccess,
+  retryAfterText,
   trustedDeviceId,
   verifyPin,
 } from "@/lib/server/auth";
@@ -45,7 +45,7 @@ function wrongPin(): Response {
 }
 
 function throttled(seconds: number): Response {
-  return errorJson(429, "Easy, tiger. Too many wrong PINs. Wait a few minutes.", {
+  return errorJson(429, `Easy, tiger. Too many wrong PINs. Try again in ${retryAfterText(seconds)}.`, {
     code: "throttled",
     retry_after: seconds,
   });
@@ -53,19 +53,17 @@ function throttled(seconds: number): Response {
 
 /**
  * Throttle + verify. Returns null when the PIN is right, else the error Response. The throttle is
- * checked before the PIN, so a throttled request learns nothing about its PIN.
+ * checked (and the attempt reserved) before the PIN, so a throttled request learns nothing about
+ * its PIN and a burst can't check more PINs than the limit.
  */
 async function checkPin(request: Request, t: TripContext, pin: unknown): Promise<Response | null> {
   const device = trustedDeviceId(request, t.trip.id, t.pinHash);
   const client = device ? deviceClientKey(device) : clientKey(request);
-  const wait = await pinRetryAfter(t.db, t.trip.id, client, { trusted: device !== null });
-  if (wait > 0) return throttled(wait);
-  if (!(await verifyPin(typeof pin === "string" ? pin.trim() : pin, t.pinHash))) {
-    await recordPinFailure(t.db, t.trip.id, client);
-    return wrongPin();
-  }
-  await recordPinSuccess(t.db, t.trip.id, client);
-  return null;
+  const attempt = await attemptPin(t.db, t.trip.id, client, () => verifyPin(typeof pin === "string" ? pin.trim() : pin, t.pinHash), {
+    trusted: device !== null,
+  });
+  if (attempt.status === "throttled") return throttled(attempt.retryAfter);
+  return attempt.status === "ok" ? null : wrongPin();
 }
 
 export const GET = withErrors(async (request: Request, ctx: Ctx) => {
@@ -87,16 +85,9 @@ export const POST = withErrors(async (request: Request, ctx: Ctx) => {
 export const DELETE = withErrors(async (request: Request, ctx: Ctx) => {
   const t = await loadTripOr404((await ctx.params).code);
   if (t instanceof Response) return t;
-  return json(
-    { ok: true, is_commissioner: false },
-    {
-      headers: [
-        ["Set-Cookie", clearCommissionerCookie(request, t.trip.id)],
-        // A phone the commissioner borrowed and locked again shouldn't stay trusted.
-        ["Set-Cookie", clearTrustedDeviceCookie(request, t.trip.id)],
-      ],
-    },
-  );
+  // The trusted-device cookie stays: Lock is "powers off", not "forget this phone", and dropping it
+  // would let other people's wrong guesses keep the commissioner's own phone waiting.
+  return json({ ok: true, is_commissioner: false }, { headers: [["Set-Cookie", clearCommissionerCookie(request, t.trip.id)]] });
 });
 
 export const PUT = withErrors(async (request: Request, ctx: Ctx) => {

@@ -12,7 +12,10 @@
 //      confidence !== "low" (the model's own opinion is ignored)
 //   4. under the trip lock, if the entry is still active and unjudged: write ai_estimate_ft /
 //      ai_confidence / ai_suspicious / ai_roast (status untouched: the AI never changes the
-//      official distance) and insert an ai_judge feed event (dedupe "judge:<entry_id>")
+//      official distance) and insert an ai_judge feed event (dedupe "judge:<entry_id>"), unless
+//      this photo's verdict (same suspicious or not) was already posted for another entry
+//      (photoVerdictPosted: an undo restoring an edit, a pulled-and-re-entered claim that didn't
+//      change the story): one photo, one story
 //   5. broadcast; when suspicious, push the flag to everyone and run the roast pipeline on it.
 // Skips silently when AI is off, there's no photo, the call fails / times out (8 s), the entry
 // was deleted or re-measured meanwhile, or the trip used up its judge budget (cost cap: 60 calls
@@ -21,7 +24,7 @@ import { DEFAULT_SETTINGS, type AiConfidence, type ContestEntry, type FeedEvent,
 import type { Op } from "@/lib/ops";
 import { derive } from "@/lib/engine";
 import { formatFeetInches } from "@/lib/engine/format";
-import { pushTriggerFor, roastTriggerFor } from "@/lib/events/derive";
+import { photoVerdictPosted, pushTriggerFor, roastTriggerFor } from "@/lib/events/derive";
 import type { AiJudgePayload } from "@/lib/events/payloads";
 import { deriveId } from "@/lib/ids";
 import { parsePhotoPath } from "@/lib/photos";
@@ -82,8 +85,11 @@ export type JudgeSkip =
   | "entry_gone"
   | "error";
 export type JudgeOutcome =
-  /** reused: the photo's earlier verdict (another entry), no AI call. */
-  | { status: "written"; event: FeedEvent; suspicious: boolean; estimate_ft: number; confidence: AiConfidence; reused: boolean }
+  /**
+   * reused: the photo's earlier verdict (another entry), no AI call. posted: the ai_judge event was
+   * inserted (false when this photo's verdict was already announced; the entry is still judged).
+   */
+  | { status: "written"; event: FeedEvent; suspicious: boolean; estimate_ft: number; confidence: AiConfidence; reused: boolean; posted: boolean }
   | { status: "skipped"; reason: JudgeSkip };
 
 const skip = (reason: JudgeSkip): JudgeOutcome => ({ status: "skipped", reason });
@@ -245,6 +251,7 @@ async function judgeEntryNow(tripId: UUID, entryId: UUID, deps: JudgeDeps): Prom
     const settings = { ...DEFAULT_SETTINGS, ...(state.trip.settings ?? {}) };
     const claimed = entry.distance_value;
     const suspicious = isSuspicious(claimed, verdict.estimate_ft, verdict.confidence, settings.judge_suspicious_ratio);
+    const posted = !photoVerdictPosted(state.feed_events, state.contest_entries, entry.photo_path, suspicious);
     const at = (deps.now ?? new Date()).toISOString();
     const payload: AiJudgePayload = {
       entry_id: entry.id,
@@ -279,8 +286,10 @@ async function judgeEntryNow(tripId: UUID, entryId: UUID, deps: JudgeDeps): Prom
         [entry.id, tripId],
       );
       if (live.length === 0) return false;
-      const inserted = await insertFeedEvents(t, tripId, [event]);
-      if (inserted.length === 0) return false;
+      if (posted) {
+        const inserted = await insertFeedEvents(t, tripId, [event]);
+        if (inserted.length === 0) return false;
+      }
       await t.query(
         `update contest_entries
             set ai_estimate_ft = $3, ai_confidence = $4, ai_suspicious = $5, ai_roast = $6, updated_at = $7
@@ -293,7 +302,7 @@ async function judgeEntryNow(tripId: UUID, entryId: UUID, deps: JudgeDeps): Prom
 
     await (deps.broadcast ?? broadcastTripChanged)(tripId).catch(() => false);
 
-    if (suspicious) {
+    if (suspicious && posted) {
       const judged: ContestEntry = { ...entry, ai_estimate_ft: verdict.estimate_ft, ai_confidence: verdict.confidence, ai_suspicious: true, ai_roast: verdict.roast, updated_at: at };
       const fresh = {
         ...state,
@@ -313,7 +322,7 @@ async function judgeEntryNow(tripId: UUID, entryId: UUID, deps: JudgeDeps): Prom
         await handleRoastTrigger(tripId, rt, { db, client, timeoutMs: deps.timeoutMs, broadcast: deps.broadcast, now: deps.now });
       }
     }
-    return { status: "written", event, suspicious, estimate_ft: verdict.estimate_ft, confidence: verdict.confidence, reused };
+    return { status: "written", event, suspicious, estimate_ft: verdict.estimate_ft, confidence: verdict.confidence, reused, posted };
   } catch (e) {
     console.error(`[judge] entry ${entryId} of trip ${tripId} failed`, e);
     return skip("error");

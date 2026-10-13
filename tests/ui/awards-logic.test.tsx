@@ -139,7 +139,7 @@ describe("recap model", () => {
       }
       f.complete(t);
     }
-    f.drink("A", "A1", 2, "shotgun");
+    f.drink("A", "A1", 2, "shotgun", { min: 3 }); // during the round (a drink after Round complete never counts)
     const model = buildRecapModel(f.state, derive(f.state));
     expect(model.final).toBe(true);
     expect(model.tripName).toBe("Nick's Last Stand");

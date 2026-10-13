@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compareDrinkOrder, computeDrinkValues, creditFor } from "@/lib/engine/drinks";
 import { computeTeamHoles } from "@/lib/engine/scoring";
-import { computeRoster } from "@/lib/engine";
+import { computeRoster, derive } from "@/lib/engine";
 import type { DrinkValue } from "@/lib/engine/types";
 import type { Drink, TripState } from "@/lib/types";
 import { at, makeTrip, type TripFixture } from "../fixtures";
@@ -252,5 +252,53 @@ describe("computeDrinkValues — ordering and recompute", () => {
     for (let i = 0; i < 3; i++) f.drink("A", "A1", 1);
     const v = computeDrinkValues(f.state, {});
     expect(Object.values(v).map((x) => x.value)).toEqual([1, 1, 1]);
+  });
+});
+
+describe("drinks after Round complete (rules review: order-independent)", () => {
+  /** Threesome B plays 18 fours and taps Round complete at minute 300. */
+  function finished() {
+    const f = makeTrip({ teams: [3, 3] });
+    for (let h = 1; h <= 18; h++) {
+      f.teeOff("B", h, h * 10);
+      f.score("B", h, 4);
+    }
+    f.complete("B", 300);
+    return f;
+  }
+
+  it("a drink logged more than 2 minutes after the team's completed_at never counts: no credit, no drinking board, no mulligan", () => {
+    const f = finished();
+    const onTime = f.drink("B", "B1", 18, "drink", { min: 299 });
+    const graced = f.drink("B", "B2", 18, "drink", { min: 302 });
+    const bar = f.drink("B", "B2", 18, "drink", { min: 310 });
+    const barShotgun = f.drink("B", "B3", 18, "shotgun", { min: 312 });
+    const v = values(f.state);
+    expect(Object.keys(v).sort()).toEqual([onTime, graced].sort());
+    expect(v[bar]).toBeUndefined();
+    expect(v[barShotgun]).toBeUndefined();
+    const d = derive(f.state);
+    expect(d.teamHoles[f.team.B][17]).toMatchObject({ drinks: 2, credit: 2, net: 2 });
+    expect(d.standings.find((r) => r.team_id === f.team.B)).toMatchObject({ drinks: 2, credit: 2, pending_drinks: 0 });
+    expect(d.drinkers.find((r) => r.player_id === f.player.B2)).toMatchObject({ total: 1 });
+    expect(d.drinkers.find((r) => r.player_id === f.player.B3)).toMatchObject({ total: 0, shotguns: 0 });
+    expect(d.mulligans[f.team.B]).toMatchObject({ earned: 0, available: 0 });
+  });
+
+  it("is decided by the times, not by which op synced first: the same drinks before the completion lands count until it does", () => {
+    const f = finished();
+    // The scorer's Round complete hasn't synced yet: B still shows 18 open.
+    const rsBefore = f.state.team_round_state.map((rs) => (rs.team_id === f.team.B ? { ...rs, status: "playing" as const, completed_at: null } : rs));
+    const bar = f.drink("B", "B2", 18, "drink", { min: 310 });
+    expect(values({ ...f.state, team_round_state: rsBefore })[bar]).toBeDefined();
+    // Once it lands, the clubhouse beer drops out.
+    expect(values(f.state)[bar]).toBeUndefined();
+  });
+
+  it("a commissioner-pinned drink (moved or back-filled) still counts after the round", () => {
+    const f = finished();
+    const pinned = f.drink("B", "B1", 18, "drink", { min: 400 });
+    f.state = { ...f.state, drinks: f.state.drinks.map((x) => (x.id === pinned ? { ...x, moved_from_hole: 18 } : x)) };
+    expect(values(f.state)[pinned]).toMatchObject({ hole: 18, value: 1 });
   });
 });
