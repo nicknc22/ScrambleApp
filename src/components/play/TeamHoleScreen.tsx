@@ -76,11 +76,12 @@ export function TeamHoleScreen({
   const override = needsOverride({ isCommissioner, myTeamId, teamId, tripStatus });
   const editable = canEditPlay(tripStatus, isCommissioner);
   const actions = usePlayActions({ teamId, override });
-  const drinkUndo = useDrinkUndo(teamId);
 
   const rs = view.team_round_state.find((r) => r.team_id === teamId) ?? null;
   const currentHole = derived.currentHole[teamId] ?? 1;
   const openWindow = derived.openWindow[teamId] ?? null;
+  // The drinks panel's Undo chip (drinks count on the open window, else the current hole).
+  const drinkUndo = useDrinkUndo(teamId, openWindow ?? currentHole);
   const roundComplete = rs?.status === "complete";
   const finished = roundComplete || tripStatus === "final";
   const lines = useMemo(() => derived.teamHoles[teamId] ?? [], [derived.teamHoles, teamId]);

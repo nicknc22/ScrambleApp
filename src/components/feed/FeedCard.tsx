@@ -14,6 +14,7 @@ const BOX: Record<CardVariant, string> = {
   ai_roast: "border-ink bg-ink text-white",
   override: "border-ink bg-hazard-soft",
   results_changed: "border-flag-dark bg-flag text-white",
+  // Transparency, not a scandal: a quiet dashed card (the template says who removed what).
   removed: "border-line-strong border-dashed bg-sand",
   ghost: "border-ghost-dark bg-ghost text-white",
   groom: "border-ink bg-gold text-ink",
@@ -129,11 +130,6 @@ export const FeedCard = memo(function FeedCard({
               data-testid="results-changed-badge"
             >
               🚨 Final results changed
-            </span>
-          )}
-          {variant === "removed" && (
-            <span className="mb-1 inline-flex items-center gap-1 rounded-full border-2 border-line-strong bg-paper px-2 py-0.5 text-[11px] font-black tracking-wider text-muted uppercase">
-              🗑️ Removed
             </span>
           )}
           <h3

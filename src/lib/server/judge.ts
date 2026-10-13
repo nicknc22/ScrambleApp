@@ -317,7 +317,8 @@ async function judgeEntryNow(tripId: UUID, entryId: UUID, deps: JudgeDeps): Prom
           console.error("[judge] flag push failed", e);
         }
       }
-      const rt = deps.roast !== false ? roastTriggerFor(event) : null;
+      // No roasts once the round is final (CLAUDE.md: late syncs after finalize are loud, not roasted).
+      const rt = deps.roast !== false && state.trip.status !== "final" ? roastTriggerFor(event) : null;
       if (rt) {
         await handleRoastTrigger(tripId, rt, { db, client, timeoutMs: deps.timeoutMs, broadcast: deps.broadcast, now: deps.now });
       }

@@ -30,7 +30,7 @@ export interface DrinkUndoView {
 }
 
 /** The team's Undo chip, re-evaluated a few times a second while one is up (for the countdown). */
-export function useDrinkUndo(teamId: UUID): DrinkUndoView {
+export function useDrinkUndo(teamId: UUID, targetHole: number): DrinkUndoView {
   const burst = useSyncExternalStore(
     drinkBursts.subscribe,
     () => drinkBursts.get(teamId),
@@ -53,5 +53,5 @@ export function useDrinkUndo(teamId: UUID): DrinkUndoView {
   }, [burst]);
   // `now` lags a fresh log by up to one tick; never read the burst as older than it is.
   const at = Math.max(now, burst.at, burst.undone?.at ?? 0);
-  return { chip: undoChipView(burst, at), undonePlayerId: undoneMarkFor(burst, at) };
+  return { chip: undoChipView(burst, at, targetHole), undonePlayerId: undoneMarkFor(burst, at) };
 }

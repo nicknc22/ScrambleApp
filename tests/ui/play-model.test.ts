@@ -311,8 +311,12 @@ describe("drinks", () => {
     expect(burstAfterUndo(u.burst, t0 + 12_000 + DRINK_UNDO_MS + 500)).not.toBeNull();
     expect(burstAfterUndo(u.burst, t0 + 12_000 + DRINK_UNDO_MS + 2_000)).toBeNull();
     expect(burstAfterUndo(EMPTY_BURST, t0)).toBeNull();
-    // A log after the window starts a new burst.
+    // A log after the window, or on another hole, starts a new burst.
     expect(burstAfterLog(u.burst, d("Al"), t0 + 30_000).drinks.map((x) => x.name)).toEqual(["Al"]);
+    expect(burstAfterLog(u.burst, { ...d("Al"), hole: 7 }, t0 + 13_000).drinks.map((x) => x.name)).toEqual(["Al"]);
+    // A drink on a hole the team has since left says which hole it was on.
+    expect(undoChipView(u.burst, t0 + 12_000, 7)?.detail).toBe("🍺 −1 stroke · hole 6");
+    expect(undoChipView(u.burst, t0 + 12_000, 6)?.detail).toBe("🍺 −1 stroke");
     // Undoing the last drink of a burst leaves no chip.
     const last = burstAfterUndo(burstAfterLog(EMPTY_BURST, d("Al"), t0), t0 + 1_000)!;
     expect(undoChipView(last.burst, t0 + 1_000)).toBeNull();

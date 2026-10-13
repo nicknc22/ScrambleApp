@@ -177,20 +177,20 @@ function UndoChip({ view, onUndo }: { view: UndoChipView; onUndo: () => void }) 
       type="button"
       onClick={onUndo}
       aria-label={view.ariaLabel}
-      className="btn relative h-12 min-w-0 flex-1 justify-start gap-1.5 overflow-hidden rounded-[14px]! border-ink bg-ink px-2.5! pb-1 text-left text-white shadow-hard-sm active:bg-muted"
+      className="btn relative h-12 min-w-0 flex-1 flex-col items-stretch justify-center gap-0.5 overflow-hidden rounded-[14px]! border-ink bg-ink px-2.5! pb-1 text-left text-white shadow-hard-sm active:bg-muted"
       data-testid="drink-undo"
       data-count={view.count}
     >
-      <span className="shrink-0 text-xl leading-none" aria-hidden="true">
-        ↩
-      </span>
-      <span className="flex min-w-0 flex-1 flex-col leading-none">
+      <span className="flex items-center gap-1.5 leading-none">
+        <span className="text-lg leading-none" aria-hidden="true">
+          ↩
+        </span>
         <span className="text-[15px] font-black tracking-wide uppercase">Undo</span>
-        <span className="mt-0.5 truncate text-[12px] font-extrabold opacity-90">{view.detail}</span>
+        <span className="num ml-auto shrink-0 rounded-full bg-hazard px-1.5 text-[13px] leading-[18px] font-black text-ink" aria-hidden="true">
+          {seconds}
+        </span>
       </span>
-      <span className="num shrink-0 rounded-full bg-hazard px-1.5 text-sm leading-5 font-black text-ink" aria-hidden="true">
-        {seconds}
-      </span>
+      <span className="truncate text-[11px] leading-tight font-extrabold opacity-90">{view.detail}</span>
       <span className="absolute inset-x-0 bottom-0 h-1 bg-white/25" aria-hidden="true">
         <span
           className="toast-countdown block h-full w-full bg-hazard"

@@ -21,6 +21,7 @@ export function ContestsScreen() {
   const view = useClientState((s) => s.view);
   const meId = useClientState((s) => s.meId);
   const isCommissioner = useClientState((s) => s.isCommissioner);
+  const serverTime = useClientState((s) => s.snapshot?.meta.server_time ?? null);
   // Re-render when a queued photo finishes uploading (photoUrl switches from blob: to remote).
   useClientState((s) => s.pendingCount);
   const nav = useShellNav();
@@ -99,6 +100,7 @@ export function ContestsScreen() {
                     myEntry={entryOf(c, meId)}
                     photoUrl={photoUrl}
                     current={myHole === c.hole}
+                    photoRefreshKey={serverTime}
                     onEnter={() => setSheet({ type: c.type, hole: c.hole })}
                     onOpenPhoto={(src, caption) => setViewer({ src, caption })}
                   />

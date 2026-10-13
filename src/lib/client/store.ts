@@ -45,6 +45,7 @@ import {
   setLastTripCode,
   type StorageLike,
 } from "./identity";
+import { ServerClock } from "./clock";
 import { describeOp, loadSyncIssues, MAX_SYNC_ISSUES, saveSyncIssues, type SyncIssue } from "./sync-issues";
 
 export type PhotoKind = "drinks" | "ld" | "ctp" | "posts";
@@ -246,6 +247,8 @@ export class TripStore {
   private readonly inFlight = new Set<UUID>();
 
   private meId: UUID | null = null;
+  /** Corrects op timestamps when this phone's clock is clearly off (see clock.ts). */
+  private clock!: ServerClock;
   private isCommissioner = false;
   private navOnline = true;
   private netOk = true;
@@ -340,6 +343,7 @@ export class TripStore {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.clock = new ServerClock(this.d.storage);
     const storedMe = loadMe(this.code, this.d.storage);
     if (storedMe) this.meId = storedMe;
     if (loadCommissionerHint(this.code, this.d.storage)) this.isCommissioner = true;
@@ -533,7 +537,8 @@ export class TripStore {
   dispatch(input: OpInput): DispatchResult {
     if (!this.isLoaded()) return { ok: false, code: "invalid", reason: LOADING_REASON };
     const nowMs = this.d.now();
-    const op = { ...input, id: this.d.newId(), at: iso(nowMs), by: this.meId } as Op;
+    const at = iso(this.clock ? this.clock.now(nowMs) : nowMs);
+    const op = { ...input, id: this.d.newId(), at, by: this.meId } as Op;
     const view = this.computeView();
     let res: ApplyResult;
     try {
@@ -617,6 +622,7 @@ export class TripStore {
   }
 
   private async fetchState(): Promise<void> {
+    const sentMs = this.d.now();
     const res = await httpRequest(
       this.d.fetch,
       `/api/t/${encodeURIComponent(this.code)}/state`,
@@ -625,6 +631,7 @@ export class TripStore {
     );
     if (res.kind === "http" && res.ok && isSnapshot(res.json)) {
       this.netOk = true;
+      this.clock?.observe(res.json.meta.server_time, sentMs, this.d.now());
       this.lastSyncAt = iso(this.d.now());
       this.loadError = null;
       this.adoptSnapshot(res.json, true);

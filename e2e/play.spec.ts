@@ -406,7 +406,7 @@ for (const vp of [
     await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play");
     await expect(drinkRow(page, id("Nick")).getByTestId("drink-count")).toHaveText("1");
     // Undo takes back only the newest drink.
-    await page.getByRole("button", { name: "Undo Nick's drink" }).click();
+    await page.getByRole("button", { name: "Undo Big Nick's drink" }).click();
     await expect(drinkRow(page, id("Nick")).getByTestId("drink-count")).toHaveText("0");
     await expect(page.getByTestId("drink-undo")).toHaveCount(0);
     await expect

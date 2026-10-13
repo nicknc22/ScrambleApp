@@ -707,7 +707,12 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
         win: champs.length > 1 ? "share the title" : "wins",
         ntp: formatToPar(ntp),
       };
-      return { emoji: "🏆", title: "FINAL RESULTS", body: pick(seed, "final", FINAL)(c), tone: "fanfare" };
+      // History stays as it was; a later RESULTS CHANGED post supersedes it.
+      const superseded = state.feed_events.some(
+        (x) => x.type === "results_changed" && x.deleted_at === null && Date.parse(x.created_at) > Date.parse(ev.created_at),
+      );
+      const note = superseded ? " (Since changed after the final whistle: see RESULTS CHANGED.)" : "";
+      return { emoji: "🏆", title: "FINAL RESULTS", body: pick(seed, "final", FINAL)(c) + note, tone: "fanfare" };
     }
 
     case "results_changed":

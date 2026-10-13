@@ -1192,6 +1192,24 @@ describe("TripStore offline-first sync", () => {
   });
 });
 
+describe("TripStore clock correction", () => {
+  it("stamps ops with server-corrected time when this phone's clock is minutes off", async () => {
+    const f = makeTrip({ teams: [2, 2] });
+    const server = new FakeServer(f.state);
+    const h = makeStore(server);
+    h.clock.now = server.time - 10 * 60_000; // phone 10 minutes slow
+    h.store.start();
+    await until(() => h.store.getState().loaded);
+    await h.store.refresh();
+    h.store.setMe(f.player.A1);
+    const r = h.store.dispatch(drinkInput(f));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const skew = Date.parse(r.op.at) - server.time;
+    expect(Math.abs(skew)).toBeLessThan(5_000);
+  });
+});
+
 // ----------------------------------------------------------------------------- real reducer + engine
 
 async function realModules() {

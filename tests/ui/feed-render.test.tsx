@@ -81,7 +81,7 @@ describe("FeedCard", () => {
     expect(changed).toContain("repeating-linear-gradient");
     const removed = card(ev("removed", { actor_id: f.player.A2, payload: { kind: "drink", row_id: "d", owner_id: f.player.A1, hole: 3, detail: "drink", after_sec: 90 } }));
     expect(removed).toContain('data-type="removed"');
-    expect(removed).toContain("Removed");
+    expect(removed).toContain("border-dashed");
     expect(removed).not.toContain('data-big="true"');
   });
 

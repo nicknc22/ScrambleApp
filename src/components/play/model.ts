@@ -417,8 +417,10 @@ export interface DrinkUndoBurst {
 
 export const EMPTY_BURST: DrinkUndoBurst = { drinks: [], at: 0, undone: null };
 
+/** A burst is one round of drinks on one hole: a log on another hole (or after 10 s) starts a new one. */
 export function burstAfterLog(b: DrinkUndoBurst, drink: BurstDrink, now: number): DrinkUndoBurst {
-  const live = now - b.at <= DRINK_UNDO_MS ? b.drinks : [];
+  const last = b.drinks[b.drinks.length - 1];
+  const live = last && now - b.at <= DRINK_UNDO_MS && last.hole === drink.hole ? b.drinks : [];
   return { drinks: [...live, drink], at: now, undone: null };
 }
 
@@ -452,8 +454,12 @@ export function drinkChipDetail(d: Pick<BurstDrink, "type" | "value">): string {
   return v > 1 ? `👻 Ghost beer −${v}` : `🍺 −${v} stroke`;
 }
 
-/** The inline Undo chip for a team's burst at `now`, or null when there is nothing to undo. */
-export function undoChipView(b: DrinkUndoBurst, now: number): UndoChipView | null {
+/**
+ * The inline Undo chip for a team's burst at `now`, or null when there is nothing to undo.
+ * `targetHole` is the hole the drinks panel counts: a drink on another hole (the team teed off
+ * since) says which hole it was on.
+ */
+export function undoChipView(b: DrinkUndoBurst, now: number, targetHole?: number): UndoChipView | null {
   const last = b.drinks[b.drinks.length - 1];
   const elapsedMs = Math.max(0, now - b.at);
   if (!last || elapsedMs >= DRINK_UNDO_MS) return null;
@@ -464,7 +470,7 @@ export function undoChipView(b: DrinkUndoBurst, now: number): UndoChipView | nul
     count: b.drinks.length,
     remainingMs: DRINK_UNDO_MS - elapsedMs,
     elapsedMs,
-    detail: drinkChipDetail(last),
+    detail: targetHole !== undefined && last.hole !== targetHole ? `${drinkChipDetail(last)} · hole ${last.hole}` : drinkChipDetail(last),
     ariaLabel: `Undo ${last.name}'s ${DRINK_LABEL[last.type].toLowerCase()}`,
     announce: `${fb.title}. ${fb.message}. Undo for 10 seconds.`,
   };

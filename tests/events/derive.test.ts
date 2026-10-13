@@ -1543,8 +1543,10 @@ describe("after the final whistle", () => {
     expect(sim.render(ev)).toMatchObject({ big: true, tone: "alert" });
     expect(sim.render(ev).body).toContain("Team B now wins at -1 (was Team A).");
     expect(sim.render(ev).body).toContain("Reopen");
-    // The FINAL RESULTS post stays as history.
+    // The FINAL RESULTS post stays as history; its card points at the newer post.
     expect(sim.active("final_results")).toEqual([finalPost]);
+    expect(sim.render(finalPost).body).toContain("Team A");
+    expect(sim.render(finalPost).body).toContain("(Since changed after the final whistle: see RESULTS CHANGED.)");
   });
 
   it("speccheck tie case: a late drink that only ties the match (no lead change, no NEW LEADER) still posts", () => {

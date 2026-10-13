@@ -106,6 +106,10 @@ Per op:
 - Mulligans can't be used after the team's round is complete (unless commissioner).
 - The GPS simulator (dev tool) is only offered to the commissioner, on demo trips, or outside production; long drives measured with it are sent with `simulated: true` and stored flagged ("Simulated GPS") unless commissioner/demo.
 - Abuse limits (migration `002_abuse_limits`): DB-backed PIN-failure throttle with a trusted-device cookie for the commissioner's own phone; commissioner cookies are bound to the current PIN hash (changing the PIN revokes them); 4 MB JPEG uploads with per-trip photo quotas; hourly demo-creation cap and cleanup of demo trips older than 48 h; AI judge capped per trip and per player per hole.
+- **After finalize** (round 3): late syncs are accepted only within 12 h (server time) of the finalize; while final, lead changes, contest leads and roasts don't post (the AI judge doesn't roast either); any change to champions, standings or settle-up posts one loud `results_changed` card + push to everyone, and the commissioner can Reopen to review.
+- **Removals are visible:** deleting someone else's drink/entry/mulligan, or your own after 60 s, posts a `removed` feed event.
+- **Drink undo is inline** (a chip on the newest drink's row for 10 s, per hole burst) — never a toast, so nothing can cover Save / On the tee. The untouched par default on "tee off next hole" is sent with `if_empty` so it can't overwrite a teammate's real score.
+- **Clock correction:** each fresh `GET /state` teaches the phone its offset from the server clock (`src/lib/client/clock.ts`, median of samples, only offsets > 30 s); ops are stamped with server-corrected time. The engine also re-homes a drink to a later hole only when it was logged > 2 min after that hole opened.
 - Tied team-match places split per MEMBER across the tied teams (each player antes the same) — documented choice; spec wording "tied teams split" is ambiguous. Flagged to the user.
 
 ## Derived rules worth restating

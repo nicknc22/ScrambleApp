@@ -317,6 +317,19 @@ describe("judgeEntry", () => {
     expect(roasts[0].text).toMatch(/three feet from twelve/);
   });
 
+  it("after the round is final: a late suspicious verdict still flags and pushes, but nobody gets roasted", async () => {
+    const s = await setup();
+    await subscribeAll(s);
+    const id = await submit(s, "A2", 3);
+    await db.query("update trips set status = 'final', finalized_at = now() where id = $1", [s.trip.id]);
+    judgeReply = verdict({ estimate_ft: 12, confidence: "high", suspicious: true, roast: "Three feet? Sure." });
+    const res = await judgeEntry(s.trip.id, id, deps);
+    expect(res).toMatchObject({ status: "written", suspicious: true });
+    expect(await feedOf(s, "ai_judge")).toHaveLength(1);
+    expect(pushed.length).toBeGreaterThan(0);
+    expect(await feedOf(s, "roast")).toHaveLength(0);
+  });
+
   it("low confidence never flags, and a model 'suspicious: true' alone doesn't either", async () => {
     const s = await setup();
     await subscribeAll(s);

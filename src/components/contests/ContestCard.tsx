@@ -1,11 +1,11 @@
 "use client";
 // One contest hole on the Contests tab: type, hole, pot, leader, the green plot (closest to pin),
 // every entry ranked with its photo, status and AI verdict, and the entry button for my team.
-import { useState } from "react";
 import type { ContestHoleSummary, ContestEntryView, Derived, PotView } from "@/lib/engine/types";
 import type { UUID } from "@/lib/types";
 import { Badge, Button, Card, PlayerName, TeamPill, cx } from "@/components/ui";
 import { GreenPlot } from "./GreenPlot";
+import { usePhotoRetry } from "@/components/feed/FeedPhoto";
 import {
   CONTEST_EMOJI,
   CONTEST_LABEL,
@@ -31,6 +31,7 @@ export function ContestCard({
   onEnter,
   onOpenPhoto,
   current,
+  photoRefreshKey = null,
 }: {
   summary: ContestHoleSummary;
   derived: Derived;
@@ -43,6 +44,8 @@ export function ContestCard({
   onOpenPhoto: (src: string, caption: string) => void;
   /** My group is on this hole right now. */
   current: boolean;
+  /** Snapshot server_time: photos still uploading elsewhere are retried when it changes. */
+  photoRefreshKey?: string | null;
 }) {
   const ctp = summary.type === "ctp";
   const pot = potInfo(pots, summary.hole);
@@ -135,7 +138,7 @@ export function ContestCard({
         {hasEntries && (
           <ol className="divide-y-2 divide-line overflow-hidden rounded-2xl border-2 border-line" aria-label={`Hole ${summary.hole} entries`}>
             {summary.entries.map((v) => (
-              <EntryRow key={v.entry.id} v={v} derived={derived} meId={meId} photoUrl={photoUrl} onOpenPhoto={onOpenPhoto} hole={summary.hole} />
+              <EntryRow key={v.entry.id} v={v} derived={derived} meId={meId} photoUrl={photoUrl} onOpenPhoto={onOpenPhoto} hole={summary.hole} photoRefreshKey={photoRefreshKey} />
             ))}
           </ol>
         )}
@@ -166,6 +169,7 @@ function EntryRow({
   photoUrl,
   onOpenPhoto,
   hole,
+  photoRefreshKey,
 }: {
   v: ContestEntryView;
   derived: Derived;
@@ -173,6 +177,7 @@ function EntryRow({
   photoUrl: (path: string | null) => string | null;
   onOpenPhoto: (src: string, caption: string) => void;
   hole: number;
+  photoRefreshKey: string | null;
 }) {
   const player = derived.playerById[v.player_id];
   const team = derived.teamById[v.team_id];
@@ -202,7 +207,7 @@ function EntryRow({
         >
           {v.rank ?? "–"}
         </span>
-        <Thumb key={src ?? "none"} src={src} caption={caption} onOpenPhoto={onOpenPhoto} />
+        <Thumb key={src ?? "none"} src={src} caption={caption} onOpenPhoto={onOpenPhoto} refreshKey={photoRefreshKey} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-[17px] leading-tight font-black">
             <PlayerName player={player} you={mine} />
@@ -240,9 +245,23 @@ function EntryRow({
   );
 }
 
-/** Entry photo thumbnail; falls back to a placeholder while a photo is still uploading elsewhere. */
-function Thumb({ src, caption, onOpenPhoto }: { src: string | null; caption: string; onOpenPhoto: (src: string, caption: string) => void }) {
-  const [failed, setFailed] = useState(false);
+/**
+ * Entry photo thumbnail; while a photo is still uploading from another phone it shows a placeholder
+ * and keeps retrying (backoff, plus every fresh snapshot) until the photo lands.
+ */
+function Thumb({
+  src,
+  caption,
+  onOpenPhoto,
+  refreshKey,
+}: {
+  src: string | null;
+  caption: string;
+  onOpenPhoto: (src: string, caption: string) => void;
+  /** Changes when a fresh snapshot arrives (retry a photo that was still uploading). */
+  refreshKey: string | null;
+}) {
+  const photo = usePhotoRetry(src, refreshKey);
   const placeholder = "flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border-2 border-dashed border-line-strong text-xl";
   if (!src) {
     return (
@@ -251,10 +270,15 @@ function Thumb({ src, caption, onOpenPhoto }: { src: string | null; caption: str
       </span>
     );
   }
-  if (failed) {
+  if (photo.status === "failed" || photo.status === "retrying") {
     return (
-      <button type="button" className={placeholder} aria-label="Photo still uploading. Tap to retry." onClick={() => setFailed(false)}>
+      <button type="button" className={placeholder} aria-label="Photo on its way. Tap to retry." onClick={photo.retry}>
         ⏫
+        {photo.probeUrl && (
+          // Hidden probe: show the photo only once it actually loads.
+          // eslint-disable-next-line @next/next/no-img-element -- user photos from storage
+          <img src={photo.probeUrl} alt="" aria-hidden="true" className="hidden" onLoad={photo.onLoad} onError={photo.onError} />
+        )}
       </button>
     );
   }
@@ -267,7 +291,7 @@ function Thumb({ src, caption, onOpenPhoto }: { src: string | null; caption: str
       data-testid="contest-photo"
     >
       {/* eslint-disable-next-line @next/next/no-img-element -- user photos from storage / local blobs */}
-      <img src={src} alt="" loading="lazy" className="h-full w-full object-cover" onError={() => setFailed(true)} />
+      <img src={photo.url ?? src} alt="" loading="lazy" className="h-full w-full object-cover" onLoad={photo.onLoad} onError={photo.onError} />
     </button>
   );
 }
