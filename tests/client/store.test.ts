@@ -1101,4 +1101,43 @@ describe("TripStore with the real reducer and engine", () => {
     // The server's state is exactly the client's view now.
     expect(h.store.getState().view).toEqual(server.state);
   });
+
+  it("a queued drink stays in the view when another phone completes the round before this one syncs", async (ctx) => {
+    const real = await realModules();
+    if (!real) {
+      ctx.skip("src/lib/reducer.ts / engine still throw 'not implemented'");
+      return;
+    }
+    const f = makeTrip({ teams: [4, 3, 3] });
+    f.teeOff("A", 18);
+    const server = new FakeServer(f.state, real.applyOp);
+    const h = await started(server, { applyOp: real.applyOp, derive: (s) => real.derive(s), newId: real.newId });
+    h.store.setMe(f.player.A1);
+    server.online = false;
+    h.tick();
+    const drinkId = real.newId();
+    const r = h.store.dispatch({ type: "drink.log", drink_id: drinkId, team_id: f.team.A, player_id: f.player.A1, hole: 18, drink_type: "drink", photo_path: null });
+    expect(r).toMatchObject({ ok: true });
+    // Meanwhile a teammate's phone taps "Round complete" and the server has it.
+    const done = real.applyOp(
+      server.state,
+      { type: "round.complete", id: real.newId(), at: new Date(server.time).toISOString(), by: f.player.A2, team_id: f.team.A },
+      { now: new Date(server.time).toISOString(), is_commissioner: false, side: "server" },
+    );
+    if (!done.ok) throw new Error(done.reason);
+    server.state = done.state;
+    // This phone's own sync is stuck in flight; it only sees the fresh snapshot.
+    let release!: () => void;
+    server.gate = new Promise<void>((resolve) => (release = resolve));
+    server.online = true;
+    void h.store.flush();
+    await h.store.refresh();
+    const view = h.store.getState().view!;
+    expect(view.team_round_state.find((s) => s.team_id === f.team.A)!.status).toBe("complete");
+    expect(view.drinks.some((d) => d.id === drinkId)).toBe(true);
+    server.gate = null;
+    release();
+    await until(() => h.store.getState().pendingCount === 0);
+    expect(server.state.drinks.some((d) => d.id === drinkId && d.hole === 18)).toBe(true);
+  });
 });

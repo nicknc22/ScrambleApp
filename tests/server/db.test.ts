@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDb, getDb, normalizeRow, normalizeValue, setDbForTests, type DbConnection } from "@/lib/server/db";
+import { cleanString, createTestDb, getDb, normalizeRow, normalizeValue, setDbForTests, type DbConnection } from "@/lib/server/db";
 import { embeddedMigrations, INIT_SQL, loadMigrations, migrationsDir, runMigrations } from "@/lib/server/migrate";
 import { ROW_SPECS, TRIP_SPEC, type ColDef } from "@/lib/server/repo";
 import { ROW_TABLES } from "@/lib/types";
@@ -162,6 +162,14 @@ describe("normalization", () => {
       [new Date("2026-10-24T16:50:00.007Z"), undefined, { k: [1, "two"] }, '{"r":true}', [5, 6]],
     );
     expect(row).toEqual({ t: "2026-10-24T16:50:00.007Z", u: null, o: { k: [1, "two"] }, raw: { r: true }, a: [5, 6] });
+  });
+
+  it("cleans NUL and lone surrogates from string params, including inside objects", async () => {
+    expect(cleanString("a\u0000b")).toBe("ab");
+    expect(cleanString("x\ud83c")).toBe("x\ufffd");
+    expect(cleanString("🍺 ok")).toBe("🍺 ok");
+    const [row] = await db.query("select $1::text as t, $2::jsonb as j", ["nul\u0000 \ud83c", { k: ["\udc00", { n: "a\u0000" }] }]);
+    expect(row).toEqual({ t: "nul \ufffd", j: { k: ["\ufffd", { n: "a" }] } });
   });
 
   it("normalizeValue/normalizeRow handle the driver types", () => {

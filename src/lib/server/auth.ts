@@ -1,6 +1,8 @@
 // Commissioner auth: PIN hashing (scrypt) and a signed, short-lived, httpOnly cookie.
 //
-// PIN hash format: "scrypt$<salt b64url>$<hash b64url>" (N=16384, r=8, p=1, 32-byte key).
+// PIN hash format: "scrypt:<salt b64url>:<hash b64url>" (N=16384, r=8, p=1, 32-byte key).
+// No "$" on purpose: Next's .env loader expands "$name", which would silently mangle the hash.
+// The older "scrypt$<salt>$<hash>" form is still accepted.
 // Cookie "scramble_comm_<first 8 of trip id>" = "<tripId>.<expMs>.<sig>",
 //   sig = base64url(HMAC-SHA256(secret, "<tripId>.<expMs>")).
 import crypto from "node:crypto";
@@ -30,16 +32,25 @@ function scrypt(pin: string, salt: Buffer): Promise<Buffer> {
   });
 }
 
+/**
+ * True for a complete "scrypt:<salt>:<hash>" (or legacy "scrypt$<salt>$<hash>") string. A legacy
+ * hash pasted unescaped into .env.local turns into just "scrypt" (Next expands "$name"); callers
+ * use this to say so instead of reporting "wrong PIN" forever.
+ */
+export function isWellFormedPinHash(hash: string | null | undefined): boolean {
+  return typeof hash === "string" && /^scrypt([:$])[A-Za-z0-9_-]{16,}\1[A-Za-z0-9_-]{43}$/.test(hash.trim());
+}
+
 export async function hashPin(pin: string): Promise<string> {
   const salt = crypto.randomBytes(SALT_LEN);
   const key = await scrypt(pin, salt);
-  return `scrypt$${salt.toString("base64url")}$${key.toString("base64url")}`;
+  return `scrypt:${salt.toString("base64url")}:${key.toString("base64url")}`;
 }
 
 /** Constant-time check of a PIN against a stored hash. Malformed hashes never verify. */
 export async function verifyPin(pin: unknown, stored: string | null | undefined): Promise<boolean> {
   if (typeof pin !== "string" || pin.length === 0 || pin.length > 64 || !stored) return false;
-  const parts = stored.trim().split("$");
+  const parts = stored.trim().split(stored.includes(":") ? ":" : "$");
   if (parts.length !== 3 || parts[0] !== "scrypt") return false;
   const salt = Buffer.from(parts[1], "base64url");
   const expected = Buffer.from(parts[2], "base64url");

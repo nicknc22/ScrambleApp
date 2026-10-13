@@ -9,7 +9,10 @@ async function main(): Promise<void> {
     process.stderr.write("usage: npm run hash-pin -- <pin>   (4 to 12 digits)\n");
     process.exit(1);
   }
-  process.stdout.write(`${await hashPin(pin)}\n`);
+  const hash = await hashPin(pin);
+  process.stdout.write(`${hash}\n`);
+  // Hint on stderr only (stdout stays just the hash for $(...) use).
+  if (process.stderr.isTTY) process.stderr.write(`\nFor .env.local / Vercel:  COMMISSIONER_PIN_HASH=${hash}\n`);
 }
 
 main().catch((e) => {

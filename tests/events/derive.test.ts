@@ -3,7 +3,7 @@ import { applyOp } from "@/lib/reducer";
 import type { Op, OpType } from "@/lib/ops";
 import { deriveId } from "@/lib/ids";
 import { derive } from "@/lib/engine";
-import type { FeedEvent, FeedEventType, TripState, UUID } from "@/lib/types";
+import type { FeedEvent, FeedEventType, TripState } from "@/lib/types";
 import {
   deriveFeedEvents,
   DRINK_BATCH_WINDOW_MS,

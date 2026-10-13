@@ -172,7 +172,7 @@ export interface ContestEntryView {
   unit: "ft" | "yd";
   /** Counts toward winning. */
   valid: boolean;
-  /** e.g. "Needs commissioner review: GPS was weak", "Out of range (412 yd)". null when valid. */
+  /** e.g. "Needs commissioner review: GPS was weak", "Out of range: 412 yd". null when valid. */
   invalid_reason: string | null;
   /** 1-based rank among valid entries (ties share), null when invalid. */
   rank: number | null;
@@ -256,6 +256,7 @@ export interface MoneySummary {
   ledger: LedgerRow[];
   /** Minimized payments: repeatedly match biggest debtor with biggest creditor. */
   payments: Payment[];
+  /** Sum of total_cents over won + refunded pots (= total antes charged = total paid out; rolled money counted once). */
   total_in_play_cents: number;
 }
 

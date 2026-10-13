@@ -40,7 +40,7 @@ phones <── GET /api/t/<code>/state (full snapshot) <── on broadcast / po
 | `SUPABASE_SERVICE_ROLE_KEY` | Server: storage uploads, realtime broadcast. Unset → local uploads, no broadcast. |
 | `ANTHROPIC_API_KEY` | AI judge (`claude-sonnet-5-5`), roasts and team names (`claude-haiku-5-5`). Unset → AI silently off. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push. Unset → push off. |
-| `COMMISSIONER_PIN_HASH` | Required to create a real trip; default PIN for new trips (each trip stores its own hash, changeable in Settings). |
+| `COMMISSIONER_PIN_HASH` | Required to create a real trip; default PIN for new trips (each trip stores its own hash, changeable in Settings). Format `scrypt:<salt>:<hash>` from `npm run hash-pin -- <pin>` (no `$`, so `.env` files don't mangle it). |
 | `APP_SECRET` | Optional cookie-signing secret (falls back to a hash of the service key / PIN hash). |
 
 ## Conventions
@@ -50,6 +50,8 @@ phones <── GET /api/t/<code>/state (full snapshot) <── on broadcast / po
 - Engine and reducer are pure: no `Date.now()`, no randomness, no I/O. Time comes from `op.at` / `ctx.now`; ids come from ops or `deriveId(...)`.
 - Reducer returns new arrays only for tables it changed (memoization relies on identity).
 - Client-only modules start with `"use client"` or live under `src/lib/client`/`src/components`. Server-only modules live under `src/lib/server` and `import "server-only"` is NOT used (scripts import them via tsx); never import `src/lib/server/*` from client code.
+- Server code that catches a failing query inside `db.tx` must use a nested `tx` (savepoint); on postgres.js the nested tx uses the driver's scoped `savepoint()` (a hand-rolled ROLLBACK TO SAVEPOINT can't recover there).
+- Post-commit integrations (AI judge, roasts, push) register via `registerPostCommitHook` in `src/lib/server/integrations.ts`, which the sync route imports for its side effect; hooks run in `after()` and must never throw.
 - Tests: vitest files under `tests/` mirroring `src/lib` (`tests/engine/*.test.ts`, `tests/reducer.test.ts`, `tests/server/*.test.ts`). Fixtures: `tests/fixtures.ts` builds TripStates.
 - Feed copy is fully unhinged; profanity OK. Roast golf, drinking and on-course decisions only — never partners/fiancées, families, jobs or appearance.
 
@@ -68,7 +70,7 @@ Per op:
 - `round.complete {team_id}`: sets `status = "complete"`, `completed_at = op.at` (already complete → no-op). Leaves `open_hole`.
 - `score.set {team_id, hole, strokes}`: strokes integer 1..20. Upsert the `(team_id, hole)` row (reuse its id; new row id = `deriveId(team_id, String(hole))`). LWW: if the row's `strokes_at` is later than `op.at` → no-op (stale offline edit loses). Otherwise set strokes, `strokes_at = op.at`, `updated_by = op.by`; `edit_count += 1` when it changes an existing non-null value. **Implicit window:** if `hole === (open_hole ?? 0) + 1` and the round isn't complete, also open that hole exactly like `tee.open` ("entering any data for hole N+1 closes N").
 - `teeshot.set {team_id, hole, player_id}`: player must be a current member of the team (or null). Same upsert, LWW on `tee_shot_at`, same implicit window rule.
-- `drink.log {drink_id, team_id, player_id, hole, drink_type, photo_path}`: player must be a member of the team. On the **client** (`ctx.side === "client"`) reject `no_window` when the team has no open window (not teed off on hole 1, or round complete). The **server trusts the client-stamped hole** (1..18) so offline phones can't lose drinks. `settings.drink_cap` (null = none) → `conflict` when reached. Row: `logged_at = op.at`, `logged_by = op.by`.
+- `drink.log {drink_id, team_id, player_id, hole, drink_type, photo_path}`: player must be a member of the team. On the **client** (`ctx.side === "client"`) reject `no_window` when the team has no open window (not teed off on hole 1, or round complete). The **server trusts the client-stamped hole** (1..18) so offline phones can't lose drinks; the client store likewise re-applies already-queued ops with side `"server"` (the window check happens once, at dispatch). `settings.drink_cap` (null = none) is **per player** → `conflict` when reached (commissioner overrides skip it). Row: `logged_at = op.at`, `logged_by = op.by`.
 - `drink.delete {drink_id}`: soft delete (`deleted_at`, `deleted_by`); already deleted → no-op; missing → `not_found`.
 - `drink.move {drink_id, hole}` (commissioner): set `hole`; set `moved_from_hole` to the original hole the first time.
 - `mulligan.use {mulligan_id, team_id, hole, source}`: `earned` needs `available > 0` (active shotgun+shot drinks minus active earned uses) else `conflict`. `groom` needs the groom on this team and no active groom use in the trip, else `conflict`.

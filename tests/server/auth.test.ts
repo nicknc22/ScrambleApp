@@ -1,4 +1,5 @@
 // Commissioner auth: PIN hashing, signed tokens, cookies, throttle.
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearCommissionerCookie,
@@ -8,6 +9,7 @@ import {
   hashPin,
   isCommissioner,
   isValidPin,
+  isWellFormedPinHash,
   makeCommissionerToken,
   parseCookies,
   pinRetryAfter,
@@ -27,10 +29,11 @@ afterEach(() => {
 });
 
 describe("PIN hashing", () => {
-  it("hashes to scrypt$salt$hash with a random salt and verifies", async () => {
+  it("hashes to scrypt:salt:hash (no $, so .env files can't mangle it) with a random salt and verifies", async () => {
     const h1 = await hashPin("2468");
     const h2 = await hashPin("2468");
-    expect(h1).toMatch(/^scrypt\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/);
+    expect(h1).toMatch(/^scrypt:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{43}$/);
+    expect(h1).not.toContain("$");
     expect(h1).not.toBe(h2);
     expect(await verifyPin("2468", h1)).toBe(true);
     expect(await verifyPin("2468", h2)).toBe(true);
@@ -40,10 +43,36 @@ describe("PIN hashing", () => {
     expect(await verifyPin(null, h1)).toBe(false);
   });
 
+  it("still verifies legacy scrypt$salt$hash hashes", async () => {
+    const legacy = (await hashPin("2468")).replace(/:/g, "$");
+    expect(isWellFormedPinHash(legacy)).toBe(true);
+    expect(await verifyPin("2468", legacy)).toBe(true);
+    expect(await verifyPin("1111", legacy)).toBe(false);
+  });
+
   it("never verifies against malformed hashes", async () => {
-    for (const bad of ["", "scrypt$", "scrypt$abc", "bcrypt$a$b", "scrypt$$aGFzaA", "scrypt$c2FsdA$c2hvcnQ", null, undefined]) {
+    for (const bad of ["", "scrypt$", "scrypt$abc", "bcrypt$a$b", "scrypt$$aGFzaA", "scrypt$c2FsdA$c2hvcnQ", "scrypt:", "scrypt::", "scrypt:c2FsdA:c2hvcnQ", null, undefined]) {
       expect(await verifyPin("2468", bad as string)).toBe(false);
     }
+  });
+
+  it("recognizes well-formed hashes (and the .env-mangled 'scrypt')", async () => {
+    expect(isWellFormedPinHash(await hashPin("1234"))).toBe(true);
+    expect(isWellFormedPinHash("scrypt")).toBe(false);
+    expect(isWellFormedPinHash("scrypt$$")).toBe(false);
+    expect(isWellFormedPinHash("scrypt::")).toBe(false);
+    expect(isWellFormedPinHash("")).toBe(false);
+    expect(isWellFormedPinHash(undefined)).toBe(false);
+  });
+
+  it("scripts/hash-pin.ts prints only the hash on stdout (used as $(...) in playwright.config.ts)", async () => {
+    const r = spawnSync("npx", ["tsx", "scripts/hash-pin.ts", "2468"], { encoding: "utf8", cwd: process.cwd() });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/^scrypt:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+\n$/);
+    expect(await verifyPin("2468", r.stdout.trim())).toBe(true);
+    const bad = spawnSync("npx", ["tsx", "scripts/hash-pin.ts", "12x"], { encoding: "utf8", cwd: process.cwd() });
+    expect(bad.status).toBe(1);
+    expect(bad.stdout).toBe("");
   });
 
   it("validates new PINs as 4-12 digits", () => {

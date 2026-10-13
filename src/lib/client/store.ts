@@ -468,11 +468,16 @@ export class TripStore {
     };
   }
 
-  private ctx(op: Op): ApplyCtx {
-    return { now: op.at, is_commissioner: this.isCommissioner, side: "client" };
+  private ctx(op: Op, side: ApplyCtx["side"] = "client"): ApplyCtx {
+    return { now: op.at, is_commissioner: this.isCommissioner, side };
   }
 
-  /** snapshot.state + pending ops (rejected ones skipped but kept in the outbox; the server decides). */
+  /**
+   * snapshot.state + pending ops (rejected ones skipped but kept in the outbox; the server decides).
+   * Re-application uses side "server": client-only checks (the drink window) already passed at
+   * dispatch time, and the server trusts the stamped hole — so a queued drink must not vanish from
+   * the view just because another phone completed the round before this one synced.
+   */
   private computeView(): TripState {
     const base = this.snapshot!.state;
     const m = this.viewMemo;
@@ -480,7 +485,7 @@ export class TripStore {
     let view = base;
     for (const e of this.pending) {
       try {
-        const r = this.d.applyOp(view, e.op, this.ctx(e.op));
+        const r = this.d.applyOp(view, e.op, this.ctx(e.op, "server"));
         if (r.ok) view = r.state;
       } catch (err) {
         console.error("[scramble] reducer threw re-applying", e.op.type, err);

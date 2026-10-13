@@ -273,7 +273,7 @@ describe("persistWrites + loadTripState round trip", () => {
       ["id not a uuid", { kind: "upsert", table: "players", row: { ...good, id: "abc" } as AnyRow }],
       ["another trip", { kind: "upsert", table: "players", row: { ...good, id: newId(), trip_id: newId() } as AnyRow }],
       ["name is required", { kind: "upsert", table: "players", row: { ...good, id: newId(), name: null } as unknown as AnyRow }],
-      ["not text", { kind: "upsert", table: "players", row: { ...good, id: newId(), name: "nul\u0000byte" } as AnyRow }],
+      ["not text", { kind: "upsert", table: "players", row: { ...good, id: newId(), name: 42 } as unknown as AnyRow }],
       ["bad value", { kind: "upsert", table: "drinks", row: { ...sampleRow("drinks", trip.id, true, 0), type: "beer" } as unknown as AnyRow }],
       ["not an integer", { kind: "upsert", table: "drinks", row: { ...sampleRow("drinks", trip.id, true, 0), hole: 2.5 } as AnyRow }],
       ["not an ISO timestamp", { kind: "upsert", table: "drinks", row: { ...sampleRow("drinks", trip.id, true, 0), logged_at: "yesterday" } as AnyRow }],
@@ -287,6 +287,26 @@ describe("persistWrites + loadTripState round trip", () => {
     }
     expect(validateWrite(trip.id, { kind: "upsert", table: "players", row: good })).toBeNull();
     expect((await loadTripState(db, trip.id)).players).toEqual([]); // the good row wasn't written either
+  });
+
+  it("cleans NUL characters and lone surrogates instead of failing the batch", async () => {
+    const trip = await newTrip();
+    const player = { ...sampleRow("players", trip.id, true, 0), name: "Sam\u0000my \ud83c", nickname: "\udc00ok" } as AnyRow;
+    const event = {
+      ...sampleRow("feed_events", trip.id, true, 0),
+      text: "half an emoji: \ud83c",
+      payload: { quote: "nul\u0000here", ["bad\ud800key"]: ["\udfff"] },
+    } as AnyRow;
+    const res = await persistWrites(db, trip.id, [
+      { kind: "upsert", table: "players", row: player },
+      { kind: "upsert", table: "feed_events", row: event },
+    ]);
+    expect(res.upserted).toBe(2);
+    const state = await loadTripState(db, trip.id);
+    expect(state.players[0].name).toBe("Sammy \ufffd");
+    expect(state.players[0].nickname).toBe("\ufffdok");
+    expect(state.feed_events[0].text).toBe("half an emoji: \ufffd");
+    expect(state.feed_events[0].payload).toEqual({ quote: "nulhere", "bad\ufffdkey": ["\ufffd"] });
   });
 
   it("drops feed events whose dedupe_key is already taken instead of failing the batch", async () => {

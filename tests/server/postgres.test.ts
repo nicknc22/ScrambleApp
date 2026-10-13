@@ -26,6 +26,7 @@ import {
   loadTripState,
   lockTrip,
   persistWrites,
+  readTripState,
   recordAppliedOps,
   ROW_SPECS,
   type ColDef,
@@ -180,8 +181,8 @@ const PROBE_SQL = `select '2026-10-24T16:50:00.123Z'::timestamptz as ts, null::t
   '{}'::int[] as empty, 1.25::double precision as d, 7::integer as i, count(*) as n,
   9007199254740993::bigint as huge, 12::bigint as small, true as b, 'it''s'::text as s,
   gen_random_uuid() is not null as has_uuid, 1.5::numeric as num`;
-const PARAM_SQL = "select $1::timestamptz as t, $2::text as u, $3::jsonb as o, $4::jsonb as raw, $5::int[] as a, $6::uuid[] as ids, $7::boolean as b, $8::double precision as f";
-const PARAMS = () => [new Date("2026-10-24T16:50:00.007Z"), undefined, { k: [1, "two"] }, '{"r":true}', [5, 6], ["00000000-0000-4000-8000-000000000001"], false, 0.1];
+const PARAM_SQL = "select $1::timestamptz as t, $2::text as u, $3::jsonb as o, $4::jsonb as raw, $5::int[] as a, $6::uuid[] as ids, $7::boolean as b, $8::double precision as f, $9::text as w, $10::jsonb as wj";
+const PARAMS = () => [new Date("2026-10-24T16:50:00.007Z"), undefined, { k: [1, "two"] }, '{"r":true}', [5, 6], ["00000000-0000-4000-8000-000000000001"], false, 0.1, "x\ud83c\u0000y", { e: "\udc00" }];
 
 // ---------------------------------------------------------------------------
 
@@ -288,6 +289,8 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
       ids: ["00000000-0000-4000-8000-000000000001"],
       b: false,
       f: 0.1,
+      w: "x\ufffdy",
+      wj: { e: "\ufffd" },
     });
   });
 
@@ -300,6 +303,12 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
     }
     expect(onPg.state.trip).toMatchObject({ status: "final", finalized_at: fixedIso(9), code: "paritycode1" });
     expect((await findTripByCode(pg, "paritycode1"))?.pin_hash).toBe("scrypt$x$y");
+    // The snapshot read (repeatable-read, read-only tx; queries pipelined on one connection).
+    expect(await readTripState(pg, onPg.trip.id)).toEqual(onPg.state);
+    expect(await pg.tx(async (t) => {
+      await lockTrip(t, onPg.trip.id);
+      return readTripState(t, onPg.trip.id); // nested → savepoint
+    })).toEqual(onPg.state);
   });
 
   it("createTrip + applied ops + unique violations surface as SQLSTATE codes", async () => {
@@ -336,6 +345,16 @@ describe.skipIf(!AVAILABLE)("real Postgres 16", () => {
     });
     expect(await pg.query("select id from tx_probe order by id")).toEqual([{ id: 2 }]);
     await expect(pg.tx((t) => t.query("insert into tx_probe values (4)"), { readOnly: true })).rejects.toThrow();
+  });
+
+  it("a failed SQL statement caught inside a savepoint doesn't doom the outer transaction", async () => {
+    await pg.exec("create table if not exists tx_probe2 (id integer primary key)");
+    await pg.tx(async (t) => {
+      await t.query("insert into tx_probe2 values (1)");
+      await expect(t.tx((i) => i.query("insert into tx_probe2 values (1)"))).rejects.toThrow(); // duplicate key
+      await t.query("insert into tx_probe2 values (2)");
+    });
+    expect(await pg.query("select id from tx_probe2 order by id")).toEqual([{ id: 1 }, { id: 2 }]);
   });
 
   it("lockTrip serializes writers of one trip across pool connections (no lost updates)", async () => {

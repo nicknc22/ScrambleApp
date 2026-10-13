@@ -102,6 +102,15 @@ describe("POST /api/trips", () => {
     expect(unlock.status).toBe(200);
   });
 
+  it("explains a COMMISSIONER_PIN_HASH mangled by .env $-expansion instead of saying 'wrong PIN'", async () => {
+    vi.stubEnv("COMMISSIONER_PIN_HASH", "scrypt");
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await createTripRoute(jsonReq("/api/trips", "POST", { pin: "2468" }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/\\\$/);
+    err.mockRestore();
+  });
+
   it("throttles repeated wrong PINs with 429", async () => {
     vi.stubEnv("COMMISSIONER_PIN_HASH", pinHash);
     for (let i = 0; i < 8; i++) {

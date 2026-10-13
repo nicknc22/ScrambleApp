@@ -1,7 +1,17 @@
 // POST /api/trips {pin, name?, app_name?} → 201 {code, trip_id, url} + commissioner cookie.
 // With COMMISSIONER_PIN_HASH set, the PIN must match it and the new trip uses that hash.
 // Without it, only outside production (dev convenience): the trip's PIN becomes `pin`.
-import { commissionerCookie, clientKey, hashPin, isValidPin, pinRetryAfter, recordPinFailure, recordPinSuccess, verifyPin } from "@/lib/server/auth";
+import {
+  clientKey,
+  commissionerCookie,
+  hashPin,
+  isValidPin,
+  isWellFormedPinHash,
+  pinRetryAfter,
+  recordPinFailure,
+  recordPinSuccess,
+  verifyPin,
+} from "@/lib/server/auth";
 import { getDb } from "@/lib/server/db";
 import { commissionerPinHash, isProduction } from "@/lib/server/env";
 import { badRequest, errorJson, json, readJsonObject, withErrors } from "@/lib/server/http";
@@ -23,6 +33,12 @@ export const POST = withErrors(async (request: Request) => {
   let pinHash: string;
   const envHash = commissionerPinHash();
   if (envHash) {
+    if (!isWellFormedPinHash(envHash)) {
+      console.error("COMMISSIONER_PIN_HASH is malformed (in .env files, write every $ as \\$)");
+      return errorJson(500, "The server's COMMISSIONER_PIN_HASH is mangled. In .env files, write every $ as \\$.", {
+        code: "not_configured",
+      });
+    }
     const client = clientKey(request);
     const wait = pinRetryAfter(CREATE_KEY, client);
     if (wait > 0) {

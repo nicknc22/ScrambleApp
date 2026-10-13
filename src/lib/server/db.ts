@@ -10,7 +10,8 @@
 //   int[] → number[], integer/double precision → number, int8 (e.g. count(*)) → number
 //   (string if beyond 2^53), numeric → string (cast in SQL if you need a number).
 // Param conventions: pass jsonb as objects/arrays (a string is taken as raw JSON text), int[] as
-// number[], timestamptz as ISO strings or Dates, undefined → null.
+// number[], timestamptz as ISO strings or Dates, undefined → null. Strings (also inside objects)
+// are cleaned of NUL characters and lone surrogates, which Postgres would reject.
 //
 // Transactions: db.tx(fn) runs fn with a handle bound to ONE connection. Inside fn ALWAYS use the
 // handle you were given: on PGlite (single connection) a query on the root db while a transaction
@@ -70,11 +71,36 @@ export function normalizeRow(row: Record<string, unknown>): Record<string, unkno
   return out;
 }
 
+/**
+ * Postgres rejects NUL characters in text/jsonb and lone UTF-16 surrogates in JSON (a sliced emoji
+ * from a buggy client would otherwise fail a whole sync batch). Clean them out of every param.
+ */
+export function cleanString(s: string): string {
+  const w = s.isWellFormed() ? s : s.toWellFormed();
+  return w.includes("\u0000") ? w.replace(/\u0000/g, "") : w;
+}
+
+function isPlainObject(v: object): boolean {
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+function cleanDeep(v: unknown): unknown {
+  if (typeof v === "string") return cleanString(v);
+  if (Array.isArray(v)) return v.map(cleanDeep);
+  if (v && typeof v === "object" && isPlainObject(v)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) out[cleanString(k)] = cleanDeep(x);
+    return out;
+  }
+  return v;
+}
+
 function normalizeParam(v: unknown): unknown {
   if (v === undefined) return null;
   if (v instanceof Date) return v.toISOString();
   if (typeof v === "bigint") return v.toString();
-  return v;
+  return cleanDeep(v);
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +110,12 @@ function normalizeParam(v: unknown): unknown {
 interface Runner {
   query(sql: string, params: unknown[]): Promise<Record<string, unknown>[]>;
   exec(sql: string): Promise<void>;
+  /**
+   * Driver-native savepoint (postgres.js). postgres.js remembers the first failed query inside
+   * begin() and rethrows it at the end, so a hand-rolled "rollback to savepoint" can't recover from
+   * a failed statement; its scoped sql.savepoint(fn) can. Absent on PGlite (manual savepoints work).
+   */
+  savepoint?<T>(fn: (r: Runner) => Promise<T>): Promise<T>;
 }
 
 interface Driver extends Runner {
@@ -163,13 +195,20 @@ async function postgresDriver(url: string): Promise<Driver> {
       },
     },
   });
-  type Unsafe = { unsafe: (typeof sql)["unsafe"] };
+  type Unsafe = {
+    unsafe: (typeof sql)["unsafe"];
+    savepoint?: (fn: (sp: Unsafe) => Promise<unknown>) => Promise<unknown>;
+  };
   const runner = (q: Unsafe): Runner => ({
     query: async (text, params) =>
       Array.from(await q.unsafe(text, params as never[])) as unknown as Record<string, unknown>[],
     exec: async (text) => {
       await q.unsafe(text); // no params → simple protocol → multiple statements allowed
     },
+    // Only transaction-scoped sql objects have savepoint().
+    ...(typeof q.savepoint === "function"
+      ? { savepoint: async <T>(fn: (r: Runner) => Promise<T>) => (await q.savepoint!((sp) => fn(runner(sp)))) as T }
+      : {}),
   });
   return {
     name: "postgres",
@@ -233,6 +272,7 @@ function makeHandle(driver: Driver, runner: Runner, scope: TxScope | null, root:
       if (scope) {
         // Nested: a savepoint on the same connection.
         check();
+        if (runner.savepoint) return runner.savepoint((r) => fn(makeHandle(driver, r, scope, root)));
         const name = `scramble_sp_${++savepoints}`;
         await runner.query(`savepoint ${name}`, []);
         try {

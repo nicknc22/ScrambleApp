@@ -279,9 +279,6 @@ export function isUuid(v: unknown): v is string {
   return typeof v === "string" && UUID_RE.test(v);
 }
 
-/** Postgres text and jsonb can't hold NUL characters. */
-const hasNul = (s: string) => s.includes("\u0000");
-
 /** null when `v` fits the column, else a short description of the problem. */
 export function checkValue(def: ColDef, v: unknown): string | null {
   let nullable: boolean;
@@ -300,7 +297,8 @@ export function checkValue(def: ColDef, v: unknown): string | null {
     case "uuid":
       return isUuid(v) ? null : `not a uuid (${JSON.stringify(String(v).slice(0, 40))})`;
     case "text":
-      return typeof v === "string" && !hasNul(v) ? null : "not text";
+      // (NUL characters and lone surrogates are cleaned by the db layer, see cleanString.)
+      return typeof v === "string" ? null : "not text";
     case "int":
       return typeof v === "number" && Number.isInteger(v) && v >= INT_MIN && v <= INT_MAX ? null : "not an integer";
     case "float":
@@ -321,7 +319,7 @@ export function checkValue(def: ColDef, v: unknown): string | null {
       } catch {
         return "not serializable";
       }
-      return s === undefined || s.includes("\\u0000") ? "not serializable" : null;
+      return s === undefined ? "not serializable" : null;
     }
   }
 }
@@ -700,7 +698,7 @@ export async function recordAppliedOps(
         op_type: String(r.op_type ?? "unknown").slice(0, 100),
         status: r.status,
         code: r.code ?? null,
-        reason: r.reason == null ? null : String(r.reason).replace(/\u0000/g, "").slice(0, 2000),
+        reason: r.reason == null ? null : String(r.reason).slice(0, 2000),
       })),
     ],
   );
