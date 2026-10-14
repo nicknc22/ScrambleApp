@@ -2,7 +2,7 @@
 // The big strokes stepper with a live net preview ("4 − 2 🍺 = 2 net"). Save lives in the bottom bar.
 // Kept compact: it sits under the tee-shot chips and its buttons clear the action bar on a phone.
 import { Card, Stepper, cx } from "@/components/ui";
-import { MAX_STROKES, MIN_STROKES, netPreview, scoreName, type ScoreDraftView } from "./model";
+import { MAX_STROKES, MIN_STROKES, netPreview, scoreHeader, scoreName, type ScoreDraftView } from "./model";
 
 export function ScorePanel({
   hole,
@@ -24,28 +24,38 @@ export function ScorePanel({
   const name = scoreName(draft.value, par);
   const under = draft.value < par;
   const over = draft.value - par >= 2;
+  const header = scoreHeader(draft);
+  const empty = header.kind === "empty";
   return (
     <Card padded={false} className="overflow-hidden border-ink" data-testid="score-panel">
       {/* The score's name ("Birdie") is the card's title, not a line under the number: the stepper
-          stays as tall as its buttons, so it fits the first screen under the tee-shot chips. */}
+          stays as tall as its buttons, so it fits the first screen under the tee-shot chips. Until
+          somebody touches the stepper, the par it shows is only a default: "Team score" + a grey
+          "No score yet" (a yellow "Not saved" there read like something was already wrong). */}
       <div className="flex min-h-7 items-center justify-between gap-2 border-b-2 border-line px-4">
         <h2 className="flex min-w-0 items-baseline">
-          <span className="sr-only">Team score: </span>
+          {!empty && <span className="sr-only">Team score: </span>}
           <span
-            className={cx("truncate text-base font-black uppercase", under ? "text-fairway-dark" : over ? "text-flag-dark" : "text-ink")}
+            className={cx(
+              "truncate text-base font-black uppercase",
+              empty ? "text-ink" : under ? "text-fairway-dark" : over ? "text-flag-dark" : "text-ink",
+            )}
             data-testid="score-name"
           >
-            {name}
+            {empty ? "Team score" : name}
           </span>
         </h2>
         <span
           className={cx(
             "shrink-0 rounded-full border-2 px-2.5 text-sm leading-5 font-black whitespace-nowrap uppercase",
-            draft.dirty ? "border-ink bg-hazard text-ink" : "border-fairway-dark bg-fairway text-white",
+            header.kind === "empty" && "border-line bg-sand text-muted",
+            header.kind === "dirty" && "border-ink bg-hazard text-ink",
+            header.kind === "saved" && "border-fairway-dark bg-fairway text-white",
           )}
           data-testid="score-status"
+          data-state={header.kind}
         >
-          {draft.dirty ? (draft.saved === null ? "Not saved" : "Unsaved") : "✓ Saved"}
+          {header.badge}
         </span>
       </div>
       <div className="px-3 pt-2 pb-2">

@@ -198,10 +198,20 @@ function MoneyField({ label, cents, onCommit, testId }: { label: string; cents: 
 }
 
 function QuickAmounts({ amounts, value, onPick }: { amounts: number[]; value: number; onPick: (cents: number) => void }) {
+  // Four across a 360px phone leaves ~67px a chip: the Chip's own px-4 (beaten with px-1!; cx
+  // doesn't merge classes) would clip "$50" to "$…". The label never truncates here.
   return (
-    <div className="grid grid-cols-4 gap-2">
+    <div className="grid grid-cols-4 gap-2" data-testid="quick-amounts">
       {amounts.map((a) => (
-        <Chip key={a} selected={value === a} tone="fairway" showCheck={false} onClick={() => onPick(a)} className="justify-center px-2">
+        <Chip
+          key={a}
+          selected={value === a}
+          tone="fairway"
+          showCheck={false}
+          onClick={() => onPick(a)}
+          className="justify-center px-1! [&>span]:overflow-visible [&>span]:text-clip"
+          data-testid="quick-amount"
+        >
           {a === 0 ? "$0" : formatCents(a)}
         </Chip>
       ))}

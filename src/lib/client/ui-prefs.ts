@@ -1,9 +1,12 @@
-// Per-device UI preferences in localStorage: "Get set up" card hidden, recent trips, dev mode.
+// Per-device UI preferences in localStorage: "Get set up" card hidden, "How it works" seen, recent
+// trips, dev mode.
 // Every access is wrapped: private mode / full storage / SSR must never crash the app.
 
 const NS = "scramble:";
 /** Per trip (`scramble:get-set-up-hidden:<code>`): hiding it on the dry run doesn't hide it on Saturday's trip. */
 export const getSetUpHiddenKey = (code: string) => `${NS}get-set-up-hidden:${code}`;
+/** Per trip (`scramble:explainer-seen:<code>`): the dry run's explainer doesn't use up Saturday's. */
+export const explainerSeenKey = (code: string) => `${NS}explainer-seen:${code}`;
 export const RECENT_TRIPS_KEY = `${NS}recent-trips`;
 export const DEV_KEY = `${NS}dev`;
 const MAX_RECENT = 6;
@@ -45,6 +48,31 @@ export function isGetSetUpHidden(code: string): boolean {
 
 export function setGetSetUpHidden(code: string, hidden = true): void {
   writePref(getSetUpHiddenKey(code), hidden ? "1" : null);
+}
+
+// ---------- "How it works" explainer (plays by itself once per device per trip) ----------
+
+/** The explainer already played (or was skipped) on this device for this trip. */
+export function isExplainerSeen(code: string): boolean {
+  return readPref(explainerSeenKey(code)) === "1";
+}
+
+export function setExplainerSeen(code: string, seen = true): void {
+  writePref(explainerSeenKey(code), seen ? "1" : null);
+}
+
+/**
+ * Per trip (`scramble:greet-pending:<code>`): the player who picked his name and is still owed
+ * "You're in, Joe · Not you?" because the explainer that plays first was cut off (reload, Back).
+ */
+export const greetPendingKey = (code: string) => `${NS}greet-pending:${code}`;
+
+export function readGreetPending(code: string): string | null {
+  return readPref(greetPendingKey(code));
+}
+
+export function setGreetPending(code: string, playerId: string | null): void {
+  writePref(greetPendingKey(code), playerId);
 }
 
 // ---------- Recent trips ----------

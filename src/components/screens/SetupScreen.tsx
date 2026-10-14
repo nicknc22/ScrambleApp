@@ -1,7 +1,7 @@
 "use client";
 // Commissioner Setup tab: Roster · Teams · Course · Pots · Settings · Round.
 // Non-commissioners get a read-only roster and an "Unlock commissioner" button.
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useClientState } from "@/lib/client/react";
 import { readPref, writePref } from "@/lib/client/ui-prefs";
 import { cx } from "@/components/ui";
@@ -13,7 +13,17 @@ import { TeamsSection } from "@/components/setup/TeamsSection";
 import { PotsSection } from "@/components/setup/PotsSection";
 import { SettingsSection } from "@/components/setup/SettingsSection";
 import { RoundSection } from "@/components/setup/RoundSection";
-import { SECTION_LABEL, SETUP_SECTIONS, isSetupSection, livePlayers, preflight, teamIssues, type SetupSection } from "@/components/setup/model";
+import {
+  SECTION_LABEL,
+  SETUP_SECTIONS,
+  isSetupSection,
+  nextStep,
+  preflight,
+  sectionBadges,
+  type NextStep,
+  type SectionBadge,
+  type SetupSection,
+} from "@/components/setup/model";
 import { useHeaderHeight } from "@/components/setup/shared";
 
 const sectionKey = (code: string) => `scramble:setup-section:${code}`;
@@ -34,7 +44,7 @@ interface SectionTab {
   label: string;
   /** Accessible name; starts with the visible label. */
   name: string;
-  badge?: ReactNode;
+  badge?: SectionBadge;
 }
 
 export function SetupScreen() {
@@ -43,11 +53,15 @@ export function SetupScreen() {
   const isCommissioner = useClientState((s) => s.isCommissioner);
   const status = view?.trip.status ?? "setup";
   const headerH = useHeaderHeight();
-  const [section, setSection] = useState<SetupSection>(() => {
-    const saved = readPref(sectionKey(code));
-    if (isSetupSection(saved)) return saved;
-    return status === "setup" ? "roster" : "round";
+  // Before the round: wherever the commissioner left off (Roster, where Send the link lives, the
+  // first time). Once it's live or final, Setup always opens on the Live/Final tools: that's what
+  // it's for on the course. A tap picks a section for as long as this screen is open.
+  const [saved] = useState<SetupSection | null>(() => {
+    const v = readPref(sectionKey(code));
+    return isSetupSection(v) ? v : null;
   });
+  const [picked, setPicked] = useState<SetupSection | null>(null);
+  const section: SetupSection = picked ?? (status === "setup" ? (saved ?? "roster") : "round");
 
   if (!view) return null;
   if (!isCommissioner) {
@@ -59,8 +73,8 @@ export function SetupScreen() {
   }
 
   const go = (s: SetupSection) => {
-    setSection(s);
-    writePref(sectionKey(code), s);
+    setPicked(s);
+    if (status === "setup") writePref(sectionKey(code), s);
     try {
       window.scrollTo({ top: 0 });
     } catch {
@@ -68,9 +82,10 @@ export function SetupScreen() {
     }
   };
 
-  const players = livePlayers(view).length;
-  const issues = teamIssues(view);
-  const blockers = status === "setup" ? preflight(view).blocking : 0;
+  const pf = preflight(view);
+  // Before the round, a dot flags optional extras too; once it's live only real problems badge.
+  const badges = sectionBadges(pf, { warnings: status === "setup" });
+  const step = status === "setup" ? nextStep(pf) : null;
   const tabs: SectionTab[] = SETUP_SECTIONS.map((s) => {
     const live = s === "round" && status !== "setup";
     const label = live ? (status === "live" ? "Live" : "Final") : SECTION_TAB[s].short;
@@ -79,7 +94,7 @@ export function SetupScreen() {
       icon: live && status === "live" ? "🔴" : SECTION_TAB[s].icon,
       label,
       name: s === "settings" ? `${label} ${SECTION_LABEL[s].toLowerCase()}` : live ? `${label} round` : label,
-      badge: s === "roster" && players === 0 ? "!" : s === "teams" && issues > 0 ? issues : s === "round" && blockers > 0 ? "!" : undefined,
+      badge: badges[s],
     };
   });
 
@@ -88,6 +103,8 @@ export function SetupScreen() {
       <div className="sticky z-20 -mx-4 -mt-4 border-b-2 border-line bg-paper/95 px-4 pt-3 pb-3 backdrop-blur" style={{ top: headerH }}>
         <SectionTabs tabs={tabs} value={section} onChange={go} />
       </div>
+      {/* The pre-flight lives on Round, so the strip only shows elsewhere (and never points at the page you're on). */}
+      {step && section !== "round" && step.section !== section && <NextStrip step={step} onGo={go} />}
       <div data-testid="setup-screen" data-section={section}>
         {section === "roster" && <RosterSection />}
         {section === "teams" && <TeamsSection />}
@@ -111,7 +128,7 @@ function SectionTabs({ tabs, value, onChange }: { tabs: SectionTab[]; value: Set
             type="button"
             role="tab"
             aria-selected={active}
-            aria-label={t.badge !== undefined ? `${t.name} (${t.badge})` : t.name}
+            aria-label={t.badge ? `${t.name} (${t.badge.note})` : t.name}
             onClick={() => onChange(t.value)}
             className={cx(
               "relative flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-0.5 transition-colors",
@@ -122,20 +139,55 @@ function SectionTabs({ tabs, value, onChange }: { tabs: SectionTab[]; value: Set
               {t.icon}
             </span>
             <span className="max-w-full truncate text-xs leading-none font-black min-[400px]:text-[13px]">{t.label}</span>
-            {t.badge !== undefined && (
+            {t.badge?.level === "block" && (
               <span
                 className={cx(
-                  "num absolute top-0.5 right-0.5 min-w-4 rounded-full px-1 text-center text-[11px] leading-4 font-black",
-                  active ? "bg-hazard text-ink" : "bg-flag text-white",
+                  "absolute top-0.5 right-0.5 min-w-4 rounded-full bg-flag px-1 text-center text-[11px] leading-4 font-black text-white",
+                  active && "ring-2 ring-white",
                 )}
                 aria-hidden="true"
+                data-testid="setup-tab-badge"
+                data-level="block"
               >
-                {t.badge}
+                !
               </span>
+            )}
+            {t.badge?.level === "warn" && (
+              <span
+                className={cx("absolute top-1 right-1 h-3 w-3 rounded-full border-2 border-ink bg-hazard", active && "ring-2 ring-white")}
+                aria-hidden="true"
+                data-testid="setup-tab-badge"
+                data-level="warn"
+              />
             )}
           </button>
         );
       })}
     </div>
+  );
+}
+
+/** "Next: 10 not on a team →": the one thing to do next, a tap away. Ready → go start it. */
+function NextStrip({ step, onGo }: { step: NextStep; onGo: (s: SetupSection) => void }) {
+  const ready = step.kind === "ok";
+  return (
+    <button
+      type="button"
+      onClick={() => onGo(step.section)}
+      data-testid="setup-next"
+      data-level={step.kind}
+      data-section={step.section}
+      className={cx(
+        "flex min-h-12 w-full items-center gap-2 rounded-2xl border-2 px-3 py-2 text-left active:scale-[0.99]",
+        ready ? "border-fairway-dark bg-fairway text-white" : step.kind === "block" ? "border-ink bg-flag-soft text-ink" : "border-ink bg-hazard-soft text-ink",
+      )}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block text-[17px] leading-tight font-black [overflow-wrap:anywhere]">
+          {ready ? "✅ Ready. Start it on the first tee →" : `Next: ${step.title} →`}
+        </span>
+        {step.kind === "warn" && <span className="block text-sm leading-tight font-bold text-muted">Optional. You can start without it.</span>}
+      </span>
+    </button>
   );
 }

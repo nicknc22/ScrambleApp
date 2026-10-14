@@ -2,13 +2,26 @@
 // Round: pre-flight checklist and Start round (setup), the commissioner's live tools and
 // Finalize (live), Reopen (final). Start/finalize fire their own fanfare locally.
 import { useState } from "react";
-import { useClientState } from "@/lib/client/react";
-import { Button, Card, ConfirmSheet, IconChevronRight, SectionHeader, cx, useConfirm, useFanfare, useToast } from "@/components/ui";
+import { useClientState, useTripStore } from "@/lib/client/react";
+import { Button, Card, ConfirmSheet, IconChevronRight, SectionHeader, cx, displayName, useConfirm, useFanfare, useToast } from "@/components/ui";
 import { CommissionerTools, type ToolFocus } from "@/components/setup/commish/CommissionerTools";
 import { pendingRulings } from "@/components/setup/commish/commishModel";
 import { FinalizeSummary, finalizeIssueCount, type FinalizeFix, type FinalizeIssues } from "./FinalizeSummary";
-import { liveTeams, livePlayers, membersByTeam, preflight, scoreGaps, unfinishedTeams, type CheckItem, type SetupSection } from "./model";
-import { useSetupDispatch } from "./shared";
+import {
+  beforeRoundDay,
+  liveTeams,
+  livePlayers,
+  membersByTeam,
+  payeesWithoutVenmo,
+  preflight,
+  readySummary,
+  scoreGaps,
+  startConfirmCopy,
+  unfinishedTeams,
+  type CheckItem,
+  type SetupSection,
+} from "./model";
+import { clearSetupToasts, useSetupDispatch } from "./shared";
 
 const LEVEL_ICON: Record<CheckItem["level"], string> = { ok: "✅", warn: "⚠️", block: "⛔" };
 
@@ -25,38 +38,56 @@ export function RoundSection({ onGo }: { onGo: (s: SetupSection) => void }) {
   const status = view.trip.status;
   return (
     <div className="space-y-4" data-testid="setup-round" data-status={status}>
-      {status === "setup" ? <PreRound onGo={onGo} /> : <LiveRound />}
+      {status === "setup" ? <PreRound onGo={onGo} /> : <LiveRound onGo={onGo} />}
     </div>
   );
 }
 
 function PreRound({ onGo }: { onGo: (s: SetupSection) => void }) {
   const view = useClientState((s) => s.view);
+  const store = useTripStore();
   const dispatch = useSetupDispatch();
   const confirm = useConfirm();
   const fanfare = useFanfare();
   const toast = useToast();
+  // When this screen opened (server-corrected): the helper line under Start. The confirm re-checks at tap time.
+  const [openedAt] = useState(() => store.serverNow());
   if (!view) return null;
   const pf = preflight(view);
   const teams = liveTeams(view);
   const members = membersByTeam(view);
   const players = livePlayers(view);
+  const early = beforeRoundDay(new Date(openedAt), view.trip.is_demo);
 
   const start = async () => {
     if (!pf.canStart) {
       toast.error(`${pf.blocking} thing${pf.blocking === 1 ? "" : "s"} to fix first. See the red ones.`, { title: "Not yet" });
       return;
     }
+    // A leftover Setup toast would park over the sheet's title.
+    clearSetupToasts(toast);
+    const copy = startConfirmCopy(new Date(store.serverNow()), view.trip.is_demo);
     const ok = await confirm({
-      title: "Start the round?",
-      emoji: "⛳",
-      confirmLabel: "Start it",
+      title: "Start the round? Do it on the first tee.",
+      emoji: copy.warning ? "⏳" : "⛳",
+      tone: copy.tone,
+      confirmLabel: copy.confirmLabel,
+      cancelLabel: copy.cancelLabel,
       body: (
-        <span>
-          {players.length} players, {teams.length} teams ({teams.map((t) => members.get(t.id)?.length ?? 0).join("/")}). Scoring unlocks on every phone.
+        <span data-testid="start-confirm-body">
+          {players.length} players, {teams.length} teams ({teams.map((t) => members.get(t.id)?.length ?? 0).join("/")}).
+          <span className="mt-2 block text-base">
+            There&apos;s no going back to setup: shuffle locks, players can&apos;t opt out of pots, the feed announces it, and every phone flips to
+            the scorecard.
+          </span>
+          {copy.warning && (
+            <span className="mt-2 block rounded-xl border-2 border-ink bg-hazard px-3 py-2 text-base font-black" data-testid="start-too-early">
+              {copy.warning}
+            </span>
+          )}
           {pf.warnings > 0 && (
-            <span className="mt-2 block text-base text-flag">
-              {pf.warnings} warning{pf.warnings === 1 ? "" : "s"} still open. You can fix those mid-round.
+            <span className="mt-2 block text-base text-muted">
+              {pf.warnings} optional extra{pf.warnings === 1 ? "" : "s"} still open. You can fix those mid-round.
             </span>
           )}
         </span>
@@ -68,53 +99,74 @@ function PreRound({ onGo }: { onGo: (s: SetupSection) => void }) {
     }
   };
 
+  const checklist = (
+    <ul className="overflow-hidden rounded-2xl border-2 border-ink" data-testid="preflight">
+      {pf.items.map((item, i) => (
+        <li key={item.id} className={cx(i > 0 && "border-t-2 border-line")}>
+          <button
+            type="button"
+            onClick={() => onGo(item.section)}
+            data-testid="preflight-item"
+            data-level={item.level}
+            className={cx(
+              "flex min-h-14 w-full items-center gap-3 px-3 py-2 text-left active:bg-sand",
+              item.level === "block" && "bg-flag-soft",
+              item.level === "warn" && "bg-hazard-soft",
+            )}
+          >
+            <span className="shrink-0 text-2xl leading-none" aria-hidden="true">
+              {LEVEL_ICON[item.level]}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[17px] leading-tight font-black">{item.title}</span>
+              {item.detail && <span className="block text-sm font-bold text-muted">{item.detail}</span>}
+            </span>
+            {item.level !== "ok" && <IconChevronRight size={20} strokeWidth={3} className="shrink-0" />}
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+
+  const startButton = (
+    <div className="space-y-2">
+      <Button size="xl" full onClick={start} disabled={!pf.canStart} data-testid="start-round" leading={<span aria-hidden="true">⛳</span>}>
+        Start round
+      </Button>
+      <p className="text-center text-sm font-bold text-muted" data-testid="start-hint">
+        {!pf.canStart
+          ? `${pf.blocking} blocker${pf.blocking === 1 ? "" : "s"} above. Tap one to fix it.`
+          : early
+            ? "You're set. Start it on the first tee Saturday."
+            : pf.warnings > 0
+              ? "Optional extras below."
+              : "All green. Pre-round drinks still don't count."}
+      </p>
+    </div>
+  );
+
   return (
     <>
-      <SectionHeader title="Pre-flight" subtitle="Green across the board, then send it." />
-      <ul className="overflow-hidden rounded-2xl border-2 border-ink" data-testid="preflight">
-        {pf.items.map((item, i) => (
-          <li key={item.id} className={cx(i > 0 && "border-t-2 border-line")}>
-            <button
-              type="button"
-              onClick={() => onGo(item.section)}
-              data-testid="preflight-item"
-              data-level={item.level}
-              className={cx(
-                "flex min-h-14 w-full items-center gap-3 px-3 py-2 text-left active:bg-sand",
-                item.level === "block" && "bg-flag-soft",
-                item.level === "warn" && "bg-hazard-soft",
-              )}
-            >
-              <span className="shrink-0 text-2xl leading-none" aria-hidden="true">
-                {LEVEL_ICON[item.level]}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[17px] leading-tight font-black">{item.title}</span>
-                {item.detail && <span className="block text-sm font-bold text-muted">{item.detail}</span>}
-              </span>
-              {item.level !== "ok" && <IconChevronRight size={20} strokeWidth={3} className="shrink-0" />}
-            </button>
-          </li>
-        ))}
-      </ul>
-
-      <div className="space-y-2 pt-2">
-        <Button size="xl" full onClick={start} disabled={!pf.canStart} data-testid="start-round" leading={<span aria-hidden="true">⛳</span>}>
-          Start round
-        </Button>
-        <p className="text-center text-sm font-bold text-muted">
-          {pf.canStart
-            ? pf.warnings > 0
-              ? `${pf.warnings} warning${pf.warnings === 1 ? "" : "s"}. Not fatal. Probably.`
-              : "All green. Pre-round drinks still don't count."
-            : `${pf.blocking} blocker${pf.blocking === 1 ? "" : "s"} above. Tap one to fix it.`}
-        </p>
-      </div>
+      <SectionHeader title="Pre-flight" subtitle={pf.canStart ? "Nothing's blocking. Start it on the first tee." : "Clear the red ones, then send it."} />
+      {pf.canStart ? (
+        <>
+          <Card tone="fairway" className="text-[17px] leading-snug font-black" data-testid="preflight-ready">
+            ✅ You&apos;re set: {readySummary(view)}.
+          </Card>
+          {startButton}
+          {checklist}
+        </>
+      ) : (
+        <>
+          {checklist}
+          <div className="pt-2">{startButton}</div>
+        </>
+      )}
     </>
   );
 }
 
-function LiveRound() {
+function LiveRound({ onGo }: { onGo: (s: SetupSection) => void }) {
   const view = useClientState((s) => s.view);
   const derived = useClientState((s) => s.derived);
   const dispatch = useSetupDispatch();
@@ -132,6 +184,8 @@ function LiveRound() {
   const leader = derived?.leaderTeamIds.length ? derived.teamById[derived.leaderTeamIds[0]] : null;
   const issues: FinalizeIssues = { unfinished, gaps: scoreGaps(view), rulings: derived ? pendingRulings(derived.contests, derived.money.pots) : [] };
   const issueCount = finalizeIssueCount(issues);
+  // Who settle-up says gets paid but has no Venmo: their payers get no Pay button (a note, not a blocker).
+  const noVenmo = derived ? payeesWithoutVenmo(derived.money.payments, derived.playerById).map((p) => displayName(p)) : [];
   const loose = [
     issues.gaps.length > 0 ? `${issues.gaps.length} team${issues.gaps.length === 1 ? "" : "s"} missing a score` : null,
     issues.rulings.length > 0 ? `${issues.rulings.length} ruling${issues.rulings.length === 1 ? "" : "s"} pending` : null,
@@ -191,12 +245,14 @@ function LiveRound() {
 
       <CommissionerTools focus={focus} />
 
-      <Card tone={final ? "sand" : "hazard"} className="space-y-3">
+      <Card tone={final ? "sand" : "hazard"} className="space-y-3" data-testid={final ? "final-fix-card" : undefined}>
         {final ? (
           <>
-            <p className="text-lg leading-tight font-black">Found a mistake after the fact?</p>
-            <p className="text-[15px] font-bold">Reopen to edit, then finalize again. Every fix still posts to the feed.</p>
-            <Button variant="secondary" size="lg" full onClick={reopen} data-testid="reopen-round">
+            <p className="text-[15px] font-bold">
+              <span className="text-lg leading-tight font-black">Wrong score?</span> Fix it right here: tap the hole in the Scores tool above.
+              Everyone gets a Results changed alert. Reopen only if a team still has holes to play.
+            </p>
+            <Button variant="secondary" size="md" onClick={reopen} data-testid="reopen-round" className="w-full text-[15px]">
               Reopen round
             </Button>
           </>
@@ -231,7 +287,18 @@ function LiveRound() {
         emoji="🏁"
         tone="hazard"
         confirmLabel={issueCount > 0 ? "Finalize anyway" : "Finalize it"}
-        body={<FinalizeSummary issues={issues} playerById={derived?.playerById ?? {}} onFix={fix} />}
+        body={
+          <FinalizeSummary
+            issues={issues}
+            playerById={derived?.playerById ?? {}}
+            onFix={fix}
+            noVenmo={noVenmo}
+            onRoster={() => {
+              setFinalizing(false);
+              onGo("roster");
+            }}
+          />
+        }
         onConfirm={finalize}
         onCancel={() => setFinalizing(false)}
       />

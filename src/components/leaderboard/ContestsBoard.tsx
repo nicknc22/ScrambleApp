@@ -43,14 +43,14 @@ export function ContestsBoard({ derived, meId, onOpenContests }: { derived: Deri
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className="text-[12px] font-black tracking-wide text-muted uppercase">
-                    {c.type === "ld" ? "🏌️ Long drive" : "🎯 Closest to pin"}
+                    {c.type === "ld" ? "💣 Long drive" : "🎯 Closest to pin"}
                   </span>
                   {c.suspicious && (
                     <Badge tone="flag" data-testid="contest-sus">
                       🤖 Sus
                     </Badge>
                   )}
-                  {c.closed && <Badge tone="ink">Closed</Badge>}
+                  {c.closed && <Badge tone="ink">Everyone&apos;s through</Badge>}
                 </div>
                 {c.state === "leader" ? (
                   <p className="text-[17px] leading-tight font-extrabold">

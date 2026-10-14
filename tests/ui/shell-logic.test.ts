@@ -131,6 +131,24 @@ describe("feed fanfare", () => {
     expect(fanfareForEvent(ev({ type: "drinks" }), ctx)).toBeNull();
   });
 
+  it("round started: a hype 'We're live!' for players, so the pre-round screen doesn't flip silently", () => {
+    const f = fanfareForEvent(ev({ type: "round_started", team_id: null, actor_id: "commish" }), ctx);
+    expect(f).toMatchObject({ key: "ev-1", tone: "hype", emoji: "⛳", title: "We're live!" });
+    expect(f?.subtitle).toMatch(/big yellow button/);
+    expect(f?.subtitle).toMatch(/knocks a stroke off/);
+    // Explicitly a player phone.
+    expect(fanfareForEvent(ev({ type: "round_started", actor_id: "commish" }), { ...ctx, isCommissioner: false })?.tone).toBe("hype");
+  });
+
+  it("round started: nothing for the commissioner (Setup already did its own), my own start, or an old start", () => {
+    expect(fanfareForEvent(ev({ type: "round_started", actor_id: "commish" }), { ...ctx, isCommissioner: true })).toBeNull();
+    expect(fanfareForEvent(ev({ type: "round_started", actor_id: "me" }), ctx)).toBeNull();
+    expect(fanfareForEvent(ev({ type: "round_started", actor_id: "commish" }), { ...ctx, nowMs: Date.parse(at(0)) + FANFARE_MAX_AGE_MS + 1 })).toBeNull();
+    // Right at the age limit it still shows.
+    expect(fanfareForEvent(ev({ type: "round_started", actor_id: "commish" }), { ...ctx, nowMs: Date.parse(at(0)) + FANFARE_MAX_AGE_MS })?.tone).toBe("hype");
+    expect(fanfareForEvent(ev({ type: "round_started", actor_id: "commish", deleted_at: at(1) }), ctx)).toBeNull();
+  });
+
   it("uses rendered copy when available and survives a throwing renderer", () => {
     const f = fanfareForEvent(ev({ type: "final_results" }), { ...ctx, render: () => ({ emoji: "🏆", title: "x", body: "Fore Play wins" }) });
     expect(f?.subtitle).toBe("Fore Play wins");

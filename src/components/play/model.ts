@@ -188,6 +188,22 @@ export function scoreDraft(saved: number | null, draft: number | undefined, par:
   return { value, saved, dirty: value !== saved, touched };
 }
 
+export interface ScoreHeaderView {
+  /**
+   * empty: nobody has entered a score and the stepper shows the par default (title "Team score",
+   * grey "No score yet": the default isn't a score yet). dirty: a number somebody dialed in that
+   * isn't saved (the score's name + yellow badge). saved: what's on the stepper is saved.
+   */
+  kind: "empty" | "dirty" | "saved";
+  badge: string;
+}
+
+export function scoreHeader(d: ScoreDraftView): ScoreHeaderView {
+  if (d.saved === null && !d.touched) return { kind: "empty", badge: "No score yet" };
+  if (d.dirty) return { kind: "dirty", badge: d.saved === null ? "Not saved" : "Unsaved" };
+  return { kind: "saved", badge: "✓ Saved" };
+}
+
 export function clampStrokes(n: number): number {
   if (!Number.isFinite(n)) return 4;
   return Math.min(MAX_STROKES, Math.max(MIN_STROKES, Math.round(n)));
@@ -259,7 +275,7 @@ export interface DriveView {
   tone: DriveTone;
   nine: 1 | 2;
   nineLabel: string;
-  /** One line, e.g. "Needs a drive: Dave · 3 holes left on this nine". */
+  /** One or two lines under the chips, leading with the count, e.g. "3 holes left · needs a drive: Dave". */
   text: string;
   /** Show as the sticky red banner. */
   banner: boolean;
@@ -303,14 +319,16 @@ export function driveView(nine: DriveNineStatus, nameOf: (id: UUID) => string): 
   }
   const left = `${holesWord(nine.remaining)} left on this nine`;
   const leftShort = `${holesWord(nine.remaining)} left`;
+  const needing = nine.needing.length;
   switch (nine.level) {
     case "impossible":
+      // Nothing left to do about it on the course: no sticky banner (it would eat the first screen
+      // for the rest of the nine), just a red line under the chips. Never "0 holes left".
       return {
         ...base,
         tone: "impossible",
-        banner: true,
-        text: `Too late: ${left} and ${nine.needing.length} still need a drive (${names}). Somebody's getting roasted.`,
-        bannerText: `Too late: ${leftShort}, ${nine.needing.length} still need a drive (${names}).`,
+        banner: false,
+        text: `Drive minimum's blown on the ${nineLabel} (${names}). The feed will roast you.`,
       };
     case "hard":
       return {
@@ -323,11 +341,41 @@ export function driveView(nine: DriveNineStatus, nameOf: (id: UUID) => string): 
             : `Use drives from ${names} NOW: ${left}.`,
         bannerText: nine.needing.length === 1 ? `Use ${names}'s drive NOW · ${leftShort}` : `Use drives from ${names} NOW · ${leftShort}`,
       };
-    case "soft":
-      return { ...base, tone: "soft", banner: false, text: `Needs a drive: ${names} · ${left}` };
-    default:
-      return { ...base, tone: "ok", banner: false, text: `Still need a drive: ${names} · ${left}` };
+    default: {
+      // ok / soft. "Tight": one spare hole left before it turns into a red NOW (the engine's soft
+      // level only starts at 3 holes left, too late for a foursome that still needs 3 drives).
+      if (nine.remaining - needing <= 1) {
+        return {
+          ...base,
+          tone: "soft",
+          banner: false,
+          text:
+            needing === 1
+              ? `Only 1 spare hole on the ${nineLabel}: use ${names}'s drive soon.`
+              : `Only 1 spare hole on the ${nineLabel}: use drives from ${names} soon.`,
+        };
+      }
+      if (nine.level === "soft") return { ...base, tone: "soft", banner: false, text: `${leftShort} · needs a drive: ${names}` };
+      // Nobody's drive used yet (the start of a nine): one short line instead of the whole roster,
+      // so the status never takes a second line above the stepper.
+      const team = Object.keys(nine.counts).length;
+      if (needing >= 2 && needing === team) {
+        return { ...base, tone: "ok", banner: false, text: `${leftShort} · ${needing === 2 ? "both" : `all ${needing}`} still need a drive` };
+      }
+      return { ...base, tone: "ok", banner: false, text: `${leftShort} · still need: ${names}` };
+    }
   }
+}
+
+/** Chip count badge colour: a 0 is red only when it's urgent, yellow when it's getting close. */
+export type DriveCountTone = "selected" | "urgent" | "warn" | "zero" | "some";
+
+export function driveCountTone(count: number, selected: boolean, nineTone: DriveTone | null | undefined): DriveCountTone {
+  if (selected) return "selected";
+  if (count > 0) return "some";
+  if (nineTone === "hard" || nineTone === "impossible") return "urgent";
+  if (nineTone === "soft") return "warn";
+  return "zero";
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +411,13 @@ export function drinksForRound(values: Record<UUID, DrinkValue>, teamId: UUID): 
     out[v.player_id] = (out[v.player_id] ?? 0) + 1;
   }
   return out;
+}
+
+/** The phone owner's row first (you log your own drinks most), everyone else in roster order. */
+export function meFirst<T extends { id: UUID }>(members: readonly T[], meId: UUID | null): T[] {
+  const i = meId ? members.findIndex((m) => m.id === meId) : -1;
+  if (i <= 0) return [...members];
+  return [members[i], ...members.slice(0, i), ...members.slice(i + 1)];
 }
 
 export const DRINK_LABEL: Record<DrinkType, string> = { drink: "Drink", shotgun: "Shotgun", shot: "Shot" };
@@ -504,6 +559,17 @@ export function ghostFanfareCopy(playerName: string, value: number): { title: st
     title: "Ghost beer",
     subtitle: `${playerName}'s drink just counted ${value}. The ghost of your missing fourth thanks you for your service.`,
   };
+}
+
+/**
+ * A drink tapped with no open window never counts (SPEC drink windows rule 3). When the team simply
+ * hasn't teed off yet, the roast offers NO_WINDOW_TEE_OFF_LABEL: tee.open hole 1 only (the tapped
+ * drink is NOT logged), so the next drink counts. Nothing to offer after Round complete.
+ */
+export const NO_WINDOW_TEE_OFF_LABEL = "⛳ We're on the tee: open hole 1";
+
+export function noWindowCanTeeOff(status: RoundStatus | null | undefined): boolean {
+  return status === null || status === undefined || status === "not_started";
 }
 
 /** Roast for a drink logged with no open window (before hole 1, or after "Round complete"). */
@@ -735,6 +801,45 @@ export interface AdvanceConfirm {
   skipLabel: string | null;
 }
 
+/** The advance sheet's drive check: the hole being left has no drive picked. */
+export interface AdvanceDriveAsk {
+  hole: number;
+  /** Red, with a note: skipping it can cost the nine's drive minimum. */
+  urgent: boolean;
+  title: string;
+  /** Why it matters (urgent only). */
+  note: string | null;
+}
+
+/**
+ * Leaving a hole with no drive picked: the advance sheet asks "Whose drive on hole N?" with the
+ * team's chips (teeshot.set, nothing new in the reducer). Loud when it can cost the drive minimum:
+ * the nine is tight (soft / hard / impossible), or this is hole 9 or 18 and somebody still needs a
+ * drive (teeing off closes the nine, and the feed posts DRIVE MINIMUM MISSED). Null when a drive
+ * is already picked.
+ */
+export function advanceDriveAsk(opts: {
+  fromHole: number;
+  teeShotPlayerId: UUID | null;
+  nine: DriveNineStatus | undefined;
+  nameOf: (id: UUID) => string;
+}): AdvanceDriveAsk | null {
+  const { fromHole: hole, teeShotPlayerId, nine, nameOf } = opts;
+  if (teeShotPlayerId) return null;
+  const title = `Whose drive on hole ${hole}?`;
+  if (!nine || nine.closed) return { hole, urgent: false, title, note: null };
+  const tone = driveView(nine, nameOf).tone;
+  const needing = nine.needing.map(nameOf);
+  const lastOfNine = hole === 9 || hole === 18;
+  const tight = tone === "soft" || tone === "hard" || tone === "impossible";
+  if (!(tight || (lastOfNine && needing.length > 0))) return { hole, urgent: false, title, note: null };
+  const still = needing.length > 0 ? ` Still needs one: ${joinNames(needing)}.` : "";
+  const note = lastOfNine
+    ? `No drive picked, and the ${nine.nine === 1 ? "front" : "back"} nine ends here.${still}`
+    : `No drive picked for hole ${hole}.${still}`;
+  return { hole, urgent: true, title, note };
+}
+
 /**
  * Copy for the advance confirm. `draft` is the scoreDraft of the hole being left (the team's
  * current hole). Whatever the stepper shows is what the primary button saves, including the
@@ -788,9 +893,10 @@ export function advanceConfirm(opts: {
       skipLabel,
     };
   }
+  // Already saved: say what it is and that it can still change (never "locked in": it isn't).
   return {
     title: finishing ? "Round complete?" : `${go}?`,
-    body: `Hole ${fromHole} is locked in at ${draft.value} (net ${draft.value - credit}).${closeNote}${missingNote}`,
+    body: `Hole ${fromHole}: ${draft.value} (${draft.value - credit} after drinks). Fix it any time from the scorecard.${closeNote}${missingNote}`,
     emoji: finishing ? "🏁" : "⛳",
     confirmLabel: finishing ? "Round complete" : `Tee off ${to}`,
     tone: finishing ? "danger" : "primary",

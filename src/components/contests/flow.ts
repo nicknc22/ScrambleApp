@@ -278,6 +278,12 @@ export interface EntryAccess {
   can: boolean;
   /** Why not (shown under a disabled button), null to hide the button entirely. */
   reason: string | null;
+  /**
+   * Closest to pin on a hole the group has already left (or after its round is done): still
+   * allowed, but offered as a quieter "Forgot to enter? Add it late" so the green primary button
+   * only ever means "the hole you're standing on". Omitted otherwise.
+   */
+  late?: true;
 }
 
 /** Has this team reached the hole (teed off on it, or beyond, or finished)? */
@@ -291,7 +297,7 @@ export function teamReachedHole(rs: Pick<TeamRoundState, "open_hole" | "started_
 /**
  * Entry button state on the Contests tab for my team. Long drive: only on the team's current
  * hole while playing (you measure standing at your ball). Closest to pin: any hole the team has
- * reached (edits allowed).
+ * reached (edits allowed); one it has moved past (or any, once its round is complete) is `late`.
  */
 export function entryAccess(args: {
   type: "ctp" | "ld";
@@ -305,8 +311,9 @@ export function entryAccess(args: {
   if (tripStatus === "setup") return { can: false, reason: "Opens when the round starts." };
   if (tripStatus === "final") return { can: false, reason: null };
   if (type === "ctp") {
-    if (teamReachedHole(rs, hole)) return { can: true, reason: null };
-    return { can: false, reason: `Unlocks when your group tees off hole ${hole}.` };
+    if (!teamReachedHole(rs, hole)) return { can: false, reason: `Unlocks when your group tees off hole ${hole}.` };
+    const onIt = !!rs && rs.status === "playing" && rs.open_hole === hole;
+    return onIt ? { can: true, reason: null } : { can: true, reason: null, late: true };
   }
   if (rs && rs.status === "playing" && rs.open_hole === hole) return { can: true, reason: null };
   if (teamReachedHole(rs, hole)) return { can: false, reason: "Your group's past this hole. Measuring is closed." };

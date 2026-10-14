@@ -1,12 +1,15 @@
 // Which incoming feed events deserve a full-screen fanfare on THIS phone. Pure.
 // The shell shows fanfares for things other people caused; the Play screen fires its own
-// fanfare instantly for the local user's actions (so we skip events whose actor is "me").
+// fanfare instantly for the local user's actions (so we skip events whose actor is "me"), and
+// Setup fires the commissioner's own "Round is live" (so round_started skips the commissioner).
 import type { FeedEvent } from "@/lib/types";
 import type { FanfareOptions } from "@/components/ui/Fanfare";
 
 export interface FeedFanfareContext {
   meId: string | null;
   myTeamId: string | null;
+  /** This phone is the commissioner's (it already showed its own "Round is live" fanfare). */
+  isCommissioner?: boolean;
   /** Server "now" for the snapshot the event arrived in (ms epoch). */
   nowMs: number;
   /** Rendered copy for the event (renderFeedEvent), or null if rendering failed. */
@@ -30,6 +33,16 @@ export function fanfareForEvent(ev: FeedEvent, ctx: FeedFanfareContext): Fanfare
   }
 
   switch (ev.type) {
+    case "round_started":
+      // Every player phone sitting on the pre-round screen flips to Play: say what to do first.
+      if (ctx.isCommissioner) return null;
+      return {
+        key: ev.id,
+        tone: "hype",
+        emoji: "⛳",
+        title: "We're live!",
+        subtitle: "When your group's on the first tee, hit the big yellow button. Every drink after that knocks a stroke off.",
+      };
     case "groom_mulligan":
       return {
         key: ev.id,

@@ -94,6 +94,8 @@ test.describe("trip shell (mocked API)", () => {
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("join-player").filter({ hasText: "Player A1" }).click();
+    // First time on this phone for this trip: the 40-second explainer plays. Skip it.
+    await page.getByTestId("explainer-skip").click();
 
     const shell = page.getByTestId("trip-shell");
     await expect(shell).toBeVisible();

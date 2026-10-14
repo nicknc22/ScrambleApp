@@ -79,7 +79,7 @@ export function ContestCard({
               {CONTEST_EMOJI[summary.type]} {CONTEST_LABEL[summary.type]}
             </Badge>
             {current && <Badge tone="hazard">You&apos;re here</Badge>}
-            {summary.closed && <Badge tone="ink">Closed</Badge>}
+            {summary.closed && <Badge tone="ink">Everyone&apos;s through</Badge>}
           </p>
           <p className="mt-1 text-[15px] leading-tight font-bold text-muted">
             {ctp ? "Smallest distance wins. Ties split." : "Longest in the fairway wins."}
@@ -122,7 +122,12 @@ export function ContestCard({
           </div>
         ) : (
           <p className="text-[15px] font-bold text-muted" data-testid="contest-leader">
-            <span aria-hidden="true">🦗 </span>No entries yet. The pot&apos;s just sitting there.
+            <span aria-hidden="true">🦗 </span>
+            {pot.status === "rolled"
+              ? "Nobody entered, so the pot moved on."
+              : pot.amount
+                ? "No entries yet. The pot's just sitting there."
+                : "No entries yet. Bragging rights only."}
           </p>
         )}
 
@@ -143,7 +148,21 @@ export function ContestCard({
           </ol>
         )}
 
-        {access.can ? (
+        {access.can && access.late ? (
+          // A hole the group already left: still fixable, but the loud green button stays reserved
+          // for the hole you're standing on.
+          <Button
+            variant="secondary"
+            full
+            className="py-2"
+            onClick={onEnter}
+            leading={<span aria-hidden="true">{ctp ? "🎯" : "📏"}</span>}
+            data-testid="contest-enter"
+            data-late="true"
+          >
+            {myEntry ? `${enterLabel} (it posts to the feed)` : "Forgot to enter? Add it late (it posts to the feed)"}
+          </Button>
+        ) : access.can ? (
           <Button
             variant={ctp ? "primary" : "hazard"}
             size="lg"

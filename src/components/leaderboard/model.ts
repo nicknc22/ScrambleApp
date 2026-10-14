@@ -9,7 +9,7 @@ import type {
   StandingRow,
   TeamHoleLine,
 } from "@/lib/engine/types";
-import { formatFeetInches, formatToPar } from "@/lib/engine/format";
+import { formatFeetInches, formatToPar, ordinal } from "@/lib/engine/format";
 
 export const DASH = "–";
 
@@ -106,16 +106,57 @@ export function positionDeltas(prev: readonly UUID[], next: readonly UUID[]): Re
   return out;
 }
 
+/**
+ * Net to par in words, for people who don't read golf: -16 -> "16 under", 0 -> "Even", 3 -> "3 over".
+ * (The table keeps the compact "-16"; banners and cards say it out loud.)
+ */
+export function toParWords(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return "Even";
+  return n < 0 ? `${-n} under` : `${n} over`;
+}
+
+export interface LeaderHeadline {
+  kind: "none" | "solo" | "tie";
+  names: string[];
+  /** "-16" (compact). */
+  to_par: string;
+  /** The leaders' net to par (0 when nobody has scored). */
+  to_par_value: number;
+  thru: string;
+}
+
 /** One-line headline for the top of the board. */
-export function leaderHeadline(d: Pick<Derived, "standings" | "teamById">): { kind: "none" | "solo" | "tie"; names: string[]; to_par: string; thru: string } {
+export function leaderHeadline(d: Pick<Derived, "standings" | "teamById">): LeaderHeadline {
   const leaders = d.standings.filter((r) => r.thru > 0 && r.pos === 1);
-  if (leaders.length === 0) return { kind: "none", names: [], to_par: DASH, thru: DASH };
+  if (leaders.length === 0) return { kind: "none", names: [], to_par: DASH, to_par_value: 0, thru: DASH };
   return {
     kind: leaders.length > 1 ? "tie" : "solo",
     names: leaders.map((r) => d.teamById[r.team_id]?.name || "Unnamed team"),
     to_par: formatToPar(leaders[0].net_to_par),
+    to_par_value: leaders[0].net_to_par,
     thru: leaders[0].thru_label,
   };
+}
+
+/** "16 under · thru 14" / "39 under · finished". */
+export function leaderBannerLine(h: Pick<LeaderHeadline, "to_par_value" | "thru">): string {
+  return `${toParWords(h.to_par_value)} · ${h.thru === "F" ? "finished" : `thru ${h.thru}`}`;
+}
+
+/**
+ * The viewer's own spot under the leader banner: "You: T2, 3 back". null when the viewer has no
+ * team, hasn't scored yet, or is (co-)leading.
+ */
+export function myChaseLine(standings: readonly StandingRow[], myTeamId: UUID | null): string | null {
+  if (!myTeamId) return null;
+  const mine = standings.find((r) => r.team_id === myTeamId);
+  if (!mine || mine.thru <= 0 || mine.pos === 1) return null;
+  const leader = standings.find((r) => r.thru > 0 && r.pos === 1);
+  if (!leader) return null;
+  const back = mine.net_to_par - leader.net_to_par;
+  // "T2" stays as is; a lone place reads as an ordinal ("3rd"), never a bare number that looks like a score.
+  const place = /^\d+$/.test(mine.pos_label) ? ordinal(mine.pos) : mine.pos_label;
+  return `You: ${place}, ${back > 0 ? `${back} back` : "level with the lead"}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ import { TeamCardSheet } from "@/components/leaderboard/TeamCardSheet";
 import { DrinkersBoard } from "@/components/leaderboard/DrinkersBoard";
 import { ContestsBoard } from "@/components/leaderboard/ContestsBoard";
 import { DrivesBoard } from "@/components/leaderboard/DrivesBoard";
-import { leaderHeadline } from "@/components/leaderboard/model";
+import { leaderBannerLine, leaderHeadline, myChaseLine } from "@/components/leaderboard/model";
 
 type Sub = "teams" | "drinkers" | "contests" | "drives";
 const SUBS: readonly Sub[] = ["teams", "drinkers", "contests", "drives"];
@@ -62,12 +62,9 @@ export function LeaderboardScreen() {
           </EmptyState>
         ) : (
           <div className="space-y-3">
-            <LeaderBanner derived={derived} final={status === "final"} />
+            <LeaderBanner derived={derived} final={status === "final"} myTeamId={myTeamId} />
             <StandingsTable standings={derived.standings} teamById={derived.teamById} myTeamId={myTeamId} onOpenTeam={setOpenTeam} />
-            <p className="text-[13px] leading-snug font-semibold text-muted">
-              <b className="text-ink">Grs</b> gross · <b className="text-ink">Drk</b> drinks · <b className="text-ink">Cred</b> strokes off for drinks
-              (ghost beers 👻 count double) · <b className="text-ink">Net</b> gross − credit. Ties share a spot. Tap a team for its card.
-            </p>
+            <BoardLegend />
           </div>
         ))}
       {sub === "drinkers" && <DrinkersBoard derived={derived} meId={meId} />}
@@ -78,8 +75,31 @@ export function LeaderboardScreen() {
   );
 }
 
-function LeaderBanner({ derived, final }: { derived: Derived; final: boolean }) {
+/** Plain-words key under the table: what every column means, one line each. */
+const LEGEND: readonly { term: string; text: string }[] = [
+  { term: "To par", text: "your net vs par so far. Lowest wins; ties share a spot (T2)." },
+  { term: "Thru", text: "holes scored." },
+  { term: "Drk / Cred", text: "drinks and the strokes they took off (👻 ghost beers count 2)." },
+  { term: "Net", text: "strokes (Grs) − Cred." },
+  { term: "🍺 banked", text: "drinks on a hole with no score yet; they count once it's scored." },
+];
+
+export function BoardLegend() {
+  return (
+    <ul className="space-y-0.5 text-[13px] leading-snug font-semibold text-muted" data-testid="board-legend" aria-label="What the columns mean">
+      {LEGEND.map((l) => (
+        <li key={l.term}>
+          <b className="text-ink">{l.term}</b> = {l.text}
+        </li>
+      ))}
+      <li>Tap a team for its card.</li>
+    </ul>
+  );
+}
+
+export function LeaderBanner({ derived, final, myTeamId }: { derived: Derived; final: boolean; myTeamId: UUID | null }) {
   const h = leaderHeadline(derived);
+  const chase = myChaseLine(derived.standings, myTeamId);
   if (h.kind === "none") {
     return (
       <div className="rounded-2xl border-2 border-ink bg-sand px-4 py-3" data-testid="leader-banner" data-kind="none">
@@ -112,9 +132,14 @@ function LeaderBanner({ derived, final }: { derived: Derived; final: boolean }) 
       ) : (
         <p className="loud line-clamp-2 pr-14 text-[28px] break-words">{names}</p>
       )}
-      <p className="num text-[17px] font-black">
-        {h.to_par} net · {h.thru === "F" ? "finished" : `thru ${h.thru}`}
+      <p className="num text-[17px] font-black" data-testid="leader-score">
+        {leaderBannerLine(h)}
       </p>
+      {chase && (
+        <p className="num mt-1 text-[15px] leading-tight font-extrabold" data-testid="leader-chase">
+          {chase}
+        </p>
+      )}
     </div>
   );
 }

@@ -170,16 +170,20 @@ export function TeamsSection() {
       toast.roast("Need at least 2 players to make a team. Golf is a team sport today.");
       return;
     }
-    const ok = await confirm({
-      title: `Shuffle into teams of ${sizesLabel(plan.sizes)}?`,
-      emoji: "🎲",
-      body:
-        plan.create > 0
-          ? `Random teams for all ${players.length}. ${plan.create} new team${plan.create === 1 ? "" : "s"} get created. Current teams get scrambled.`
-          : `Random teams for all ${players.length}. Current teams get scrambled. The groom gets no special treatment.`,
-      confirmLabel: "Shuffle 'em",
-    });
-    if (!ok) return;
+    // No teams yet: nothing to scramble, so no confirm (the toast's Undo covers it).
+    if (teams.length > 0) {
+      clearSetupToasts(toast);
+      const ok = await confirm({
+        title: `Shuffle into teams of ${sizesLabel(plan.sizes)}?`,
+        emoji: "🎲",
+        body:
+          plan.create > 0
+            ? `Random teams for all ${players.length}. ${plan.create} new team${plan.create === 1 ? "" : "s"} get created. Current teams get scrambled.`
+            : `Random teams for all ${players.length}. Current teams get scrambled. The groom gets no special treatment.`,
+        confirmLabel: "Shuffle 'em",
+      });
+      if (!ok) return;
+    }
     const before = new Map(tOf);
     const teamIds = teams.slice(0, plan.sizes.length).map((t) => t.id);
     const created: string[] = [];
@@ -226,7 +230,7 @@ export function TeamsSection() {
         title="Teams"
         subtitle={
           teams.length === 0
-            ? "Add teams, then drag (or tap) players onto them."
+            ? "One tap makes random teams. Tweak them after."
             : `${teams.length} team${teams.length === 1 ? "" : "s"} · ${players.length - free.length}/${players.length} assigned`
         }
       />
@@ -237,24 +241,47 @@ export function TeamsSection() {
         </Card>
       )}
 
-      <div className="grid grid-cols-2 gap-2">
-        <Button size="lg" className="min-w-0 px-3" onClick={addTeam} leading={<IconPlus size={22} strokeWidth={3.2} />} data-testid="add-team">
-          Add team
-        </Button>
-        <Button
-          variant="secondary"
-          size="lg"
-          onClick={shuffle}
-          disabled={live || plannedSizes.length === 0}
-          className="min-w-0 px-3"
-          leading={<IconRefresh size={20} strokeWidth={3} className="max-[399px]:hidden" />}
-          data-testid="shuffle-teams"
-        >
-          <span className="truncate">{plannedSizes.length > 0 ? `Shuffle ${sizesLabel(plannedSizes)}` : "Shuffle"}</span>
-        </Button>
-      </div>
+      {teams.length === 0 ? (
+        <div className="space-y-2">
+          <Button
+            size="xl"
+            full
+            onClick={shuffle}
+            disabled={live || plannedSizes.length === 0}
+            leading={<span aria-hidden="true">🎲</span>}
+            data-testid="shuffle-teams"
+          >
+            {plannedSizes.length > 0
+              ? `Make ${plannedSizes.length} random team${plannedSizes.length === 1 ? "" : "s"} (${plannedSizes.join(", ")})`
+              : "Make random teams"}
+          </Button>
+          {plannedSizes.length === 0 && <p className="text-center text-sm font-bold text-muted">Add at least 2 players on Roster first.</p>}
+          <Button variant="secondary" size="lg" full onClick={addTeam} leading={<IconPlus size={22} strokeWidth={3.2} />} data-testid="add-team">
+            Build teams by hand
+          </Button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <Button size="lg" className="min-w-0 px-3" onClick={addTeam} leading={<IconPlus size={22} strokeWidth={3.2} />} data-testid="add-team">
+            Add team
+          </Button>
+          <Button
+            variant="secondary"
+            size="lg"
+            onClick={shuffle}
+            disabled={live || plannedSizes.length === 0}
+            className="min-w-0 px-3"
+            leading={<IconRefresh size={20} strokeWidth={3} className="max-[399px]:hidden" />}
+            data-testid="shuffle-teams"
+          >
+            <span className="truncate">{plannedSizes.length > 0 ? `Shuffle ${sizesLabel(plannedSizes)}` : "Shuffle"}</span>
+          </Button>
+        </div>
+      )}
       <p className="text-sm font-bold text-muted">
-        Tap a player to move them. Or press and hold, then drag. Teams are 2 to 4; threesomes get ghost beers.
+        {teams.length === 0
+          ? "Random teams in one tap. Hate them? Undo, or move players after. Teams are 2 to 4; threesomes get ghost beers."
+          : "Tap a player to move them. Or press and hold, then drag. Teams are 2 to 4; threesomes get ghost beers."}
       </p>
 
       <DndContext
@@ -307,7 +334,7 @@ export function TeamsSection() {
             🏳️
           </div>
           <p className="mt-2 text-lg font-black">No teams yet</p>
-          <p className="text-[15px] font-bold text-muted">Hit Add team (or Shuffle) to get this circus organized.</p>
+          <p className="text-[15px] font-bold text-muted">Make random teams up top, or build them by hand. Either way, get this circus organized.</p>
         </Card>
       )}
 

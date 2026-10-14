@@ -1,6 +1,7 @@
 "use client";
 // Commissioner Course section (rendered inside the Setup screen): 18-hole card (par, stroke index,
-// yardage, contest), satellite tee/green placement, and the optional OpenStreetMap import.
+// yardage, contest), the OpenStreetMap import (the primary action while any tee or green is
+// missing: "Fill tees & greens automatically"), and satellite tee/green placement by hand.
 // Editable any time, including mid-round: long-drive distances re-measure from the tee point.
 import { useState } from "react";
 import { useClientState, useTripStore } from "@/lib/client/react";
@@ -121,8 +122,10 @@ export function CourseEditor() {
 
       <PlacementStatus
         summary={summary}
+        online={online}
+        osmBusy={osmBusy}
+        onImport={() => void runImport(false)}
         onPlace={() => setMapHole(firstHoleToPlace(holes))}
-        onPlaceHole={(n) => setMapHole(n)}
       />
 
       <div className="space-y-2">
@@ -148,28 +151,18 @@ export function CourseEditor() {
         ))}
       </ol>
 
-      <Card tone="sand" className="space-y-3">
-        <div>
-          <p className="text-lg leading-tight font-black">Lazy mode: OpenStreetMap</p>
-          <p className="mt-1 text-[15px] font-semibold text-muted">
-            Pulls mapped tee boxes and greens for Jack Frost and fills the holes you haven&apos;t pinned yet. Your pins are never
-            touched. Still eyeball the par 5s.
-          </p>
-        </div>
-        <Button
-          variant="secondary"
-          size="lg"
-          full
-          loading={osmBusy}
-          disabled={!online && !osmBusy}
-          onClick={() => void runImport(false)}
-          leading={<span aria-hidden="true">🗺️</span>}
-          data-testid="osm-import"
-        >
-          {osmBusy ? "Asking OpenStreetMap…" : online ? "Try OpenStreetMap import" : "OpenStreetMap needs signal"}
-        </Button>
-        {osmBusy && <p className="text-center text-sm font-bold text-muted">Their servers can take a minute. Crack a beer.</p>}
-      </Card>
+      {summary.incomplete.length === 0 && (
+        // Everything's pinned: the import only matters for replacing pins (its report offers that).
+        <Card tone="sand" className="space-y-3">
+          <div>
+            <p className="text-lg leading-tight font-black">OpenStreetMap</p>
+            <p className="mt-1 text-[15px] font-semibold text-muted">
+              Every hole is pinned, so a re-run only fills gaps. It never touches your pins unless you tell it to.
+            </p>
+          </div>
+          <OsmImportButton variant="secondary" size="md" online={online} busy={osmBusy} onImport={() => void runImport(false)} />
+        </Card>
+      )}
 
       <HoleEditSheet
         hole={editing}
@@ -199,47 +192,87 @@ export function CourseEditor() {
 
 function PlacementStatus({
   summary,
+  online,
+  osmBusy,
+  onImport,
   onPlace,
-  onPlaceHole,
 }: {
   summary: ReturnType<typeof courseSummary>;
+  online: boolean;
+  osmBusy: boolean;
+  onImport: () => void;
   onPlace: () => void;
-  onPlaceHole: (n: number) => void;
 }) {
   const allSet = summary.incomplete.length === 0;
   const ldOk = summary.ldMissing.length === 0;
+  const n = summary.ldMissing.length;
   return (
     <div className={cardClasses({ tone: ldOk ? (allSet ? "fairway" : "default") : "hazard", className: "space-y-3" })} data-testid="course-status">
       <div className="grid grid-cols-3 gap-2 text-center">
         <Count label="Tees" value={summary.tees} total={summary.holes} />
         <Count label="Greens" value={summary.greens} total={summary.holes} />
-        <Count label="LD tees" value={summary.ldHoles.length - summary.ldMissing.length} total={summary.ldHoles.length} hot={!ldOk} />
+        <Count label="LD tees" value={summary.ldHoles.length - n} total={summary.ldHoles.length} hot={!ldOk} />
       </div>
       {!ldOk ? (
-        <div className="space-y-2">
-          <p className="text-[15px] leading-snug font-extrabold text-ink">
-            ⚠️ REQUIRED before the round: long drive tee point{summary.ldMissing.length === 1 ? "" : "s"} on hole
-            {summary.ldMissing.length === 1 ? "" : "s"} {summary.ldMissing.join(", ")}. No tee point, no long drive.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {summary.ldMissing.map((n) => (
-              <Button key={n} variant="ink" onClick={() => onPlaceHole(n)} aria-label={`Place hole ${n} tee on the map`}>
-                Pin hole {n}
-              </Button>
-            ))}
-          </div>
-        </div>
+        <p className="text-[15px] leading-snug font-extrabold text-ink" data-testid="course-ld-needed">
+          Needed for long drive on hole{n === 1 ? "" : "s"} {summary.ldMissing.join(", ")}. No tee point, no long drive.
+        </p>
       ) : allSet ? (
         <p className="text-[15px] font-extrabold text-ink">Every tee and green is pinned. Drone pilot energy. 🛰️</p>
       ) : (
-        <p className="text-[15px] font-bold text-ink">
-          Long drive is covered. Pinning the other tees and greens is nice-to-have (hole maps). ~30 seconds a hole.
-        </p>
+        <p className="text-[15px] font-bold text-ink">Long drive is covered. The other tees and greens are nice-to-have (hole maps).</p>
       )}
-      <Button variant={allSet ? "secondary" : "primary"} size="xl" full onClick={onPlace} leading={<IconPin size={24} strokeWidth={2.75} />} data-testid="course-place">
-        {allSet ? "Review the map" : "Pin tees & greens"}
-      </Button>
+      {allSet ? (
+        <Button variant="secondary" size="xl" full onClick={onPlace} leading={<IconPin size={24} strokeWidth={2.75} />} data-testid="course-place">
+          Review the map
+        </Button>
+      ) : (
+        <>
+          <OsmImportButton variant="primary" size="xl" online={online} busy={osmBusy} onImport={onImport} />
+          {!osmBusy && (
+            <p className="text-center text-sm font-bold text-muted">
+              Pulls Jack Frost&apos;s tee boxes and greens from OpenStreetMap. Your own pins are never touched. Eyeball the par 5s after.
+            </p>
+          )}
+          <Button variant="secondary" size="lg" full onClick={onPlace} leading={<IconPin size={22} strokeWidth={2.75} />} data-testid="course-place">
+            Pin by hand
+          </Button>
+        </>
+      )}
     </div>
+  );
+}
+
+/** The OpenStreetMap import: busy and offline states, plus the "crack a beer" line while it runs. */
+function OsmImportButton({
+  variant,
+  size,
+  online,
+  busy,
+  onImport,
+}: {
+  variant: "primary" | "secondary";
+  size: "md" | "xl";
+  online: boolean;
+  busy: boolean;
+  onImport: () => void;
+}) {
+  return (
+    <>
+      <Button
+        variant={variant}
+        size={size}
+        full
+        loading={busy}
+        disabled={!online && !busy}
+        onClick={onImport}
+        leading={<span aria-hidden="true">🛰️</span>}
+        data-testid="osm-import"
+      >
+        {busy ? "Asking OpenStreetMap…" : !online ? "OpenStreetMap needs signal" : variant === "primary" ? "Fill tees & greens automatically" : "Re-run OpenStreetMap import"}
+      </Button>
+      {busy && <p className="text-center text-sm font-bold text-muted">Their servers can take a minute. Crack a beer.</p>}
+    </>
   );
 }
 
@@ -297,7 +330,7 @@ function HoleRow({ hole, teeSet, dupSi, onEdit, onMap }: { hole: Hole; teeSet: T
             <PointBadge label="Tee" set={!!tee} required={required} />
             <PointBadge label="Green" set={!!green} />
           </span>
-          {required && <span className="mt-1 block text-[13px] leading-tight font-extrabold text-ink">REQUIRED: long drive tee point</span>}
+          {required && <span className="mt-1 block text-[13px] leading-tight font-extrabold text-ink">Needed for long drive</span>}
         </span>
       </button>
       <button

@@ -1,12 +1,12 @@
 "use client";
-// Team mulligan bank, "Use mulligan" (earned or Groom's) and the Groom's Mulligan button on the
-// groom's team while it's unused. Mulligans never touch the score math. The 10-second Undo for a
-// mulligan just used is an inline chip in place of the card's caption (never a toast over the
+// Team mulligan bank, "Use a mulligan (N left)" (earned only: one tap, the inline Undo is the
+// safety net) and the gold Groom's Mulligan button on the groom's team while it's unused (the only
+// way to spend it, through its confirm). Mulligans never touch the score math. The 10-second Undo
+// for a mulligan just used is an inline chip in place of the card's caption (never a toast over the
 // stepper or the action bar).
-import { useState } from "react";
 import type { MulliganSource } from "@/lib/types";
-import { BottomSheet, Button, Card, useConfirm } from "@/components/ui";
-import type { MulliganOptions, MulliganUndoView } from "./model";
+import { Button, Card, useConfirm } from "@/components/ui";
+import { DRINK_UNDO_REARM_MS, type MulliganOptions, type MulliganUndoView } from "./model";
 import { InlineUndoChip } from "./InlineUndoChip";
 
 export function MulliganPanel({
@@ -29,8 +29,10 @@ export function MulliganPanel({
   undo?: MulliganUndoView | null;
   onUndo?: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const confirm = useConfirm();
+  // One tap spends one: the second tap of a double tap (right after a use) is ignored, so a
+  // fumble never burns two mulligans when only the newest has an Undo.
+  const justUsed = undo?.kind === "chip" && undo.elapsedMs < DRINK_UNDO_REARM_MS;
 
   const invokeGroom = async () => {
     const ok = await confirm({
@@ -79,8 +81,16 @@ export function MulliganPanel({
         )}
       </div>
       <div className="grid gap-2 px-3 pb-3">
-        <Button variant="secondary" size="lg" full disabled={disabled || !options.any} onClick={() => setOpen(true)} leading={<span aria-hidden="true">♻️</span>}>
-          Use mulligan
+        <Button
+          variant="secondary"
+          size="lg"
+          full
+          disabled={disabled || options.earned <= 0 || justUsed}
+          onClick={() => onUse("earned")}
+          leading={<span aria-hidden="true">♻️</span>}
+          data-testid="use-mulligan"
+        >
+          Use a mulligan ({options.earned} left)
         </Button>
         {groomOnTeam && options.groom && (
           <button
@@ -98,36 +108,6 @@ export function MulliganPanel({
           <p className="rounded-xl border-2 border-line bg-sand px-3 py-2 text-sm font-bold text-muted">👑 The Groom&apos;s Mulligan has been spent. History was rewritten once.</p>
         )}
       </div>
-      <BottomSheet open={open} onClose={() => setOpen(false)} title={`Use a mulligan on hole ${hole}`}>
-        <p className="pb-3 text-base font-bold text-muted">Pick where it comes from. It posts to the feed. It does not change your score. Nothing does except golf and beer.</p>
-        <div className="grid gap-3 pb-2">
-          <Button
-            variant="ghostbeer"
-            size="xl"
-            full
-            disabled={options.earned <= 0}
-            onClick={() => {
-              setOpen(false);
-              onUse("earned");
-            }}
-          >
-            ♻️ Earned ({options.earned} left)
-          </Button>
-          {groomOnTeam && (
-            <button
-              type="button"
-              disabled={!options.groom}
-              onClick={() => {
-                setOpen(false);
-                onUse("groom");
-              }}
-              className="btn btn-xl w-full border-ink bg-gold text-ink shadow-hard-sm"
-            >
-              👑 Groom&apos;s Mulligan{options.groom ? "" : " (spent)"}
-            </button>
-          )}
-        </div>
-      </BottomSheet>
     </Card>
   );
 }

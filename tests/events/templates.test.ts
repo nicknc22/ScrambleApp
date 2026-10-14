@@ -100,6 +100,8 @@ const SAMPLES: Record<string, FeedEvent> = {
     { player_id: P.C1, team_id: T.C },
   ),
   contest_lead: ev("contest_lead", { hole: 3, contest_type: "ctp", leader_ids: [P.B1], previous_leader_ids: [P.A2], distance: 4.25, unit: "ft" }, { team_id: T.B, player_id: P.B1 }),
+  // The first valid entry on the hole: nobody to knock off.
+  contest_first: ev("contest_lead", { hole: 12, contest_type: "ld", leader_ids: [P.C1], previous_leader_ids: [], distance: 291, unit: "yd" }, { team_id: T.C, player_id: P.C1 }),
   commissioner_override: ev("commissioner_override", { op_type: "drink.move", summary: "moved a drink from hole 6 to hole 7" }, { actor_id: P.A1 }),
   round_complete: ev("round_complete", { gross: 80, net: 61, net_to_par: -11, gross_to_par: 8, pos_label: "T2", thru: 18, drinks: 19, ghost_beers: 2, last: false }),
   "round_complete:last": ev("round_complete", { gross: 95, net: 90, net_to_par: 18, gross_to_par: 23, pos_label: "3", thru: 18, drinks: 5, ghost_beers: 0, last: true }, { team_id: T.C }),
@@ -574,5 +576,56 @@ describe("noWindowRoast", () => {
     expect(seen.size).toBeGreaterThanOrEqual(5);
     for (const s of seen) expect(s).toMatch(/tee|count|round/i);
     expect(noWindowRoast("abc")).toBe(noWindowRoast("abc"));
+  });
+
+  it("never says the round hasn't started, never opens with 'That one doesn't count', and ends with the fix (finding: pre-tee drink dead end)", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 500; i++) seen.add(noWindowRoast(`drink-${i}`));
+    for (const s of seen) {
+      expect(s).not.toMatch(/hasn't started/i);
+      expect(s).not.toMatch(/^That one doesn't count/i);
+      // The fix comes last: the big yellow button (the toast's button opens the same hole).
+      expect(s).toMatch(/ON THE TEE: HOLE 1/);
+    }
+  });
+
+  it("every roast says the pre-tee drink doesn't count and never promises it will (SPEC drink windows rule 3; finding: 'Tee off & count it' banked range beers)", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 500; i++) seen.add(noWindowRoast(`drink-${i}`));
+    expect(seen.size).toBe(TEMPLATE_VARIANT_COUNTS.no_window);
+    for (const s of seen) {
+      expect(s).toMatch(/doesn't count/i);
+      expect(s).not.toMatch(/count it/i);
+      expect(s).not.toMatch(/\b(and it|that one|it) (counts|goes on the card)/i);
+      // What counts after teeing off is the NEXT drink.
+      expect(s).toMatch(/ON THE TEE: HOLE 1 (first|and the next one)/);
+    }
+  });
+});
+
+describe("contest_lead", () => {
+  it("the first entry on a hole is 'First on the board', never a 'previous leader' (finding: contest double cards)", () => {
+    const first = SAMPLES.contest_first;
+    for (let i = 0; i < 500; i++) {
+      const r = render(withId(first, `first-${i}`));
+      expect(r.title.startsWith("First on the board")).toBe(true);
+      expect(r.title).toBe("First on the board · hole 12 long drive");
+      expect(r.body).not.toMatch(/previous leader/i);
+      expect(r.body).not.toMatch(/new .*leader/i);
+      expect(r.emoji).toBe("💣");
+    }
+    // A payload without previous_leader_ids at all is a first entry too.
+    const bare = render(ev("contest_lead", { hole: 3, contest_type: "ctp", leader_ids: [P.B1], distance: 4.25, unit: "ft" }));
+    expect(bare.title).toBe("First on the board · hole 3 closest to pin");
+  });
+
+  it("with a previous leader the 'New leader' variants are unchanged", () => {
+    const bodies = new Set<string>();
+    for (const r of allVariants(SAMPLES.contest_lead)) {
+      expect(r.title).toBe("New leader · hole 3 closest to pin");
+      bodies.add(r.body);
+    }
+    expect(bodies.size).toBe(TEMPLATE_VARIANT_COUNTS.contest_lead);
+    expect([...bodies].some((b) => b.includes("The previous leader is in shambles."))).toBe(true);
   });
 });

@@ -281,7 +281,10 @@ describe("who can enter", () => {
 
   it("closest to pin: any reached hole; long drive: only the current hole while playing", () => {
     const playing4 = { open_hole: 4, started_holes: [1, 2, 3, 4], status: "playing" as const };
-    expect(entryAccess({ type: "ctp", hole: 3, tripStatus: "live", rs: playing4, onTeam: true })).toEqual({ can: true, reason: null });
+    // A hole the group already left: still allowed, offered as a late entry.
+    expect(entryAccess({ type: "ctp", hole: 3, tripStatus: "live", rs: playing4, onTeam: true })).toEqual({ can: true, reason: null, late: true });
+    // The hole you're standing on: the normal (primary) entry, no `late`.
+    expect(entryAccess({ type: "ctp", hole: 4, tripStatus: "live", rs: playing4, onTeam: true })).toEqual({ can: true, reason: null });
     expect(entryAccess({ type: "ctp", hole: 8, tripStatus: "live", rs: playing4, onTeam: true }).reason).toMatch(/tees off hole 8/);
     expect(entryAccess({ type: "ld", hole: 4, tripStatus: "live", rs: playing4, onTeam: true })).toEqual({ can: true, reason: null });
     expect(entryAccess({ type: "ld", hole: 9, tripStatus: "live", rs: playing4, onTeam: true })).toMatchObject({ can: false });
@@ -289,7 +292,12 @@ describe("who can enter", () => {
     expect(entryAccess({ type: "ld", hole: 4, tripStatus: "live", rs: playing5, onTeam: true }).reason).toMatch(/past this hole/);
     const done = { open_hole: 18, started_holes: [], status: "complete" as const };
     expect(entryAccess({ type: "ld", hole: 18, tripStatus: "live", rs: done, onTeam: true }).can).toBe(false);
-    expect(entryAccess({ type: "ctp", hole: 16, tripStatus: "live", rs: done, onTeam: true }).can).toBe(true);
+    expect(entryAccess({ type: "ctp", hole: 16, tripStatus: "live", rs: done, onTeam: true })).toEqual({ can: true, reason: null, late: true });
+    // Round complete: even the last open hole is a late entry now.
+    expect(entryAccess({ type: "ctp", hole: 18, tripStatus: "live", rs: done, onTeam: true })).toEqual({ can: true, reason: null, late: true });
+    // Never late when it's locked or when it's long drive.
+    expect(entryAccess({ type: "ctp", hole: 8, tripStatus: "live", rs: playing4, onTeam: true })).not.toHaveProperty("late");
+    expect(entryAccess({ type: "ld", hole: 4, tripStatus: "live", rs: playing5, onTeam: true })).not.toHaveProperty("late");
   });
 
   it("hides or explains the button outside a live round", () => {

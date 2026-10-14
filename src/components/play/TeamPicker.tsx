@@ -2,9 +2,9 @@
 // "Score for which team?" — for anyone not on a team, and for the commissioner (any team).
 import type { UUID } from "@/lib/types";
 import type { Derived } from "@/lib/engine/types";
-import { formatToPar } from "@/lib/engine/format";
 import { Badge, Card, EmptyState, IconChevronRight, PlayerName, TeamPill, cardClasses, teamColor } from "@/components/ui";
 import { Screen } from "@/components/shell/Screen";
+import { toParWords } from "@/components/leaderboard/model";
 
 const KEY = (code: string) => `scramble:play-team:${code}`;
 
@@ -93,7 +93,7 @@ export function TeamPicker({
                 </span>
                 {row && row.thru > 0 && (
                   <span className="block border-t-2 border-line px-4 py-2 text-sm font-extrabold text-muted">
-                    Pos {row.pos_label} · {formatToPar(row.net_to_par)} net · thru {row.thru_label}
+                    Pos {row.pos_label} · {toParWords(row.net_to_par)} · thru {row.thru_label}
                   </span>
                 )}
               </button>

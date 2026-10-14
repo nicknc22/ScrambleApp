@@ -352,6 +352,13 @@ const CONTEST_LEAD: V<ContestLeadC> = [
   (c) => `${c.leaders} ${c.take} hole ${c.h} at ${c.dist}. Everybody else: ${c.chase}.`,
   (c) => `Hole ${c.h} ${c.kind}: ${c.leaders} on top at ${c.dist}. The previous leader is in shambles.`,
 ];
+// The first valid entry on a contest hole: nobody was knocked off, so no "previous leader" talk.
+const CONTEST_FIRST: V<ContestLeadC> = [
+  (c) => `First blood on hole ${c.h}: ${c.leaders} at ${c.dist}.`,
+  (c) => `${c.leaders} opened the hole ${c.h} ${c.kind} at ${c.dist}. Bar's set. Everybody else: ${c.chase}.`,
+  (c) => `Hole ${c.h} ${c.kind} is open for business: ${c.leaders} at ${c.dist}. Come and take it.`,
+  (c) => `${c.leaders} planted the flag on hole ${c.h} at ${c.dist}. Pot's on the table.`,
+];
 
 interface OverrideC { who: string; summary: string }
 const OVERRIDE: V<OverrideC> = [
@@ -383,13 +390,17 @@ const FINAL: V<FinalC> = [
   (c) => `The scorecards are locked. ${c.champs} ${c.win} at ${c.ntp}. Check Awards for the hall of shame.`,
 ];
 
+// A drink tapped before the team teed off on hole 1. SPEC drink windows rule 3: it does NOT count,
+// and each roast says so. Then the fix for a group that really is on the first tee: ON THE TEE: HOLE 1
+// (the big yellow button, also the toast's "We're on the tee" button) opens the window, and drinks
+// from then on count. The tapped drink is never logged retroactively (no banking range beers).
 const NO_WINDOW: readonly string[] = [
-  "Drinks before the first tee shot don't count. Tap On the tee for hole 1, you degenerate.",
-  "Parking-lot beers are worth zero strokes. Get to the tee first, champ.",
-  "That one doesn't count. Your round hasn't started yet. Pace yourself, it's a long day.",
-  "No drink window open. Tee off first, then drink like it matters.",
-  "Easy, tiger. Drinks only count once you're on the tee for hole 1.",
-  "Pre-round drinking is a lifestyle, not a score. Tap On the tee first.",
+  "Parking-lot beers are worth zero strokes, you degenerate. That one doesn't count. On the first tee? Hit ON THE TEE: HOLE 1 and the next one does.",
+  "Easy, tiger. Your liver teed off before your team did, so that one doesn't count. On the first tee? Hit ON THE TEE: HOLE 1 first.",
+  "Pre-round drinking is a lifestyle, not a score. That one doesn't count. On the first tee? Hit ON THE TEE: HOLE 1 and the next one goes on the card.",
+  "Range beers don't come off the scorecard, champ. That one doesn't count. On the first tee? Hit ON THE TEE: HOLE 1 first.",
+  "Bold strategy, chugging before anyone's swung a club. Doesn't count. On the first tee? Hit ON THE TEE: HOLE 1 and the next one does.",
+  "Warm-up beer detected. The scorecard can't see it from the cart barn, so it doesn't count. On the first tee? Hit ON THE TEE: HOLE 1 first.",
 ];
 
 /** Variant counts per table (tests assert every variant gets rendered and scanned). */
@@ -423,6 +434,7 @@ export const TEMPLATE_VARIANT_COUNTS: Readonly<Record<string, number>> = {
   "contest_entry:ld": LD_ENTRY.length,
   "contest_entry:flagged": FLAGGED_ENTRY.length,
   contest_lead: CONTEST_LEAD.length,
+  contest_first: CONTEST_FIRST.length,
   commissioner_override: OVERRIDE.length,
   round_complete: COMPLETE.length,
   "round_complete:last": COMPLETE_LAST.length,
@@ -615,6 +627,9 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
       const leaderIds = ids(p.leader_ids);
       const tie = leaderIds.length > 1;
       const kind = contestName(p.contest_type);
+      // No previous leader: this is the first valid entry on the hole (no "new leader" / "previous
+      // leader in shambles" for somebody who beat nobody).
+      const first = ids(p.previous_leader_ids).length === 0;
       const c: ContestLeadC = {
         leaders: list(leaderIds.map((id) => playerName(state, id))),
         take: tie ? "are tied for" : "takes",
@@ -625,8 +640,8 @@ function render(ev: FeedEvent, state: TripState, d: Derived): Body {
       };
       return {
         emoji: p.contest_type === "ld" ? "💣" : "🎯",
-        title: `New leader · hole ${hole} ${kind}`,
-        body: pick(seed, "clead", CONTEST_LEAD)(c),
+        title: first ? `First on the board · hole ${hole} ${kind}` : `New leader · hole ${hole} ${kind}`,
+        body: first ? pick(seed, "cfirst", CONTEST_FIRST)(c) : pick(seed, "clead", CONTEST_LEAD)(c),
         tone: "hype",
       };
     }

@@ -1,5 +1,6 @@
 "use client";
-// Contest button for par 3s (Closest to pin) and par 5s (Measure drive), plus the current leader.
+// Contest button for par 3s (Enter my distance) and par 5s (Measure my drive), plus the current
+// leader. The hole header's contest badge opens the same sheet (TeamHoleScreen).
 import type { ContestHoleSummary } from "@/lib/engine/types";
 import type { HoleContest, Player, UUID } from "@/lib/types";
 import { formatFeetInches } from "@/lib/engine/format";
@@ -33,7 +34,7 @@ export function ContestPanel({
     <Card tone="sky" className="space-y-3 border-sky-dark" data-testid="contest-panel">
       <div className="flex items-start gap-3">
         <span className="text-4xl leading-none" aria-hidden="true">
-          {ctp ? "🎯" : "💥"}
+          {ctp ? "🎯" : "💣"}
         </span>
         <div className="min-w-0 flex-1">
           <h2 className="text-lg leading-tight font-black uppercase">{ctp ? "Closest to pin" : "Long drive"} · hole {hole}</h2>
@@ -52,13 +53,21 @@ export function ContestPanel({
         </div>
       </div>
       {ctp ? (
-        <Button variant="primary" size="lg" full disabled={disabled} onClick={onOpen} leading={<span aria-hidden="true">🎯</span>}>
-          Closest to pin
+        <Button variant="primary" size="lg" full disabled={disabled} onClick={onOpen} leading={<span aria-hidden="true">🎯</span>} data-testid="contest-panel-enter">
+          Enter my distance
         </Button>
       ) : (
         <>
-          <Button variant="hazard" size="lg" full disabled={disabled || !canMeasure} onClick={onOpen} leading={<span aria-hidden="true">📏</span>}>
-            Measure drive
+          <Button
+            variant="hazard"
+            size="lg"
+            full
+            disabled={disabled || !canMeasure}
+            onClick={onOpen}
+            leading={<span aria-hidden="true">📏</span>}
+            data-testid="contest-panel-enter"
+          >
+            Measure my drive
           </Button>
           {!canMeasure && <p className="text-sm font-bold">Measuring only works on your team&apos;s current hole.</p>}
         </>

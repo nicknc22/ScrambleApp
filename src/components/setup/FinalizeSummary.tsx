@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import type { Player, UUID } from "@/lib/types";
 import { displayName } from "@/components/ui/PlayerName";
 import { formatDistance, type ReviewItem } from "./commish/commishModel";
-import { holesLabel, type ScoreGap, type UnfinishedTeam } from "./model";
+import { holesLabel, nameList, type ScoreGap, type UnfinishedTeam } from "./model";
 
 export interface FinalizeIssues {
   unfinished: UnfinishedTeam[];
@@ -28,10 +28,16 @@ export function FinalizeSummary({
   issues,
   playerById,
   onFix,
+  noVenmo = [],
+  onRoster,
 }: {
   issues: FinalizeIssues;
   playerById: Record<UUID, Player | undefined>;
   onFix: (fix: FinalizeFix) => void;
+  /** Payees in settle-up with no usable Venmo handle (names). A heads-up, not an issue: never counted. */
+  noVenmo?: string[];
+  /** Jump to Roster to add the handles. */
+  onRoster?: () => void;
 }) {
   const { unfinished, gaps, rulings } = issues;
   const clean = finalizeIssueCount(issues) === 0;
@@ -85,6 +91,23 @@ export function FinalizeSummary({
             );
           })}
         </IssueBlock>
+      )}
+      {noVenmo.length > 0 && (
+        <span className="mt-3 flex items-center gap-2 text-left text-base" data-testid="finalize-venmo">
+          <span className="min-w-0 flex-1 leading-snug font-bold [overflow-wrap:anywhere]">
+            💸 No Venmo for {nameList(noVenmo)}: their payers get no Pay button. Add it in Roster.
+          </span>
+          {onRoster && (
+            <button
+              type="button"
+              onClick={onRoster}
+              aria-label="Add Venmo handles in Roster"
+              className="btn min-h-12 shrink-0 border-ink bg-paper px-3 text-[15px] text-ink active:bg-sand"
+            >
+              Roster
+            </button>
+          )}
+        </span>
       )}
       {!clean && (
         <span className="mt-3 block text-left text-[15px] font-bold text-muted">

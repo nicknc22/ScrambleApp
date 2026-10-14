@@ -1,5 +1,6 @@
-// Top of the Money tab: FINAL vs projected, total in play, my net. When the results changed after
-// the finalize (results_changed in the feed), it says so up top: people may already have paid.
+// Top of the Money tab: FINAL vs projected, total in play, my net (while live, a button down to the
+// settle-up preview). When the results changed after the finalize (results_changed in the feed),
+// it says so up top: people may already have paid.
 import type { ISODate, TripStatus } from "@/lib/types";
 import { formatCents } from "@/lib/engine/format";
 import { StatTile, cx } from "@/components/ui";
@@ -21,6 +22,7 @@ export function MoneyBanner({
   myNetCents,
   changedAt = null,
   onSeeFeed,
+  onSeeMine,
 }: {
   status: TripStatus;
   totalCents: number;
@@ -29,10 +31,38 @@ export function MoneyBanner({
   /** The results changed after the finalize (newest results_changed post), else null. */
   changedAt?: ISODate | null;
   onSeeFeed?: () => void;
+  /** While live: the "You, if it ended now" tile becomes a button that jumps to who you'd pay. */
+  onSeeMine?: () => void;
 }) {
   const final = status === "final";
   const changed = final && changedAt !== null;
   const at = changed ? clockTime(changedAt) : "";
+  const seeMine = !final && onSeeMine ? onSeeMine : null;
+  const mineValue = myNetCents === null ? "" : signedCents(myNetCents, formatCents);
+  const mineTile =
+    myNetCents === null ? null : (
+      <StatTile
+        label={final ? "You" : "You, if it ended now"}
+        value={mineValue}
+        sub={seeMine ? <span aria-hidden="true">{myNetCents > 0 ? "Who pays you ↓" : myNetCents < 0 ? "Who you'd pay ↓" : "Settle-up ↓"}</span> : undefined}
+        tone={myNetCents > 0 ? "fairway" : myNetCents < 0 ? "flag" : "default"}
+        className={cx(myNetCents === 0 && (final ? "border-white" : "border-ink"), seeMine && "h-full")}
+      />
+    );
+  const mine =
+    mineTile && seeMine ? (
+      <button
+        type="button"
+        onClick={seeMine}
+        className="block min-h-12 min-w-0 rounded-2xl text-left active:scale-[0.98]"
+        aria-label={`You, if it ended now: ${mineValue}. Jump to the settle-up preview.`}
+        data-testid="money-see-mine"
+      >
+        {mineTile}
+      </button>
+    ) : (
+      mineTile
+    );
   return (
     <section
       data-testid="money-banner"
@@ -69,8 +99,8 @@ export function MoneyBanner({
           : final
             ? "The commissioner signed off. These numbers are real. Pay up."
             : status === "setup"
-              ? "— final when the commissioner finalizes. Nothing's in play until the round starts."
-              : "— final when the commissioner finalizes. Every shot and every beer moves money."}
+              ? "Nothing's in play until the round starts."
+              : "Final when the commissioner signs off. Every shot and every beer moves it."}
       </p>
       <div className={cx("mt-3 grid gap-2", myNetCents === null ? "grid-cols-1" : "grid-cols-2")}>
         <StatTile
@@ -79,14 +109,7 @@ export function MoneyBanner({
           tone="default"
           className={final ? "border-white" : "border-ink"}
         />
-        {myNetCents !== null && (
-          <StatTile
-            label={final ? "You" : "You, if it ended now"}
-            value={signedCents(myNetCents, formatCents)}
-            tone={myNetCents > 0 ? "fairway" : myNetCents < 0 ? "flag" : "default"}
-            className={myNetCents === 0 ? (final ? "border-white" : "border-ink") : ""}
-          />
-        )}
+        {mine}
       </div>
     </section>
   );

@@ -9,6 +9,7 @@ import type { Derived } from "@/lib/engine/types";
 import { renderFeedEvent } from "@/lib/events/templates";
 import { readPref, rememberTrip, writePref } from "@/lib/client/ui-prefs";
 import { useFanfare, useToast } from "@/components/ui";
+import type { FanfareOptions } from "@/components/ui/Fanfare";
 import { fanfareForEvent } from "./feedFanfare";
 
 const REJECT_FALLBACK: Record<RejectCode, string> = {
@@ -58,10 +59,23 @@ export function useRejectedToasts(rejected: readonly SyncIssue[] | undefined) {
   }, [rejected, toast]);
 }
 
-/** Full-screen fanfare for new groom mulligans / ghost beers (my team) / final results caused by others. */
-export function useFeedFanfare(view: TripState | null, derived: Derived | null, meId: string | null, myTeamId: string | null, serverTime: string | null) {
+/**
+ * Full-screen fanfare for new events caused by others: round started (players only), groom
+ * mulligans, ghost beers (my team), final results.
+ */
+export function useFeedFanfare(
+  view: TripState | null,
+  derived: Derived | null,
+  meId: string | null,
+  myTeamId: string | null,
+  serverTime: string | null,
+  isCommissioner = false,
+  /** Another full-screen overlay is up (the explainer): queue fanfares, show them when it closes. */
+  hold = false,
+) {
   const fanfare = useFanfare();
   const seen = useRef<Set<string> | null>(null);
+  const held = useRef<FanfareOptions[]>([]);
   const events = view?.feed_events;
   useEffect(() => {
     if (!events) return;
@@ -76,12 +90,16 @@ export function useFeedFanfare(view: TripState | null, derived: Derived | null, 
     for (const ev of events) {
       if (seen.current.has(ev.id)) continue;
       seen.current.add(ev.id);
-      const f = fanfareForEvent(ev, { meId, myTeamId, nowMs, render });
-      if (f) fanfare.show(f);
+      const f = fanfareForEvent(ev, { meId, myTeamId, isCommissioner, nowMs, render });
+      if (f) held.current.push(f);
     }
+    if (hold) return;
+    const due = held.current;
+    held.current = [];
+    for (const f of due) fanfare.show(f);
     // view/derived only feed the copy; re-running on them alone would be harmless but pointless.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [events, meId, myTeamId, serverTime, fanfare]);
+  }, [events, meId, myTeamId, isCommissioner, serverTime, fanfare, hold]);
 }
 
 const feedSeenKey = (code: string) => `scramble:feed-seen:${code}`;

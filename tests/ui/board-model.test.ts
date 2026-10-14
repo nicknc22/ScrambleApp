@@ -8,12 +8,15 @@ import {
   drinkerRanks,
   driveViews,
   formatContestDistance,
+  leaderBannerLine,
   leaderHeadline,
+  myChaseLine,
   positionDeltas,
   scoreShape,
   scorecardSections,
   standingsView,
   toParTone,
+  toParWords,
 } from "@/components/leaderboard/model";
 import type { DrinkerRow } from "@/lib/engine/types";
 
@@ -72,7 +75,48 @@ describe("standingsView", () => {
     expect(h).toMatchObject({ kind: "tie", names: ["Team A", "Team B"], to_par: "-1", thru: "1" });
     f.score("B", 1, 4);
     h = leaderHeadline(derive(f.state));
-    expect(h).toMatchObject({ kind: "solo", names: ["Team A"] });
+    expect(h).toMatchObject({ kind: "solo", names: ["Team A"], to_par_value: -1 });
+    expect(leaderBannerLine(h)).toBe("1 under · thru 1");
+  });
+
+  it("toParWords says it in words: under / Even / over", () => {
+    expect(toParWords(-16)).toBe("16 under");
+    expect(toParWords(-1)).toBe("1 under");
+    expect(toParWords(0)).toBe("Even");
+    expect(toParWords(3)).toBe("3 over");
+    expect(toParWords(Number.NaN)).toBe("Even");
+  });
+
+  it("the banner line: no ' net' after the number, 'finished' once thru 18", () => {
+    expect(leaderBannerLine({ to_par_value: -16, thru: "14" })).toBe("16 under · thru 14");
+    expect(leaderBannerLine({ to_par_value: 0, thru: "3" })).toBe("Even · thru 3");
+    expect(leaderBannerLine({ to_par_value: -39, thru: "F" })).toBe("39 under · finished");
+    expect(leaderBannerLine({ to_par_value: -16, thru: "14" })).not.toMatch(/ net/);
+  });
+
+  it("the viewer's chase line: position and strokes back, only when started and not leading", () => {
+    const f = makeTrip({ teams: [4, 4, 4] });
+    f.teeOff("A", 1).teeOff("B", 1).teeOff("C", 1);
+    f.score("A", 1, 2).score("B", 1, 5).score("C", 1, 5); // A -2, B and C +1 (tied 2nd)
+    const d = derive(f.state);
+    expect(myChaseLine(d.standings, f.team.B)).toBe("You: T2, 3 back");
+    // A lone place is an ordinal ("3rd"), never a bare "3" that reads like a score.
+    const solo = makeTrip({ teams: [4, 4, 4] });
+    solo.teeOff("A", 1).teeOff("B", 1).teeOff("C", 1);
+    solo.score("A", 1, 2).score("B", 1, 4).score("C", 1, 5); // A -2, B E, C +1
+    const ds = derive(solo.state);
+    expect(myChaseLine(ds.standings, solo.team.C)).toBe("You: 3rd, 3 back");
+    expect(myChaseLine(ds.standings, solo.team.B)).toBe("You: 2nd, 2 back");
+    expect(myChaseLine(d.standings, f.team.A)).toBeNull(); // leading
+    expect(myChaseLine(d.standings, null)).toBeNull(); // no team
+    // Not started yet: nothing to chase.
+    const g = makeTrip({ teams: [4, 4] });
+    g.teeOff("A", 1).teeOff("B", 1);
+    g.score("A", 1, 4);
+    expect(myChaseLine(derive(g.state).standings, g.team.B)).toBeNull();
+    // Co-leaders get no chase line.
+    g.score("B", 1, 4);
+    expect(myChaseLine(derive(g.state).standings, g.team.B)).toBeNull();
   });
 
   it("toParTone", () => {

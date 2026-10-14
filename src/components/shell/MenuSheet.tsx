@@ -1,45 +1,66 @@
 "use client";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import type { TripStatus } from "@/lib/types";
 import {
   BottomSheet,
   IconChevronRight,
   IconClipboard,
   IconGear,
   IconHome,
+  IconPlayCircle,
   IconShare,
   IconTrophy,
   IconUserSwap,
   cx,
 } from "@/components/ui";
+import { IconRulebook } from "./HowItWorks";
 import { useShareTripLink } from "./ShareTripLink";
 import type { TabKey } from "./tabs";
 
-/** The ☰ menu: extra destinations (Setup, Awards, Settings), the trip link and housekeeping. */
+/**
+ * The commissioner's Setup row: during the round it's where scores, drinks and contests get
+ * fixed and the round gets finalized, so it says that instead of "Setup".
+ */
+export function setupRowCopy(status: TripStatus): { label: string; sub: string } {
+  if (status === "live") return { label: "Commissioner desk", sub: "Fix scores, drinks, contests · Finalize" };
+  if (status === "final") return { label: "Commissioner desk", sub: "Fix scores · Reopen" };
+  return { label: "Setup", sub: "Roster, teams, course, pots, settings" };
+}
+
+/** The ☰ menu: extra destinations (Setup, Awards, Settings), the trip link, help and housekeeping. */
 export function MenuSheet({
   open,
   onClose,
   code,
   tripName,
   isCommissioner,
-  isFinal,
+  status,
   tab,
   onGo,
   onSettings,
   onSwitchPlayer,
+  onHowItWorks,
+  onRules,
 }: {
   open: boolean;
   onClose: () => void;
   code: string;
   tripName: string;
   isCommissioner: boolean;
-  isFinal: boolean;
+  status: TripStatus;
   tab: TabKey;
   onGo: (tab: TabKey) => void;
   onSettings: () => void;
   onSwitchPlayer: () => void;
+  /** Replay the "How it works" explainer. */
+  onHowItWorks: () => void;
+  /** Open the "Rules & lingo" cheat sheet. */
+  onRules: () => void;
 }) {
   const [sendLink] = useShareTripLink(code, tripName);
+  const isFinal = status === "final";
+  const setupRow = setupRowCopy(status);
   return (
     <BottomSheet open={open} onClose={onClose} title={tripName}>
       <ul className="flex flex-col gap-2 pb-2">
@@ -56,8 +77,8 @@ export function MenuSheet({
         {isCommissioner && (
           <MenuRow
             icon={<IconClipboard size={26} />}
-            label="Setup"
-            sub="Roster, teams, course, pots, settings"
+            label={setupRow.label}
+            sub={setupRow.sub}
             active={tab === "setup"}
             onClick={() => onGo("setup")}
           />
@@ -71,6 +92,13 @@ export function MenuSheet({
             void sendLink();
           }}
         />
+        <MenuRow
+          icon={<IconPlayCircle size={26} />}
+          label="How it works"
+          sub="40-second cartoon: drinks, ghost beers, contests, money"
+          onClick={onHowItWorks}
+        />
+        <MenuRow icon={<IconRulebook size={26} />} label="Rules & lingo" sub="Cheat sheet: drinks, ghost beers, net, pots" onClick={onRules} />
         <MenuRow icon={<IconGear size={26} />} label="Settings" sub="Notifications, commissioner PIN, install" onClick={onSettings} />
         <MenuRow icon={<IconUserSwap size={26} />} label="Not you? Switch player" onClick={onSwitchPlayer} />
         <li>

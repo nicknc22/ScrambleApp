@@ -290,3 +290,13 @@ export function IconRefresh(p: IconProps) {
     </Svg>
   );
 }
+
+/** Play button in a circle: "How it works" (the explainer). */
+export function IconPlayCircle(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx="12" cy="12" r="9.5" />
+      <path d="M10 8.2v7.6l6-3.8z" fill="currentColor" />
+    </Svg>
+  );
+}

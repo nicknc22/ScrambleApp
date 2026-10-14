@@ -122,7 +122,21 @@ describe("per-trip manifest (Home Screen icon opens the trip)", () => {
     };
     setDbForTests(broken);
     try {
-      expect(await tripPageMetadata(params("BachParty"))).toEqual({ title: "Scramble", manifest: "/t/bachparty/manifest.webmanifest" });
+      expect(await tripPageMetadata(params("BachParty"))).toEqual({
+        title: "Scramble",
+        manifest: "/t/bachparty/manifest.webmanifest",
+        // Static link-preview text (the image with the trip's name is ./opengraph-image.tsx).
+        openGraph: {
+          title: "You're in: the Scramble ⛳",
+          description: "Open it, tap your name. Every beer you log knocks a stroke off your team's score.",
+          type: "website",
+        },
+        twitter: {
+          card: "summary_large_image",
+          title: "You're in: the Scramble ⛳",
+          description: "Open it, tap your name. Every beer you log knocks a stroke off your team's score.",
+        },
+      });
       const el = (await TripPage(params("%20BachParty"))) as { props: { code: string } };
       expect(el.props.code).toBe("bachparty");
     } finally {

@@ -105,6 +105,8 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await page.goto(`/t/${code}`);
   await expect(page.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("join-player").filter({ hasText: "Tom" }).click();
+  // First time on this phone for this trip: the 40-second explainer plays. Skip it.
+  await page.getByTestId("explainer-skip").click();
 
   const shell = page.getByTestId("trip-shell");
   await expect(shell).toHaveAttribute("data-tab", "play");
@@ -112,10 +114,14 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await expect(page.getByTestId("threesome-reminder")).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
-  // Before teeing off, drinks don't count: roast, nothing logged.
+  // Before teeing off, drinks don't count: roast (with a way to open hole 1), nothing logged.
   await drinkButton(page, "Tom").click();
-  await expect(page.getByText("That one doesn't count", { exact: true })).toBeVisible();
-  await expect(drinksHeader(page)).toHaveText("No window open");
+  const roast = page.locator("[data-toast-host]");
+  await expect(roast.getByText("Not teed off yet", { exact: true })).toBeVisible();
+  await expect(roast).toContainText("doesn't count");
+  await expect(roast.getByRole("button", { name: "⛳ We're on the tee: open hole 1" })).toBeVisible();
+  await expect(drinksHeader(page)).toHaveText("Not teed off yet");
+  await expect.poll(async () => (await serverState(page.request, code)).drinks.length).toBe(0);
 
   // On the tee: Hole 1 -> hype fanfare, window opens.
   const tee = page.getByTestId("tee-cta");
@@ -123,7 +129,9 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await tee.click();
   await dismissFanfare(page, "hype");
   await expect(tee).toHaveCount(0);
-  await expect(drinksHeader(page)).toHaveText(/Hole 1: −0/);
+  await expect(drinksHeader(page)).toHaveText("Hole 1: no drinks yet");
+  // Teeing off clears the roast.
+  await expect(roast.getByText("Not teed off yet", { exact: true })).toHaveCount(0);
 
   // Three drinks for a threesome: 1, 1, then a ghost beer worth 2.
   await drinkButton(page, "Tom").click();
@@ -165,12 +173,16 @@ test("score a hole, drinks with a ghost beer and undo, next hole, then offline a
   await expect(jimmy).toHaveAttribute("aria-pressed", "true");
 
   // Next hole, through the confirm.
+  // The bar's right button asks, then acts ("Done with 1? / Tee off 2"); its name stays "On the tee: hole 2".
+  await expect(page.getByTestId("next-hole")).toHaveText(/Done with 1\?\s*Tee off 2/i);
   await page.getByRole("button", { name: "On the tee: hole 2" }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("locked in at 5");
+  // A saved hole isn't "locked in": it says what it is and that it can still be fixed.
+  await expect(dialog).toContainText("Hole 1: 5 (3 after drinks). Fix it any time from the scorecard.");
+  await expect(dialog).not.toContainText("locked in");
   await dialog.getByRole("button", { name: "Tee off 2" }).click();
   await expect(page.getByTestId("hole-number")).toHaveText("2");
-  await expect(drinksHeader(page)).toHaveText(/Hole 2: −0/);
+  await expect(drinksHeader(page)).toHaveText("Hole 2: no drinks yet");
   await expect(page.getByTestId("threesome-reminder")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
@@ -379,7 +391,7 @@ for (const vp of [
     expect(await coveredControls(page), "a toast covers Save / On the tee / the tab bar").toEqual([]);
     await rawTap(page, "next-hole");
     const dialog = page.getByRole("dialog");
-    await expect(dialog).toContainText("locked in at 4");
+    await expect(dialog).toContainText("Hole 1: 4 (0 after drinks)");
     for (const n of team) await expect(drinkRow(page, id(n)).getByTestId("drink-count")).toHaveText("1");
     await dialog.getByRole("button", { name: "Tee off 2" }).click();
     await expect(page.getByTestId("hole-number")).toHaveText("2");
@@ -561,9 +573,11 @@ test("Play notices sit at the top and the mulligan Undo is inline: a tap on + al
   // A shotgun banks a mulligan; spend it.
   await a.getByRole("button", { name: "Shotgun for Rob" }).click();
   await expect(a.getByTestId("mulligan-bank")).toHaveText("1");
-  await a.getByRole("button", { name: "Use mulligan" }).click();
-  await a.getByRole("dialog").getByRole("button", { name: /Earned/ }).click();
+  // One tap spends an earned one (no picker sheet): the inline Undo is the safety net.
+  await a.getByRole("button", { name: "Use a mulligan (1 left)" }).click();
+  await expect(a.getByRole("dialog")).toHaveCount(0);
   await expect(a.getByTestId("mulligan-bank")).toHaveText("0");
+  await expect(a.getByTestId("use-mulligan")).toBeDisabled();
   // Its Undo is a chip in the Mulligans card: no toast with an Undo anywhere.
   await expect(a.getByTestId("mulligan-undo")).toBeVisible();
   await expect(a.locator("[data-toast-host] button", { hasText: /undo/i })).toHaveCount(0);

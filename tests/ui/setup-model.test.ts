@@ -6,14 +6,21 @@ import type { Op } from "@/lib/ops";
 import type { TripState } from "@/lib/types";
 import { makeTrip, at } from "../fixtures";
 import {
+  ROUND_DAY,
   addMinutes,
+  anteSummary,
+  beforeRoundDay,
   centsToInput,
   contestHoles,
   draftOfPlayer,
   duplicateName,
+  earlyStartWarning,
   firstShare,
+  hasVenmo,
+  localDay,
   maxExposureCents,
   membersByTeam,
+  nextStep,
   nextTeamName,
   normalizeTeeTime,
   optKey,
@@ -21,6 +28,7 @@ import {
   parseDollars,
   payoutLabel,
   payoutMode,
+  payeesWithoutVenmo,
   payoutValid,
   pinChangeError,
   planShuffle,
@@ -28,19 +36,24 @@ import {
   potLongLabel,
   potShortLabel,
   preflight,
+  readySummary,
+  roundDayDate,
   sameDraft,
+  sectionBadges,
   settingsDraft,
   settingsPatch,
   shuffleSizes,
   shuffleTeamCount,
   sizesLabel,
   splitPayout,
+  startConfirmCopy,
   teamIssues,
   teamSizeStatus,
   teeTimeSuggestions,
   unassignedPlayers,
   unfinishedTeams,
   validatePlayerDraft,
+  venmoOnFile,
 } from "@/components/setup/model";
 import { LOCAL_TEAM_NAMES, cleanNames, generateTeamNames, localTeamNames } from "@/components/setup/teamNames";
 import { POOL_ID, playerDragId, playerIdOfDragId, teamDropId, teamIdOfDropId } from "@/components/setup/dnd";
@@ -70,6 +83,16 @@ function setupTrip(teams: number[], settings: Record<string, unknown> = {}) {
 /** Give every long-drive hole a tee point so that warning goes away. */
 function withLdTees(s: TripState): TripState {
   return { ...s, holes: s.holes.map((h) => (h.contest === "ld" ? { ...h, tee_lat: 41.09, tee_lng: -75.65 } : h)) };
+}
+
+/** Give every player a Venmo handle (so that warning goes away). */
+function withVenmo(s: TripState): TripState {
+  return { ...s, players: s.players.map((p, i) => ({ ...p, venmo_handle: `player-${i}` })) };
+}
+
+/** Tee times on every team. */
+function withTeeTimes(s: TripState): TripState {
+  return { ...s, teams: s.teams.map((t, i) => ({ ...t, tee_time: `13:${String(i * 10).padStart(2, "0")}` })) };
 }
 
 describe("money", () => {
@@ -257,9 +280,9 @@ describe("tee times", () => {
 });
 
 describe("pre-flight", () => {
-  it("all green for 4/3/3 with antes, groom, tee points and tee times", () => {
+  it("all green for 4/3/3 with antes, groom, tee points, tee times and Venmo", () => {
     const f = setupTrip([4, 3, 3]);
-    const s = withLdTees({ ...f.state, teams: f.state.teams.map((t, i) => ({ ...t, tee_time: ["12:50", "13:00", "13:10"][i] })) });
+    const s = withVenmo(withLdTees({ ...f.state, teams: f.state.teams.map((t, i) => ({ ...t, tee_time: ["12:50", "13:00", "13:10"][i] })) }));
     const pf = preflight(s);
     expect(pf.items.filter((i) => i.level !== "ok")).toEqual([]);
     expect(pf.canStart).toBe(true);
@@ -272,7 +295,7 @@ describe("pre-flight", () => {
     const pf = preflight(s);
     expect(pf.canStart).toBe(true);
     const warn = pf.items.filter((i) => i.level === "warn").map((i) => i.id);
-    expect(warn).toEqual(["groom", "antes", "tees", "tee_times"]);
+    expect(warn).toEqual(["groom", "antes", "tees", "tee_times", "venmo"]);
     expect(pf.items.find((i) => i.id === "tees")?.detail).toContain("4, 9, 12, 18");
     expect(pf.items.find((i) => i.id === "tees")?.section).toBe("course");
   });
@@ -311,6 +334,167 @@ describe("pre-flight", () => {
     expect(pf.canStart).toBe(false);
     expect(pf.items.filter((i) => i.level === "block").map((i) => i.id)).toEqual(["players", "teams"]);
     expect(applyOp(empty, op({ type: "trip.start" }), ctx).ok).toBe(false);
+  });
+});
+
+describe("pre-flight: Venmo", () => {
+  it("warns (doesn't block) with the count of players missing a usable handle, and links to Roster", () => {
+    const f = setupTrip([4, 3, 3]);
+    const s = withTeeTimes(withLdTees(f.state));
+    const none = preflight(s);
+    expect(none.canStart).toBe(true);
+    expect(none.items.find((i) => i.id === "venmo")).toEqual({
+      id: "venmo",
+      level: "warn",
+      title: "No Venmo for 10 players",
+      detail: "Their payers get no Pay with Venmo button at settle-up. Tap a player to add it.",
+      section: "roster",
+    });
+
+    // One handle that isn't a username (a display name) still counts as missing.
+    const some: TripState = {
+      ...s,
+      players: s.players.map((p, i) => ({ ...p, venmo_handle: i === 0 ? "Player A1" : i < 9 ? `@p-${i}` : null })),
+    };
+    expect(venmoOnFile(some.players)).toBe(8);
+    expect(preflight(some).items.find((i) => i.id === "venmo")?.title).toBe("No Venmo for 2 players");
+    const one: TripState = { ...some, players: some.players.map((p, i) => (i === 0 ? { ...p, venmo_handle: "a1" } : p)) };
+    expect(preflight(one).items.find((i) => i.id === "venmo")?.title).toBe("No Venmo for 1 player");
+
+    const all = preflight(withVenmo(s));
+    expect(all.items.find((i) => i.id === "venmo")).toMatchObject({ level: "ok", title: "Venmo on file for everyone" });
+    expect(all.warnings).toBe(0);
+  });
+
+  it("skips the Venmo row with nobody on the roster", () => {
+    const f = setupTrip([2]);
+    const empty: TripState = { ...f.state, players: [], teams: [], team_members: [] };
+    expect(preflight(empty).items.find((i) => i.id === "venmo")).toBeUndefined();
+  });
+
+  it("hasVenmo accepts what normalizeVenmoHandle accepts", () => {
+    expect(hasVenmo({ venmo_handle: "@Nick-Caster" })).toBe(true);
+    expect(hasVenmo({ venmo_handle: "https://venmo.com/u/joe_g" })).toBe(true);
+    expect(hasVenmo({ venmo_handle: "Nick Caster" })).toBe(false);
+    expect(hasVenmo({ venmo_handle: "" })).toBe(false);
+    expect(hasVenmo({ venmo_handle: null })).toBe(false);
+  });
+
+  it("lists settle-up payees without a handle, once each, in payment order", () => {
+    const f = setupTrip([4, 3, 3]);
+    const byId = Object.fromEntries(f.state.players.map((p) => [p.id, p.id === f.player.B1 ? { ...p, venmo_handle: "b1-venmo" } : p]));
+    const pay = (from: string, to: string) => ({ from_player_id: f.player[from], to_player_id: f.player[to], amount_cents: 500 });
+    const payees = payeesWithoutVenmo([pay("A1", "C2"), pay("A2", "B1"), pay("A3", "C2"), pay("A4", "C1")], byId);
+    expect(payees.map((p) => p.name)).toEqual(["Player C2", "Player C1"]);
+    expect(payeesWithoutVenmo([], byId)).toEqual([]);
+    // An unknown payee id is skipped, not a crash.
+    expect(payeesWithoutVenmo([{ from_player_id: f.player.A1, to_player_id: "nobody", amount_cents: 100 }], byId)).toEqual([]);
+  });
+});
+
+describe("Setup guidance: next step and tab badges", () => {
+  it("fresh pre-loaded trip (10 players, no teams): Next is '10 not on a team' on Teams, not 'No teams yet'", () => {
+    const f = setupTrip([4, 3, 3]);
+    const s: TripState = { ...f.state, teams: [], team_members: [] };
+    const pf = preflight(s);
+    expect(pf.items.filter((i) => i.level === "block").map((i) => i.id)).toEqual(["teams", "assigned"]);
+    expect(nextStep(pf)).toEqual({ kind: "block", title: "10 not on a team", section: "teams" });
+    const badges = sectionBadges(pf);
+    expect(badges.teams).toEqual({ level: "block", note: "No teams yet, 10 not on a team" });
+    // Missing long-drive tees: a warning dot on Course. Venmo: a dot on Roster.
+    expect(badges.course).toMatchObject({ level: "warn" });
+    expect(badges.course?.note).toContain("Long drive tee points missing");
+    expect(badges.roster).toEqual({ level: "warn", note: "No Venmo for 10 players" });
+    expect(badges.pots).toBeUndefined();
+    expect(badges.round).toBeUndefined();
+    // Live: warnings don't badge, only real problems do.
+    expect(sectionBadges(pf, { warnings: false })).toEqual({ teams: badges.teams });
+  });
+
+  it("an empty roster points at Roster first", () => {
+    const f = setupTrip([2]);
+    const pf = preflight({ ...f.state, players: [], teams: [], team_members: [] });
+    expect(nextStep(pf)).toEqual({ kind: "block", title: "Nobody on the roster", section: "roster" });
+    expect(sectionBadges(pf).roster?.level).toBe("block");
+  });
+
+  it("no blockers: the first optional extra, then ready (go start it on Round)", () => {
+    const f = setupTrip([4, 3, 3]);
+    const warns = preflight(f.state);
+    expect(warns.canStart).toBe(true);
+    expect(nextStep(warns)).toEqual({ kind: "warn", title: "Long drive tee points missing", section: "course" });
+    const clean = preflight(withVenmo(withTeeTimes(withLdTees(f.state))));
+    expect(clean.warnings).toBe(0);
+    expect(nextStep(clean)).toEqual({ kind: "ok", title: "Ready", section: "round" });
+    expect(sectionBadges(clean)).toEqual({});
+  });
+
+  it("a short team blocks on Teams", () => {
+    const f = setupTrip([4, 4, 1]);
+    const pf = preflight(f.state);
+    expect(nextStep(pf)).toEqual({ kind: "block", title: "Team sizes must be 2 to 4", section: "teams" });
+    expect(sectionBadges(pf).teams).toEqual({ level: "block", note: "Team sizes must be 2 to 4" });
+  });
+});
+
+describe("ready summary", () => {
+  it("players, teams with sizes and the antes", () => {
+    const f = setupTrip([4, 3, 3]);
+    expect(readySummary(f.state)).toBe("10 players · 3 teams (4/3/3) · $20 a head + $5 a contest hole");
+  });
+
+  it("ante wording for every combination", () => {
+    expect(anteSummary({ team_match_ante_cents: 2000, contest_ante_cents: 500 })).toBe("$20 a head + $5 a contest hole");
+    expect(anteSummary({ team_match_ante_cents: 2000, contest_ante_cents: 0 })).toBe("$20 a head, contests free");
+    expect(anteSummary({ team_match_ante_cents: 0, contest_ante_cents: 250 })).toBe("$2.50 a contest hole, team match free");
+    expect(anteSummary({ team_match_ante_cents: 0, contest_ante_cents: 0 })).toBe("playing for pride");
+  });
+});
+
+describe("round day", () => {
+  it("is Sat Oct 24, 2026", () => {
+    expect(ROUND_DAY).toBe("2026-10-24");
+    expect(localDay(roundDayDate())).toBe(ROUND_DAY);
+    expect(roundDayDate().getDay()).toBe(6);
+  });
+
+  it("before round day on the local calendar: true the day before, false on the day and after", () => {
+    expect(beforeRoundDay(new Date(2026, 9, 13, 9, 0), false)).toBe(true);
+    expect(beforeRoundDay(new Date(2026, 9, 23, 23, 59, 59), false)).toBe(true);
+    expect(beforeRoundDay(new Date(2026, 9, 24, 0, 0, 0), false)).toBe(false);
+    expect(beforeRoundDay(new Date(2026, 9, 24, 12, 50), false)).toBe(false);
+    expect(beforeRoundDay(new Date(2026, 9, 25, 8, 0), false)).toBe(false);
+    expect(beforeRoundDay(new Date(2027, 0, 2), false)).toBe(false);
+    expect(beforeRoundDay(new Date(2025, 11, 31), false)).toBe(true);
+  });
+
+  it("demo trips (and a broken clock) never warn", () => {
+    expect(beforeRoundDay(new Date(2026, 9, 13), true)).toBe(false);
+    expect(beforeRoundDay(new Date(Number.NaN), false)).toBe(false);
+  });
+
+  it("local day pads month and day", () => {
+    expect(localDay(new Date(2026, 0, 5, 23, 30))).toBe("2026-01-05");
+    expect(localDay(new Date(2026, 9, 24, 0, 1))).toBe("2026-10-24");
+  });
+
+  it("Start confirm: red 'Start anyway' / 'Not yet' with the date before round day, plain 'Start it' from round day on", () => {
+    expect(startConfirmCopy(new Date(2026, 9, 13, 21, 0), false)).toEqual({
+      warning: "It's Tue Oct 13. Tee off is Sat Oct 24. Come back then.",
+      confirmLabel: "Start anyway",
+      cancelLabel: "Not yet",
+      tone: "danger",
+    });
+    const onTheDay = { warning: null, confirmLabel: "Start it", cancelLabel: undefined, tone: "primary" };
+    expect(startConfirmCopy(new Date(2026, 9, 24, 12, 40), false)).toEqual(onTheDay);
+    expect(startConfirmCopy(new Date(2026, 9, 26, 9, 0), false)).toEqual(onTheDay);
+    // Demo trips start whenever.
+    expect(startConfirmCopy(new Date(2026, 9, 13, 21, 0), true)).toEqual(onTheDay);
+  });
+
+  it("the Start warning names today and tee-off day", () => {
+    expect(earlyStartWarning(new Date(2026, 9, 13, 10, 0))).toBe("It's Tue Oct 13. Tee off is Sat Oct 24. Come back then.");
+    expect(earlyStartWarning(new Date(2026, 9, 23, 22, 0))).toBe("It's Fri Oct 23. Tee off is Sat Oct 24. Come back then.");
   });
 });
 

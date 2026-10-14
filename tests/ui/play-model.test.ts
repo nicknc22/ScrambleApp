@@ -4,6 +4,7 @@ import type { DriveNineStatus } from "@/lib/engine/types";
 import { makeTrip } from "../fixtures";
 import {
   advanceConfirm,
+  advanceDriveAsk,
   canEditPlay,
   clampHole,
   clampStrokes,
@@ -17,11 +18,13 @@ import {
   drinkFeedback,
   drinksForRound,
   drinksOnHole,
+  driveCountTone,
   driveView,
   hasUnsavedDraft,
   isEditingOtherHole,
   isOwnMove,
   joinNames,
+  meFirst,
   missingScoresNote,
   mulliganOptions,
   needsOverride,
@@ -29,12 +32,15 @@ import {
   nextAction,
   nineOf,
   nineTotals,
+  NO_WINDOW_TEE_OFF_LABEL,
+  noWindowCanTeeOff,
   noWindowMessage,
   pinAfterTeamMove,
   resolvePlayTeam,
   roundSummary,
   savedScoreLine,
   scoreDraft,
+  scoreHeader,
   scoreName,
   scoreTone,
   stripCells,
@@ -166,6 +172,59 @@ describe("viewing hole and advancing", () => {
   });
 });
 
+describe("advance sheet drive check (finding: leaving a hole with no drive picked gets no nudge)", () => {
+  const names: Record<string, string> = { p1: "Reitman", p2: "Drew", p3: "Will" };
+  const nameOf = (id: string) => names[id] ?? id;
+  const nine = (o: Partial<DriveNineStatus>): DriveNineStatus => ({
+    nine: 1,
+    holes: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    counts: { p1: 0, p2: 4, p3: 4 },
+    needing: ["p1"],
+    remaining: 1,
+    level: "hard",
+    closed: false,
+    missed: [],
+    ...o,
+  });
+
+  it("hole 9 with no drive and Reitman still at 0: loud, says the nine ends here and who needs one", () => {
+    const ask = advanceDriveAsk({ fromHole: 9, teeShotPlayerId: null, nine: nine({}), nameOf });
+    expect(ask).toEqual({
+      hole: 9,
+      urgent: true,
+      title: "Whose drive on hole 9?",
+      note: "No drive picked, and the front nine ends here. Still needs one: Reitman.",
+    });
+    // Hole 18 closes the back nine the same way.
+    expect(advanceDriveAsk({ fromHole: 18, teeShotPlayerId: null, nine: nine({ nine: 2, level: "ok", remaining: 1 }), nameOf })?.note).toBe(
+      "No drive picked, and the back nine ends here. Still needs one: Reitman.",
+    );
+  });
+
+  it("a tight nine mid-way is loud too; a relaxed one asks quietly; a picked drive asks nothing", () => {
+    const tight = advanceDriveAsk({ fromHole: 7, teeShotPlayerId: null, nine: nine({ level: "soft", remaining: 3, needing: ["p1", "p2"] }), nameOf });
+    expect(tight).toMatchObject({ urgent: true, note: "No drive picked for hole 7. Still needs one: Reitman and Drew." });
+    const relaxed = advanceDriveAsk({ fromHole: 2, teeShotPlayerId: null, nine: nine({ level: "ok", remaining: 8, needing: ["p1"] }), nameOf });
+    expect(relaxed).toEqual({ hole: 2, urgent: false, title: "Whose drive on hole 2?", note: null });
+    // Last hole of a nine where everybody already has one: still asks, quietly.
+    expect(advanceDriveAsk({ fromHole: 9, teeShotPlayerId: null, nine: nine({ level: "ok", needing: [] }), nameOf })).toMatchObject({ urgent: false, note: null });
+    expect(advanceDriveAsk({ fromHole: 9, teeShotPlayerId: "p2", nine: nine({}), nameOf })).toBeNull();
+  });
+
+  it("works off the engine's own drive-minimum status", () => {
+    const f = makeTrip({ teams: [3, 3], status: "live" });
+    for (let h = 1; h <= 8; h++) {
+      f.teeOff("B", h);
+      f.score("B", h, 4, h % 2 === 0 ? "B2" : "B3");
+    }
+    f.teeOff("B", 9);
+    const d = derive(f.state);
+    const ask = advanceDriveAsk({ fromHole: 9, teeShotPlayerId: null, nine: d.driveMin[f.team.B].nines[0], nameOf: (id) => d.playerById[id]?.name ?? id });
+    expect(ask?.urgent).toBe(true);
+    expect(ask?.note).toMatch(/front nine ends here\. Still needs one: .*B1/);
+  });
+});
+
 describe("score entry", () => {
   it("stepper defaults to saved ?? par, Save only when the draft differs", () => {
     expect(scoreDraft(null, undefined, 4)).toEqual({ value: 4, saved: null, dirty: true, touched: false });
@@ -174,6 +233,24 @@ describe("score entry", () => {
     expect(scoreDraft(5, 5, 4)).toEqual({ value: 5, saved: 5, dirty: false, touched: true });
     expect(clampStrokes(0)).toBe(1);
     expect(clampStrokes(99)).toBe(20);
+  });
+
+  it("only the advance sheet's implicit par default is fill-if-empty (finding: untouched par save trap; a tapped Save 4 is a real score)", () => {
+    // Untouched: the sheet's "Save 4 & tee off" fills an empty hole only.
+    expect(advanceConfirm({ fromHole: 1, to: 2, draft: scoreDraft(null, undefined, 4), credit: 0 }).saveIsDefault).toBe(true);
+    // A number somebody dialed (even back to par) is a real score.
+    expect(advanceConfirm({ fromHole: 1, to: 2, draft: scoreDraft(null, 4, 4), credit: 0 }).saveIsDefault).toBe(false);
+    expect(advanceConfirm({ fromHole: 1, to: 2, draft: scoreDraft(null, 5, 4), credit: 0 }).saveIsDefault).toBe(false);
+  });
+
+  it("score card header: untouched default is 'No score yet', a dialed number is unsaved, then saved (finding: untouched par save trap)", () => {
+    expect(scoreHeader(scoreDraft(null, undefined, 4))).toEqual({ kind: "empty", badge: "No score yet" });
+    expect(scoreHeader(scoreDraft(null, 5, 4))).toEqual({ kind: "dirty", badge: "Not saved" });
+    // Dialed back to par is still a number somebody entered.
+    expect(scoreHeader(scoreDraft(null, 4, 4))).toEqual({ kind: "dirty", badge: "Not saved" });
+    expect(scoreHeader(scoreDraft(5, 3, 4))).toEqual({ kind: "dirty", badge: "Unsaved" });
+    expect(scoreHeader(scoreDraft(5, undefined, 4))).toEqual({ kind: "saved", badge: "✓ Saved" });
+    expect(scoreHeader(scoreDraft(5, 5, 4))).toEqual({ kind: "saved", badge: "✓ Saved" });
   });
 
   it("live net preview includes this hole's drink credit (net can go negative)", () => {
@@ -212,23 +289,75 @@ describe("drive minimum", () => {
     ...patch,
   });
 
-  it("matches the spec copy for soft warnings", () => {
+  it("soft warnings lead with the count (finding: drive minimum warns too late)", () => {
     const v = driveView(nine({ needing: ["b"], remaining: 3, level: "soft" }), nameOf);
     expect(v).toMatchObject({ tone: "soft", banner: false, nine: 1 });
-    expect(v.text).toBe("Needs a drive: Bo · 3 holes left on this nine");
+    expect(v.text).toBe("3 holes left · needs a drive: Bo");
   });
 
-  it("hard and impossible are red banners", () => {
+  it("ok leads with the count too", () => {
+    const v = driveView(nine({ remaining: 8, level: "ok" }), nameOf);
+    expect(v).toMatchObject({ tone: "ok", banner: false });
+    expect(v.text).toBe("8 holes left · still need: Bo and Cy");
+    expect(v.text.startsWith("8 holes left · still need:")).toBe(true);
+  });
+
+  it("nobody's drive used yet: one short line, not the whole roster (keeps the stepper on the first screen)", () => {
+    const all = driveView(nine({ needing: ["a", "b", "c", "d"], counts: { a: 0, b: 0, c: 0, d: 0 }, remaining: 9, level: "ok" }), nameOf);
+    expect(all).toMatchObject({ tone: "ok", banner: false });
+    expect(all.text).toBe("9 holes left · all 4 still need a drive");
+    const pair = driveView(nine({ needing: ["a", "b"], counts: { a: 0, b: 0 }, remaining: 9, level: "ok" }), nameOf);
+    expect(pair.text).toBe("9 holes left · both still need a drive");
+    // Tight still names names (that's when it matters).
+    const tight = driveView(nine({ needing: ["a", "b", "c"], counts: { a: 0, b: 0, c: 0 }, remaining: 4, level: "ok" }), nameOf);
+    expect(tight.text).toContain("spare");
+  });
+
+  it("tight: one spare hole left turns yellow before the engine's soft level (finding: drive minimum warns too late)", () => {
+    // A foursome still needing 3 drives with 4 holes left: the engine says ok (soft starts at 3 left).
+    const tight = driveView(nine({ needing: ["a", "b", "c"], counts: { a: 0, b: 0, c: 0, d: 2 }, remaining: 4, level: "ok" }), nameOf);
+    expect(tight).toMatchObject({ tone: "soft", banner: false });
+    expect(tight.text).toContain("spare");
+    expect(tight.text).toBe("Only 1 spare hole on the front nine: use drives from Al, Bo and Cy soon.");
+    // One player, soft level, 2 holes left: also tight.
+    const one = driveView(nine({ needing: ["c"], remaining: 2, level: "soft" }), nameOf);
+    expect(one).toMatchObject({ tone: "soft", banner: false });
+    expect(one.text).toBe("Only 1 spare hole on the front nine: use Cy's drive soon.");
+    // Two spare holes: not tight.
+    expect(driveView(nine({ needing: ["c"], remaining: 3, level: "soft" }), nameOf).text).toBe("3 holes left · needs a drive: Cy");
+    expect(driveView(nine({ remaining: 4, level: "ok" }), nameOf).tone).toBe("ok");
+  });
+
+  it("hard is the red banner; impossible is a red line in the panel, never '0 holes left'", () => {
     const hard = driveView(nine({ remaining: 2, level: "hard" }), nameOf);
     expect(hard).toMatchObject({ tone: "hard", banner: true });
     expect(hard.text).toContain("Bo and Cy");
     expect(hard.text).toContain("2 holes left");
+    expect(hard.text).toContain("NOW");
+    expect(hard.bannerText).toContain("NOW");
     const one = driveView(nine({ needing: ["c"], remaining: 1, level: "hard" }), nameOf);
     expect(one.text).toBe("Use Cy's drive NOW: 1 hole left on this nine.");
-    expect(driveView(nine({ remaining: 1, level: "impossible" }), nameOf)).toMatchObject({ tone: "impossible", banner: true });
     // The sticky banner gets the short copy (finding: teeshot-chips-below-fold).
     expect(one.bannerText).toBe("Use Cy's drive NOW · 1 hole left");
-    expect(driveView(nine({ remaining: 1, level: "impossible" }), nameOf).bannerText).toBe("Too late: 1 hole left, 2 still need a drive (Bo and Cy).");
+    const impossible = driveView(nine({ remaining: 1, level: "impossible" }), nameOf);
+    expect(impossible).toMatchObject({ tone: "impossible", banner: false });
+    expect(impossible.text).toBe("Drive minimum's blown on the front nine (Bo and Cy). The feed will roast you.");
+    // Hole 9's tee shot recorded with someone still at 0: remaining 0, nine not closed yet.
+    const zero = driveView(nine({ needing: ["c"], remaining: 0, level: "impossible" }), nameOf);
+    expect(zero).toMatchObject({ tone: "impossible", banner: false });
+    expect(zero.text).not.toContain("0 holes left");
+    expect(zero.bannerText).toBeUndefined();
+  });
+
+  it("chip count badges: a 0 is red only when urgent, yellow when close", () => {
+    expect(driveCountTone(0, false, "hard")).toBe("urgent");
+    expect(driveCountTone(0, false, "impossible")).toBe("urgent");
+    expect(driveCountTone(0, false, "soft")).toBe("warn");
+    expect(driveCountTone(0, false, "ok")).toBe("zero");
+    expect(driveCountTone(0, false, null)).toBe("zero");
+    expect(driveCountTone(0, false, "missed")).toBe("zero");
+    expect(driveCountTone(2, false, "hard")).toBe("some");
+    expect(driveCountTone(0, true, "hard")).toBe("selected");
   });
 
   it("ok / done / missed", () => {
@@ -372,6 +501,36 @@ describe("drinks", () => {
     expect(noWindowMessage("complete", "x")).toMatch(/Round's over/);
     expect(noWindowMessage("not_started", "x").length).toBeGreaterThan(10);
     expect(noWindowMessage(null, "y").length).toBeGreaterThan(10);
+    // Before the first tee-off the roast says it doesn't count and ends with the fix (findings:
+    // pre-tee drink dead end; "Tee off & count it" banked range beers against SPEC rule 3).
+    for (let i = 0; i < 50; i++) {
+      const m = noWindowMessage("not_started", `s-${i}`);
+      expect(m).toMatch(/doesn't count/i);
+      expect(m).toMatch(/ON THE TEE: HOLE 1/);
+      expect(m).not.toMatch(/count it/i);
+    }
+  });
+
+  it("the pre-tee toast button only opens hole 1: it never promises to count the tapped drink", () => {
+    expect(NO_WINDOW_TEE_OFF_LABEL).toBe("⛳ We're on the tee: open hole 1");
+    expect(NO_WINDOW_TEE_OFF_LABEL).not.toMatch(/count/i);
+  });
+
+  it("before the team teed off the roast can open hole 1; after Round complete it can't (finding: pre-tee drink dead end)", () => {
+    expect(noWindowCanTeeOff(null)).toBe(true);
+    expect(noWindowCanTeeOff(undefined)).toBe(true);
+    expect(noWindowCanTeeOff("not_started")).toBe(true);
+    expect(noWindowCanTeeOff("playing")).toBe(false);
+    expect(noWindowCanTeeOff("complete")).toBe(false);
+  });
+
+  it("this phone's player gets the first drinks row, the rest keep roster order (finding: drinks below the fold)", () => {
+    const m = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+    expect(meFirst(m, "c").map((p) => p.id)).toEqual(["c", "a", "b", "d"]);
+    expect(meFirst(m, "a").map((p) => p.id)).toEqual(["a", "b", "c", "d"]);
+    expect(meFirst(m, "zz").map((p) => p.id)).toEqual(["a", "b", "c", "d"]);
+    expect(meFirst(m, null).map((p) => p.id)).toEqual(["a", "b", "c", "d"]);
+    expect(meFirst(m, "c")).not.toBe(m);
   });
 });
 
@@ -497,10 +656,14 @@ describe("advance confirm", () => {
     expect(advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(5, 3, 4), credit: 0 }).skipLabel).toBeNull();
   });
 
-  it("plain confirm when saved", () => {
+  it("plain confirm when saved: what it is and that it can still change (never 'locked in')", () => {
     const c = advanceConfirm({ fromHole: 5, to: 6, draft: scoreDraft(4, undefined, 4), credit: 2 });
     expect(c).toMatchObject({ saveFirst: null, saveIsDefault: false, skipLabel: null, tone: "primary", title: "On the tee: hole 6?", confirmLabel: "Tee off 6" });
-    expect(c.body).toContain("net 2");
+    expect(c.body).toBe("Hole 5: 4 (2 after drinks). Fix it any time from the scorecard. Drinks start counting on hole 6.");
+    expect(c.body).not.toContain("locked in");
+    const one = advanceConfirm({ fromHole: 1, to: 2, draft: scoreDraft(5, undefined, 4), credit: 0 });
+    expect(one.body).toContain("Hole 1: 5");
+    expect(one.body).toContain("Fix it any time from the scorecard");
   });
 
   it("round complete lists other missing holes", () => {

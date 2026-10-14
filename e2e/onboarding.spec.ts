@@ -133,6 +133,15 @@ test("the boys come pre-loaded: create, open the link, tap your name, carry it t
     await expectNoHorizontalOverflow(p2);
 
     await p2.getByTestId("join-player").filter({ hasText: "Joe" }).click();
+    // First time on this phone: the 40-second "How it works" plays, personalised, and the
+    // "You're in" toast waits for it (it would sit under the explainer otherwise).
+    const explainer = p2.getByRole("dialog", { name: "How it works" });
+    await expect(explainer).toBeVisible();
+    await expect(explainer.getByTestId("explainer-title")).toHaveText("Joe, welcome to Caster's Last Scramble.");
+    await expect(p2.getByText("You're in, Joe.")).toHaveCount(0);
+    await expectNoHorizontalOverflow(p2);
+    await explainer.getByTestId("explainer-skip").click();
+    await expect(explainer).toHaveCount(0);
     const shell = p2.getByTestId("trip-shell");
     await expect(shell).toHaveAttribute("data-tab", "play");
     await expect(p2.getByTestId("waiting-for-start")).toBeVisible();
@@ -174,6 +183,8 @@ test("the boys come pre-loaded: create, open the link, tap your name, carry it t
     await p2.reload();
     await expect(p2.getByTestId("waiting-for-start")).toBeVisible({ timeout: 30_000 });
     await expect(p2.getByTestId("get-set-up")).toHaveCount(0);
+    // The explainer played once on this phone for this trip: never again by itself.
+    await expect(p2.getByTestId("explainer")).toHaveCount(0);
 
     // ---- (c) The Home Screen app (own empty storage) starts as Joe: no "Who are you?" ----
     const app = await newHomeScreenApp(browser);
@@ -224,6 +235,7 @@ test("the boys come pre-loaded: create, open the link, tap your name, carry it t
       expect(await d.evaluate((c) => localStorage.getItem(`scramble:me:${c}`), code)).toBeNull();
       await expect(d).not.toHaveURL(/[?&]me=/);
       await d.getByTestId("join-player").filter({ hasText: "Greg" }).click();
+      await d.getByTestId("explainer-skip").click();
       await expect(d.getByTestId("you-are")).toContainText("You're Greg");
       await expect(d).not.toHaveURL(/[?&]me=/);
       await expect(d.locator('link[rel="manifest"]')).toHaveAttribute("href", `/t/${code}/manifest.webmanifest`);
@@ -336,6 +348,8 @@ test("whoever first opens the link after Start lands on Play: one Get set up row
     await p.goto(`/t/${code}`);
     await expect(p.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
     await p.getByTestId("join-player").filter({ hasText: "Greg" }).click();
+    // Mid-round too, the first time: the explainer, then "You're in".
+    await p.getByTestId("explainer-skip").click();
     await expect(p.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play");
     await expect(p.getByTestId("hole-number")).toBeVisible();
     await expect(p.getByText("You're in, Greg.")).toBeVisible();

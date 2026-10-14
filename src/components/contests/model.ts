@@ -7,7 +7,8 @@ import type { BadgeTone } from "@/components/ui";
 import { displayName } from "@/components/ui/PlayerName";
 
 export const CONTEST_LABEL: Record<ContestKind, string> = { ctp: "Closest to pin", ld: "Long drive" };
-export const CONTEST_EMOJI: Record<ContestKind, string> = { ctp: "🎯", ld: "💥" };
+/** Same emoji everywhere (Contests tab, Board, Money, toasts): 🎯 closest to pin, 💣 long drive. */
+export const CONTEST_EMOJI: Record<ContestKind, string> = { ctp: "🎯", ld: "💣" };
 
 /** "4' 6"" for ctp, "287 yd" for ld. */
 export function formatContestDistance(type: ContestKind, distance: number): string {

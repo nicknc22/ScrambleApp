@@ -129,7 +129,7 @@ test.describe("course editor + commissioner tools", () => {
     await reveal(page, editor, /^course\b/i);
     const hole4 = page.getByTestId("course-hole-4");
     await expect(hole4).toHaveAttribute("data-required", "true"); // par 5 without a tee point
-    await expect(page.getByTestId("course-status")).toContainText("REQUIRED");
+    await expect(page.getByTestId("course-status")).toContainText("Needed for long drive");
 
     await page.getByTestId("course-map-4").click();
     const dialog = page.getByRole("dialog");
@@ -268,7 +268,7 @@ test.describe("course editor + commissioner tools", () => {
     await expect(page.getByTestId("commish-drink-row").filter({ hasText: "Murph" })).toContainText("Hole 18");
 
     // ---- Add a CTP on hole 3 for Sully (the other team), typed in by hand --------------------
-    await tools.getByRole("tab", { name: /Entries/ }).click();
+    await tools.getByRole("tab", { name: /^Contests/ }).click();
     await page.getByTestId("commish-add-entry").click();
     const addEntry = page.getByTestId("commish-add-entry-sheet");
     await addEntry.getByRole("button", { name: /^3 · CTP/ }).click();

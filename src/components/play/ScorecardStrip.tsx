@@ -72,7 +72,7 @@ export function ScorecardStrip({
               <span className="flex items-center gap-0.5 text-[11px] leading-none font-black">
                 {c.hole}
                 {c.contest === "ctp" && <span aria-hidden="true">🎯</span>}
-                {c.contest === "ld" && <span aria-hidden="true">💥</span>}
+                {c.contest === "ld" && <span aria-hidden="true">💣</span>}
               </span>
               <span className={cx("num flex h-8 w-8 items-center justify-center text-xl leading-none font-black", STROKE_SHAPE[c.tone])}>
                 {c.strokes ?? "·"}

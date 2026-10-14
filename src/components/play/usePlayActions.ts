@@ -4,8 +4,9 @@
 // callback created on an older render never stamps a stale hole. Drink logs and mulligans show no
 // toast: their 10-second Undo is an inline chip (drinkUndo.ts, mulliganUndo.ts), so nothing
 // actionable ever floats over the stepper, Save / On the tee or the tab bar. The informational
-// toasts left (saved, on the tee, errors, roasts) show at the top on Play (TeamHoleScreen).
-import { useMemo } from "react";
+// toasts left (saved, errors, roasts) show at the top on Play (TeamHoleScreen). Teeing off hole 2+
+// shows no toast on this phone: the new hole number and the drinks header already say it.
+import { createElement, useMemo } from "react";
 import type { DrinkType, MulliganSource, UUID } from "@/lib/types";
 import type { DispatchOptions, DispatchResult } from "@/lib/client/store";
 import type { OpInput } from "@/lib/ops";
@@ -13,6 +14,7 @@ import { useTripStore } from "@/lib/client/react";
 import { newId } from "@/lib/ids";
 import { formatToPar } from "@/lib/engine/format";
 import { displayName, useFanfare, useToast } from "@/components/ui";
+import { STACKED_TOAST } from "./ActionBar";
 import { drinkBursts, drinkPhotosSaving } from "./drinkUndo";
 import { mulliganUndos } from "./mulliganUndo";
 import {
@@ -22,6 +24,8 @@ import {
   canUndoMulligan,
   drinkFeedback,
   ghostFanfareCopy,
+  NO_WINDOW_TEE_OFF_LABEL,
+  noWindowCanTeeOff,
   noWindowMessage,
   roundCompleteFanfare,
   savedScoreLine,
@@ -46,6 +50,9 @@ export interface PlayActions {
 
 type FailResult = Extract<DispatchResult, { ok: false }>;
 
+/** The no-window roast (one at a time; teeing off clears it). */
+const NO_WINDOW_TOAST = "no-window";
+
 export function usePlayActions({ teamId, override }: { teamId: UUID; override: boolean }): PlayActions {
   const store = useTripStore();
   const toast = useToast();
@@ -60,9 +67,91 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
     const teamName = () => store.getState().derived?.teamById[teamId]?.name ?? "Your team";
     const playerName = (id: UUID) => displayName(store.getState().derived?.playerById[id]);
     const roundStatus = () => store.getState().view?.team_round_state.find((r) => r.team_id === teamId)?.status ?? null;
-    const roastNoWindow = (playerId: UUID) => {
-      toast.roast(noWindowMessage(roundStatus(), `${playerId}:${Date.now()}`), { title: "That one doesn't count", emoji: "🚫" });
-    };
+    /**
+     * A drink tapped with no window doesn't count (SPEC drink windows rule 3) and is never logged.
+     * Before the team's first tee-off the roast isn't a dead end: its "We're on the tee" button opens
+     * hole 1 (tee.open only, exactly like the big yellow button), so the NEXT drink counts. After
+     * Round complete it just doesn't count.
+     */
+    function roastNoWindow(playerId: UUID): void {
+      const status = roundStatus();
+      const message = noWindowMessage(status, `${playerId}:${Date.now()}`);
+      if (!noWindowCanTeeOff(status)) {
+        toast.roast(message, { id: NO_WINDOW_TOAST, title: "That one doesn't count", emoji: "🚫" });
+        return;
+      }
+      // STACKED_TOAST: on Play the long action button goes on its own row under the roast
+      // (PlayToastPlacement), instead of squeezing the text into a sliver next to it.
+      toast.roast(createElement("span", { [STACKED_TOAST]: "" }, message), {
+        id: NO_WINDOW_TOAST,
+        title: "Not teed off yet",
+        emoji: "⛳",
+        action: {
+          label: NO_WINDOW_TEE_OFF_LABEL,
+          onAction: () => {
+            // A teammate's phone may have teed off meanwhile: then there's nothing to open.
+            if ((store.getState().derived?.openWindow[teamId] ?? null) === null) teeOff(1);
+            else toast.dismiss(NO_WINDOW_TOAST);
+          },
+        },
+      });
+    }
+
+    function teeOff(hole: number): boolean {
+      const r = dispatch({ type: "tee.open", team_id: teamId, hole });
+      if (!r.ok) {
+        fail(r);
+        return false;
+      }
+      toast.dismiss(NO_WINDOW_TOAST);
+      // Hole 1 gets the hype fanfare. Later holes: no toast on this phone (it sat on the hole header
+      // right when you look at the new hole); the hole number and the drinks header already say it.
+      if (hole === 1) fanfare.show({ tone: "hype", ...teeOffFanfare(teamName()), key: `teeoff-${teamId}` });
+      return true;
+    }
+
+    async function logDrink(playerId: UUID, type: DrinkType, photo?: Blob | null): Promise<boolean> {
+      // The tap decides the hole and the time. Compressing a photo takes a moment, and a tee-off
+      // or Round complete tapped meanwhile must neither move the drink to the next hole nor drop it.
+      const hole = store.getState().derived?.openWindow[teamId] ?? null;
+      if (hole === null) {
+        roastNoWindow(playerId);
+        return false;
+      }
+      const tappedAt = store.serverNow();
+      let photoPath: string | null = null;
+      if (photo) {
+        drinkPhotosSaving.add(teamId, playerId); // "Saving photo…" on the player's row
+        try {
+          photoPath = await store.addPhoto(photo, "drinks");
+        } catch (e) {
+          console.warn("[play] drink photo failed", e);
+          toast.error("The photo didn't take, so the drink is logged without it.", { title: "Photo fail", emoji: "📷" });
+        } finally {
+          drinkPhotosSaving.remove(teamId, playerId);
+        }
+      }
+      const drinkId = newId();
+      const r = dispatch(
+        { type: "drink.log", drink_id: drinkId, team_id: teamId, player_id: playerId, hole, drink_type: type, photo_path: photoPath },
+        photo ? { at: tappedAt } : undefined,
+      );
+      if (!r.ok) {
+        if (r.code === "no_window") roastNoWindow(playerId);
+        else fail(r);
+        return false;
+      }
+      // The engine's view of the drink: its value and the hole it is credited to.
+      const credited = store.getState().derived?.drinkValues[drinkId];
+      const value = credited?.value;
+      const name = playerName(playerId);
+      const fb = drinkFeedback(type, value, name, credited?.hole ?? hole);
+      if (fb.ghost) fanfare.show({ tone: "ghost", emoji: "👻", ...ghostFanfareCopy(name, value ?? 2), key: `ghost-${drinkId}` });
+      // Feedback + Undo live inline in the drinks panel (the chip on this player's row).
+      const drink = { opId: r.op.id, drinkId, playerId, name, type, value, hole: credited?.hole ?? hole };
+      drinkBursts.set(teamId, burstAfterLog(drinkBursts.get(teamId), drink, Date.now()));
+      return true;
+    }
 
     /** Undo the burst's newest drink (cancel it if it never left the phone, else delete it). */
     const undoLastDrink = async () => {
@@ -100,19 +189,7 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
     };
 
     return {
-      teeOff(hole) {
-        const r = dispatch({ type: "tee.open", team_id: teamId, hole });
-        if (!r.ok) {
-          fail(r);
-          return false;
-        }
-        if (hole === 1) {
-          fanfare.show({ tone: "hype", ...teeOffFanfare(teamName()), key: `teeoff-${teamId}` });
-        } else {
-          toast.show({ id: "tee-open", tone: "info", emoji: "⛳", title: `On the tee: hole ${hole}`, message: `Drinks now count on hole ${hole}.`, duration: 2500 });
-        }
-        return true;
-      },
+      teeOff,
 
       saveScore(hole, strokes, opts) {
         const r = dispatch({ type: "score.set", team_id: teamId, hole, strokes, ...(opts?.ifEmpty ? { if_empty: true } : {}) });
@@ -123,7 +200,7 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
         if (opts?.announce !== false) {
           const par = store.getState().derived?.holeByNumber[hole]?.par ?? 4;
           const line = savedScoreLine(strokes, par, hole);
-          toast.show({ id: "score-saved", tone: "success", emoji: line.emoji, title: line.title, message: line.message, duration: 2500 });
+          toast.show({ id: "score-saved", tone: "success", emoji: line.emoji, title: line.title, message: line.message, duration: 2000 });
         }
         return true;
       },
@@ -137,48 +214,7 @@ export function usePlayActions({ teamId, override }: { teamId: UUID; override: b
         return true;
       },
 
-      async logDrink(playerId, type, photo) {
-        // The tap decides the hole and the time. Compressing a photo takes a moment, and a tee-off
-        // or Round complete tapped meanwhile must neither move the drink to the next hole nor drop it.
-        const hole = store.getState().derived?.openWindow[teamId] ?? null;
-        if (hole === null) {
-          roastNoWindow(playerId);
-          return false;
-        }
-        const tappedAt = store.serverNow();
-        let photoPath: string | null = null;
-        if (photo) {
-          drinkPhotosSaving.add(teamId, playerId); // "Saving photo…" on the player's row
-          try {
-            photoPath = await store.addPhoto(photo, "drinks");
-          } catch (e) {
-            console.warn("[play] drink photo failed", e);
-            toast.error("The photo didn't take, so the drink is logged without it.", { title: "Photo fail", emoji: "📷" });
-          } finally {
-            drinkPhotosSaving.remove(teamId, playerId);
-          }
-        }
-        const drinkId = newId();
-        const r = dispatch(
-          { type: "drink.log", drink_id: drinkId, team_id: teamId, player_id: playerId, hole, drink_type: type, photo_path: photoPath },
-          photo ? { at: tappedAt } : undefined,
-        );
-        if (!r.ok) {
-          if (r.code === "no_window") roastNoWindow(playerId);
-          else fail(r);
-          return false;
-        }
-        // The engine's view of the drink: its value and the hole it is credited to.
-        const credited = store.getState().derived?.drinkValues[drinkId];
-        const value = credited?.value;
-        const name = playerName(playerId);
-        const fb = drinkFeedback(type, value, name, credited?.hole ?? hole);
-        if (fb.ghost) fanfare.show({ tone: "ghost", emoji: "👻", ...ghostFanfareCopy(name, value ?? 2), key: `ghost-${drinkId}` });
-        // Feedback + Undo live inline in the drinks panel (the chip on this player's row).
-        const drink = { opId: r.op.id, drinkId, playerId, name, type, value, hole: credited?.hole ?? hole };
-        drinkBursts.set(teamId, burstAfterLog(drinkBursts.get(teamId), drink, Date.now()));
-        return true;
-      },
+      logDrink,
 
       undoLastDrink,
 

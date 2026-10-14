@@ -1,20 +1,15 @@
 "use client";
 // Pre-round hero for players while the trip is in setup: who this phone is ("You're Greg · Not
-// you?"), the optional "Get set up" card (Home Screen + notifications), who's on which team, tee
-// times, and a reminder that pre-round drinks don't count. This is where the boys land when they
-// open the link early. Flips to Play when the round starts.
+// you?"), the optional "Get set up" card (Home Screen + notifications), a "How it works (40 sec)"
+// replay of the explainer, the numbered "How it works" steps (incl. pre-round drinks don't count),
+// then who's on which team and tee times. This is where the boys land when they open the link
+// early. Flips to Play when the round starts.
 import { useClientState } from "@/lib/client/react";
-import { Avatar, Badge, Button, Card, EmptyState, PlayerName, TeamPill, teamColor } from "@/components/ui";
+import { Avatar, Badge, Button, Card, EmptyState, IconPlayCircle, PlayerName, TeamPill, teamColor } from "@/components/ui";
 import { GetSetUp } from "@/components/join/GetSetUp";
+import { HowItWorksSteps } from "./HowItWorks";
 import { useShellNav } from "./nav";
 import { activeTeams, formatTeeTime, rosterGroups } from "./roster";
-
-const TIPS = [
-  "Pre-round drinks don't count. Drink them anyway, just not for credit.",
-  "Threesomes get ghost beers: every third drink counts double.",
-  "Every player's drive must be used once per nine. Yes, even yours.",
-  "The groom gets one Groom's Mulligan. Witness it. Respect it.",
-];
 
 export function WaitingForStart() {
   const view = useClientState((s) => s.view);
@@ -72,7 +67,20 @@ export function WaitingForStart() {
             Go to Setup to start it
           </Button>
         )}
+        <Button
+          variant={isCommissioner ? "secondary" : "hazard"}
+          size="lg"
+          full
+          className={isCommissioner ? "mt-3" : "mt-4"}
+          onClick={nav.openExplainer}
+          leading={<IconPlayCircle size={24} />}
+          data-testid="how-it-works"
+        >
+          How it works (40 sec)
+        </Button>
       </section>
+
+      <HowItWorksSteps />
 
       <section className="space-y-3">
         <h2 className="text-xl font-black tracking-tight uppercase">{noTeams && groups.length > 0 ? "The field" : "The teams"}</h2>
@@ -121,18 +129,6 @@ export function WaitingForStart() {
           );
         })}
       </section>
-
-      <Card tone="hazard" className="space-y-2">
-        <h2 className="text-lg font-black uppercase">House rules</h2>
-        <ul className="space-y-1.5 text-base font-bold">
-          {TIPS.map((t) => (
-            <li key={t} className="flex gap-2">
-              <span aria-hidden="true">•</span>
-              <span>{t}</span>
-            </li>
-          ))}
-        </ul>
-      </Card>
     </div>
   );
 }

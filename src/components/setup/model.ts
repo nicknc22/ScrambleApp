@@ -1,6 +1,8 @@
 // Commissioner Setup: pure helpers (no React, no I/O). Unit-tested in tests/ui/setup-model.test.ts.
 // Everything here works on raw TripState rows so Setup keeps working even if derive() hiccups.
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH, PIN_RE } from "@/lib/pin";
+import { formatCents } from "@/lib/engine/format";
+import type { Payment } from "@/lib/engine/types";
 import type { Hole, Player, PotKey, Team, TeeSet, Trip, TripSettings, TripState } from "@/lib/types";
 import type { TripUpdateOp } from "@/lib/ops";
 import { normalizeVenmoHandle } from "@/lib/venmo";
@@ -325,7 +327,7 @@ export interface Preflight {
   canStart: boolean;
 }
 
-function nameList(names: string[], max = 4): string {
+export function nameList(names: string[], max = 4): string {
   if (names.length <= max) return names.join(", ");
   return `${names.slice(0, max).join(", ")} +${names.length - max} more`;
 }
@@ -440,9 +442,165 @@ export function preflight(s: TripState): Preflight {
     });
   }
 
+  if (players.length > 0) {
+    const noVenmo = players.length - venmoOnFile(players);
+    items.push(
+      noVenmo === 0
+        ? { id: "venmo", level: "ok", title: "Venmo on file for everyone", detail: "", section: "roster" }
+        : {
+            id: "venmo",
+            level: "warn",
+            title: `No Venmo for ${noVenmo} player${noVenmo === 1 ? "" : "s"}`,
+            detail: "Their payers get no Pay with Venmo button at settle-up. Tap a player to add it.",
+            section: "roster",
+          },
+    );
+  }
+
   const blocking = items.filter((i) => i.level === "block").length;
   const warnings = items.filter((i) => i.level === "warn").length;
   return { items, blocking, warnings, canStart: blocking === 0 };
+}
+
+/** What the "Next:" strip under the Setup tabs points at. */
+export interface NextStep {
+  kind: CheckLevel;
+  title: string;
+  section: SetupSection;
+}
+
+/**
+ * The commissioner's next move: the first blocker, else the first warning (optional), else
+ * "ready" (go start it). "No teams yet" defers to "N not on a team", which says the same thing
+ * with a number on it.
+ */
+export function nextStep(pf: Preflight): NextStep {
+  const blocks = pf.items.filter((i) => i.level === "block");
+  const hasAssigned = blocks.some((i) => i.id === "assigned");
+  const block = blocks.find((i) => !(i.id === "teams" && hasAssigned)) ?? blocks[0];
+  if (block) return { kind: "block", title: block.title, section: block.section };
+  const warn = pf.items.find((i) => i.level === "warn");
+  if (warn) return { kind: "warn", title: warn.title, section: warn.section };
+  return { kind: "ok", title: "Ready", section: "round" };
+}
+
+export interface SectionBadge {
+  level: "block" | "warn";
+  /** For the tab's accessible name: what's wrong there, counts included. */
+  note: string;
+}
+
+/** Setup tab badges from the pre-flight: any blocker -> "!", else any warning -> a dot (when wanted). */
+export function sectionBadges(pf: Preflight, opts: { warnings?: boolean } = {}): Partial<Record<SetupSection, SectionBadge>> {
+  const out: Partial<Record<SetupSection, SectionBadge>> = {};
+  for (const section of SETUP_SECTIONS) {
+    const here = pf.items.filter((i) => i.section === section);
+    const blocks = here.filter((i) => i.level === "block");
+    const warns = here.filter((i) => i.level === "warn");
+    if (blocks.length > 0) out[section] = { level: "block", note: blocks.map((i) => i.title).join(", ") };
+    else if (warns.length > 0 && opts.warnings !== false) out[section] = { level: "warn", note: warns.map((i) => i.title).join(", ") };
+  }
+  return out;
+}
+
+/** "$20 a head + $5 a contest hole" (what the antes are, in one breath). */
+export function anteSummary(st: Pick<TripSettings, "team_match_ante_cents" | "contest_ante_cents">): string {
+  const tm = st.team_match_ante_cents;
+  const c = st.contest_ante_cents;
+  if (tm > 0 && c > 0) return `${formatCents(tm)} a head + ${formatCents(c)} a contest hole`;
+  if (tm > 0) return `${formatCents(tm)} a head, contests free`;
+  if (c > 0) return `${formatCents(c)} a contest hole, team match free`;
+  return "playing for pride";
+}
+
+/** "10 players · 3 teams (4/3/3) · $20 a head + $5 a contest hole" for the ready card. */
+export function readySummary(s: TripState): string {
+  const players = livePlayers(s).length;
+  const teams = liveTeams(s);
+  const members = membersByTeam(s);
+  const sizes = sizesLabel(teams.map((t) => members.get(t.id)?.length ?? 0));
+  return [
+    `${players} player${players === 1 ? "" : "s"}`,
+    `${teams.length} team${teams.length === 1 ? "" : "s"} (${sizes})`,
+    anteSummary(s.trip.settings),
+  ].join(" · ");
+}
+
+// ---------------------------------------------------------------------------
+// Round day
+// ---------------------------------------------------------------------------
+
+/** The one round this app exists for: Sat Oct 24, 2026 (local calendar day). */
+export const ROUND_DAY = "2026-10-24";
+
+/** Local calendar day as "YYYY-MM-DD". */
+export function localDay(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** True before round day on this phone's calendar, so Start warns first. Demo trips never do. */
+export function beforeRoundDay(now: Date, isDemo: boolean): boolean {
+  if (isDemo || Number.isNaN(now.getTime())) return false;
+  return localDay(now) < ROUND_DAY;
+}
+
+/** Round day as a local date (noon, clear of any midnight edge). */
+export function roundDayDate(): Date {
+  const [y, m, d] = ROUND_DAY.split("-").map(Number);
+  return new Date(y, m - 1, d, 12);
+}
+
+/** "Tue Oct 13". */
+export function shortDay(d: Date): string {
+  return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).replace(/,/g, "");
+}
+
+/** The Start confirm's warning when it isn't round day yet. */
+export function earlyStartWarning(now: Date): string {
+  return `It's ${shortDay(now)}. Tee off is ${shortDay(roundDayDate())}. Come back then.`;
+}
+
+export interface StartConfirmCopy {
+  /** The date hazard line (null on round day, after it, and on demo trips). */
+  warning: string | null;
+  confirmLabel: string;
+  cancelLabel: string | undefined;
+  tone: "primary" | "danger";
+}
+
+/** Start the round: a red "Start anyway" with the date before round day, else a plain "Start it". */
+export function startConfirmCopy(now: Date, isDemo: boolean): StartConfirmCopy {
+  if (beforeRoundDay(now, isDemo)) {
+    return { warning: earlyStartWarning(now), confirmLabel: "Start anyway", cancelLabel: "Not yet", tone: "danger" };
+  }
+  return { warning: null, confirmLabel: "Start it", cancelLabel: undefined, tone: "primary" };
+}
+
+// ---------------------------------------------------------------------------
+// Venmo
+// ---------------------------------------------------------------------------
+
+/** A handle counts when it's a real Venmo username (what the Pay button needs). */
+export function hasVenmo(p: Pick<Player, "venmo_handle">): boolean {
+  return normalizeVenmoHandle(p.venmo_handle) !== null;
+}
+
+/** How many of these players have a usable Venmo handle. */
+export function venmoOnFile(players: readonly Pick<Player, "venmo_handle">[]): number {
+  return players.filter(hasVenmo).length;
+}
+
+/** People settle-up says get paid who have no usable Venmo handle (first-seen order, no repeats). */
+export function payeesWithoutVenmo(payments: readonly Payment[], playerById: Readonly<Record<string, Player | undefined>>): Player[] {
+  const seen = new Set<string>();
+  const out: Player[] = [];
+  for (const pay of payments) {
+    if (seen.has(pay.to_player_id)) continue;
+    seen.add(pay.to_player_id);
+    const p = playerById[pay.to_player_id];
+    if (p && !hasVenmo(p)) out.push(p);
+  }
+  return out;
 }
 
 /** Issue count for the Teams segment badge. */

@@ -84,7 +84,7 @@ export function useSubmitEntry(): (args: SubmitEntryArgs) => Promise<SubmitOutco
         });
       } else if (leading) {
         fanfare.show({
-          emoji: kind === "ld" ? "💥" : "🎯",
+          emoji: kind === "ld" ? "💣" : "🎯",
           title: kind === "ld" ? "Long drive leader" : "Closest to the pin",
           subtitle: `${who} · ${dist} · hole ${hole}`,
           tone: "hype",
@@ -92,7 +92,7 @@ export function useSubmitEntry(): (args: SubmitEntryArgs) => Promise<SubmitOutco
         });
         toast.show({
           tone: "success",
-          emoji: kind === "ld" ? "💥" : "🎯",
+          emoji: kind === "ld" ? "💣" : "🎯",
           title: `${who} leads hole ${hole}`,
           message: `${dist}. Everybody else: good luck.`,
           action: { label: "Undo", onAction: () => void undo() },
@@ -100,7 +100,7 @@ export function useSubmitEntry(): (args: SubmitEntryArgs) => Promise<SubmitOutco
       } else {
         toast.show({
           tone: "success",
-          emoji: kind === "ld" ? "🏌️" : "⛳",
+          emoji: kind === "ld" ? "💣" : "⛳",
           title: `${who}: ${dist} on the board`,
           message: view?.rank ? `That's ${ordinal(view.rank)} for now. Not bad, not great.` : "Entry saved.",
           action: { label: "Undo", onAction: () => void undo() },

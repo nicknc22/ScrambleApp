@@ -28,8 +28,8 @@ export interface ToolFocus {
 const TABS: ReadonlyArray<{ value: ToolTab; label: string; emoji: string }> = [
   { value: "scores", label: "Scores", emoji: "🔢" },
   { value: "drinks", label: "Drinks", emoji: "🍺" },
-  { value: "contests", label: "Entries", emoji: "📏" },
-  { value: "rounds", label: "Rounds", emoji: "🛠️" },
+  { value: "contests", label: "Contests", emoji: "📏" },
+  { value: "rounds", label: "Status", emoji: "🛠️" },
   { value: "flags", label: "Drives", emoji: "🚗" },
 ];
 
@@ -96,9 +96,12 @@ export function CommissionerTools({ focus = null }: { focus?: ToolFocus | null }
           the groom, and he&apos;s playing. Nobody trusts him.
         </p>
       </div>
-      <div role="tablist" aria-label="Commissioner tools" className="grid grid-cols-5 gap-1.5">
+      {/* Five across a 360px phone: tight gaps and 10px labels there so "Contests" fits whole. */}
+      <div role="tablist" aria-label="Commissioner tools" className="grid grid-cols-5 gap-1 min-[400px]:gap-1.5">
         {TABS.map((t) => {
-          const badge = t.value === "drinks" ? drinks : t.value === "contests" ? queue : t.value === "flags" ? misses : 0;
+          // Rulings and drive misses want attention (red badge); the drink count is just a count.
+          const badge = t.value === "contests" ? queue : t.value === "flags" ? misses : 0;
+          const count = t.value === "drinks" ? drinks : 0;
           const active = tab === t.value;
           return (
             <button
@@ -106,26 +109,33 @@ export function CommissionerTools({ focus = null }: { focus?: ToolFocus | null }
               type="button"
               role="tab"
               aria-selected={active}
-              aria-label={badge > 0 ? `${t.label} (${badge})` : t.label}
+              aria-label={badge > 0 ? `${t.label} (${badge})` : count > 0 ? `${t.label} (${count})` : t.label}
               onClick={() => {
                 setTab(t.value);
                 setTarget(null);
               }}
               className={cx(
-                "relative flex min-h-[60px] min-w-0 flex-col items-center justify-center gap-0.5 rounded-xl border-2 px-0.5 transition-transform active:scale-[0.96]",
+                "relative flex min-h-[60px] min-w-0 flex-col items-center justify-center gap-0.5 rounded-xl border-2 px-0 transition-transform active:scale-[0.96]",
                 active ? "border-ink bg-ink text-white shadow-hard-sm" : "border-ink bg-paper text-ink",
               )}
             >
-              <span className="text-xl leading-none" aria-hidden="true">
+              <span className="flex items-center gap-1 text-xl leading-none" aria-hidden="true">
                 {t.emoji}
+                {count > 0 && (
+                  <span className={cx("num text-[13px] font-black", active ? "text-white" : "text-muted")} data-testid="commish-drink-count">
+                    {count}
+                  </span>
+                )}
               </span>
-              <span className="text-[11px] leading-none font-black tracking-tight uppercase">{t.label}</span>
+              <span
+                className="max-w-full text-[10px] leading-none font-black tracking-tight uppercase min-[380px]:text-[11px]"
+                data-testid="commish-tab-label"
+              >
+                {t.label}
+              </span>
               {badge > 0 && (
                 <span
-                  className={cx(
-                    "num absolute -top-2 -right-1 min-w-5 rounded-full border-2 border-ink px-1 text-center text-[11px] leading-4 font-black",
-                    t.value === "drinks" ? "bg-beer text-ink" : "bg-flag text-white",
-                  )}
+                  className="num absolute -top-2 -right-1 min-w-5 rounded-full border-2 border-ink bg-flag px-1 text-center text-[11px] leading-4 font-black text-white"
                   aria-hidden="true"
                 >
                   {badge}

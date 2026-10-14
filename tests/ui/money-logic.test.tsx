@@ -148,7 +148,9 @@ describe("money components (server-rendered)", () => {
     expect(fin).toContain("-$30.37");
     const proj = renderToStaticMarkup(<MoneyBanner status="live" totalCents={1000} myNetCents={null} />);
     expect(proj).toContain("Projected");
-    expect(proj).toContain("final when the commissioner finalizes");
+    expect(proj).toContain("Final when the commissioner signs off.");
+    expect(proj).not.toContain("Projected. ");
+    expect(proj).not.toContain("— final");
     expect(proj).not.toContain("FINAL");
   });
 

@@ -1,6 +1,7 @@
 "use client";
 // One row per teammate: drinks on the open hole, big Drink / Shotgun / Shot buttons and a camera
-// for an optional photo of the empty. Drinks always land on the team's open window.
+// for an optional photo of the empty. Drinks always land on the team's open window. This phone's
+// player comes first, tinted and marked YOU (you log your own drinks most; no hunting for your row).
 // The 10-second Undo for a drink is a chip in the row of the newest drink, in place of the name
 // (the avatar stays) — a spot that was never a button: nothing floats over other buttons, the
 // action bar or the tab bar, and the row's height never changes, so the next tap lands where the
@@ -8,7 +9,7 @@
 import { useState } from "react";
 import type { DrinkType, Player, UUID } from "@/lib/types";
 import { Avatar, BottomSheet, Card, IconCamera, PlayerName, cx } from "@/components/ui";
-import { DRINK_EMOJI, DRINK_LABEL, type PlayerDrinkCount, type UndoChipView } from "./model";
+import { DRINK_EMOJI, DRINK_LABEL, meFirst, type PlayerDrinkCount, type UndoChipView } from "./model";
 import { InlineUndoChip } from "./InlineUndoChip";
 
 const TYPES: DrinkType[] = ["drink", "shotgun", "shot"];
@@ -58,6 +59,7 @@ export function DrinksPanel({
 }) {
   const [photoFor, setPhotoFor] = useState<Player | null>(null);
   const holeCredit = Object.values(onHole).reduce((s, c) => s + c.credit, 0);
+  const holeCount = Object.values(onHole).reduce((s, c) => s + c.count, 0);
 
   let note: string | null = null;
   if (!windowOpen) {
@@ -73,7 +75,13 @@ export function DrinksPanel({
       <div className="flex items-center justify-between gap-2 border-b-2 border-line bg-beer-soft px-4 py-2">
         <h2 className="text-lg font-black uppercase">Drinks</h2>
         <span className="num text-sm font-black">
-          {windowOpen ? `Hole ${targetHole}: −${holeCredit} 🍺` : "No window open"}
+          {windowOpen
+            ? holeCount === 0
+              ? `Hole ${targetHole}: no drinks yet`
+              : `Hole ${targetHole}: −${holeCredit} 🍺`
+            : roundComplete
+              ? "Round's over"
+              : "Not teed off yet"}
         </span>
       </div>
       {note && (
@@ -88,11 +96,27 @@ export function DrinksPanel({
         </p>
       )}
       <ul className="divide-y-2 divide-line">
-        {members.map((p) => {
+        {meFirst(members, meId).map((p) => {
           const c = onHole[p.id];
           const total = forRound[p.id] ?? 0;
+          const mine = p.id === meId;
+          const youPill = mine && (
+            <span
+              className="mr-1.5 inline-flex shrink-0 items-center rounded-full border-2 border-ink bg-hazard px-1.5 align-[0.2em] text-[11px] leading-4 font-black tracking-wider text-ink uppercase"
+              aria-hidden="true"
+              data-testid="drink-row-you"
+            >
+              You
+            </span>
+          );
           return (
-            <li key={p.id} className="px-3 py-3" data-testid="drink-row" data-player={p.id}>
+            <li
+              key={p.id}
+              className={cx("py-3 pr-3", mine ? "border-l-4 border-l-hazard-dark bg-hazard-soft pl-2" : "pl-3")}
+              data-testid="drink-row"
+              data-player={p.id}
+              data-me={mine ? "true" : undefined}
+            >
               <div className="flex min-h-12 items-center gap-2.5">
                 <Avatar player={p} teamSortOrder={teamSortOrder} size="md" showCrown={false} />
                 {undo && undo.playerId === p.id ? (
@@ -108,23 +132,30 @@ export function DrinksPanel({
                   />
                 ) : (
                   <div className="min-w-0 flex-1">
+                    {/* YOU leads the name line (never at the end of the name, where a long name
+                        would truncate it; never on the count line, where it cut off "drinks today"
+                        and the 👻 count at 360px). */}
                     <div className="truncate text-lg leading-tight font-black">
-                      <PlayerName player={p} you={p.id === meId} />
+                      {youPill}
+                      <PlayerName player={p} />
+                      {mine && <span className="sr-only"> (you)</span>}
                     </div>
-                    {undonePlayerId === p.id ? (
-                      <div className="text-sm font-black text-flag-dark" data-testid="drink-undone">
-                        ↩️ Drink undone
-                      </div>
-                    ) : savingPhotoFor.includes(p.id) ? (
-                      <div className="animate-pulse text-sm font-black text-ink" data-testid="drink-photo-saving">
-                        📷 Saving photo…
-                      </div>
-                    ) : (
-                      <div className="text-sm font-bold text-muted">
-                        {total} {total === 1 ? "drink" : "drinks"} today
-                        {c && c.ghosts > 0 ? ` · 👻×${c.ghosts}` : ""}
-                      </div>
-                    )}
+                    <div className="flex min-w-0 items-center text-sm">
+                      {undonePlayerId === p.id ? (
+                        <span className="truncate font-black text-flag-dark" data-testid="drink-undone">
+                          ↩️ Drink undone
+                        </span>
+                      ) : savingPhotoFor.includes(p.id) ? (
+                        <span className="animate-pulse truncate font-black text-ink" data-testid="drink-photo-saving">
+                          📷 Saving photo…
+                        </span>
+                      ) : (
+                        <span className="truncate font-bold text-muted">
+                          {total} {total === 1 ? "drink" : "drinks"} today
+                          {c && c.ghosts > 0 ? ` · 👻×${c.ghosts}` : ""}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 )}
                 <div className="flex shrink-0 flex-col items-center leading-none" aria-label={`${c?.count ?? 0} on hole ${targetHole}`}>

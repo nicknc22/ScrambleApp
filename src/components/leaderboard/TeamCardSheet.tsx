@@ -71,7 +71,7 @@ function TeamCard({ teamId, derived, mine }: { teamId: UUID; derived: Derived; m
           </span>
         )}
         {openHole !== null && (
-          <span className="num rounded-full border-2 border-beer-dark bg-beer-soft px-2.5 py-1 text-sm font-black">🍺 Window: hole {openHole}</span>
+          <span className="num rounded-full border-2 border-beer-dark bg-beer-soft px-2.5 py-1 text-sm font-black">🍺 Drinks count on hole {openHole}</span>
         )}
       </div>
 

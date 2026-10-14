@@ -177,7 +177,20 @@ test("commissioner sets up the trip from scratch and starts the round", async ({
   await expect(page.getByTestId("preflight-item").filter({ hasText: "Long drive tee points" })).toHaveAttribute("data-level", "warn");
   await expect(page.locator('[data-testid="preflight-item"][data-level="block"]')).toHaveCount(0);
   await page.getByTestId("start-round").click();
-  await page.getByRole("dialog").getByRole("button", { name: "Start it" }).click();
+  // Start is one-way: the confirm says so, and before round day (Sat Oct 24) it also says what day
+  // it is, with a red "Start anyway" next to "Not yet".
+  const startSheet = page.getByRole("dialog");
+  await expect(startSheet).toContainText("Start the round? Do it on the first tee.");
+  await expect(startSheet).toContainText("There's no going back to setup");
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  if (today < "2026-10-24") {
+    await expect(startSheet.getByTestId("start-too-early")).toContainText("Tee off is Sat Oct 24");
+    await expect(startSheet.getByRole("button", { name: "Not yet" })).toBeVisible();
+  } else {
+    await expect(startSheet.getByTestId("start-too-early")).toHaveCount(0);
+  }
+  await startSheet.getByRole("button", { name: /^Start (it|anyway)$/ }).click();
   await dismissFanfare(page, "hype");
   await expect(page.getByTestId("setup-round")).toHaveAttribute("data-status", "live");
   await expect(page.getByTestId("round-status")).toContainText("Round is live");
@@ -206,6 +219,8 @@ test("commissioner sets up the trip from scratch and starts the round", async ({
     await p2.goto(`/t/${code}`);
     await expect(p2.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
     await p2.getByTestId("join-player").filter({ hasText: "Tom" }).click();
+    // First time on this phone for this trip: the 40-second explainer plays. Skip it.
+    await p2.getByTestId("explainer-skip").click();
     await expect(p2.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play");
     await expect(p2.getByTestId("waiting-for-start")).toHaveCount(0);
     await expect(p2.getByTestId("tee-cta")).toBeVisible();
@@ -303,6 +318,8 @@ test("every setup section fits a 360px phone, settings save, and Setup is commis
   await page.goto(`/t/${code}?tab=setup`);
   await expect(page.getByTestId("join-screen")).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("join-player").filter({ hasText: "Tom" }).click();
+  // First time on this phone for this trip: the 40-second explainer plays. Skip it.
+  await page.getByTestId("explainer-skip").click();
   await expect(page.getByTestId("trip-shell")).toHaveAttribute("data-tab", "play");
   await expect(page.getByTestId("waiting-for-start")).toBeVisible();
   // Pre-round, the optional "Get set up" card leads (Home Screen + notifications), and fits 360px.

@@ -21,7 +21,7 @@ import {
   useFanfare,
   useToast,
 } from "@/components/ui";
-import { duplicateName, groomOf, livePlayers, teamIdByPlayer } from "./model";
+import { duplicateName, groomOf, livePlayers, teamIdByPlayer, venmoOnFile } from "./model";
 import { PlayerSheet } from "./PlayerSheet";
 import { ShareTripLinkCard } from "@/components/shell/ShareTripLink";
 import { BulkAddSheet, LoadTheBoysCard } from "./RosterBulk";
@@ -52,6 +52,7 @@ export function RosterSection() {
   const teamById = new Map(view.teams.map((t) => [t.id, t]));
   const groom = groomOf(view);
   const live = view.trip.status !== "setup";
+  const withVenmo = venmoOnFile(players);
 
   const quickAdd = (e: FormEvent) => {
     e.preventDefault();
@@ -82,9 +83,17 @@ export function RosterSection() {
       <SectionHeader
         title="Roster"
         subtitle={
-          players.length === 0
-            ? "Who's coming? Load the boys, then make teams."
-            : `${players.length} degenerate${players.length === 1 ? "" : "s"}${groom ? ` · 👑 ${displayName(groom)}` : ""}`
+          players.length === 0 ? (
+            "Who's coming? Load the boys, then make teams."
+          ) : (
+            <>
+              {`${players.length} degenerate${players.length === 1 ? "" : "s"}${groom ? ` · 👑 ${displayName(groom)}` : ""}`}
+              <span className={cx("block", withVenmo < players.length && "text-ink")} data-testid="roster-venmo-count">
+                Venmo on file: {withVenmo} of {players.length}
+                {withVenmo < players.length && " · Pay buttons need these"}
+              </span>
+            </>
+          )
         }
       />
 

@@ -3,6 +3,7 @@ import type { UUID } from "@/lib/types";
 import type { Award, Derived } from "@/lib/engine/types";
 import { formatToPar } from "@/lib/engine/format";
 import { Avatar, PlayerName, StatTile, TeamPill, cx, teamColor } from "@/components/ui";
+import { toParWords } from "@/components/leaderboard/model";
 
 export type AwardPeople = Pick<Derived, "playerById" | "teamById" | "teamOfPlayer" | "membersOfTeam" | "standings">;
 
@@ -11,7 +12,7 @@ function sortOf(people: AwardPeople, playerId: UUID): number | null {
   return t ? t.sort_order : null;
 }
 
-/** The big gold card: champion team(s), net, net to par, members. */
+/** The big gold card: champion team(s), net to par in words ("39 under · net 33"), members. */
 export function ChampionsHero({ award, people, meId }: { award: Award | undefined; people: AwardPeople; meId: UUID | null }) {
   const rows = (award?.team_ids ?? [])
     .map((id) => people.standings.find((r) => r.team_id === id))
@@ -41,7 +42,10 @@ export function ChampionsHero({ award, people, meId }: { award: Award | undefine
           </span>
           <div className="min-w-0">
             <p className="loud text-xl tracking-wide">{rows.length > 1 ? "Co-champions" : "Champions"}</p>
-            <p className="text-sm font-bold">{award.value_label}</p>
+            {/* Co-champions share the same net, so the first row speaks for all of them. */}
+            <p className="num text-sm font-bold" data-testid="champions-score">
+              {toParWords(rows[0].net_to_par)} · net {rows[0].net}
+            </p>
           </div>
         </div>
         {rows.map((r) => {

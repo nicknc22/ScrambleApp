@@ -2,7 +2,8 @@
 // The team hole screen: one team, one hole at a time. Follows the team's current hole (so it
 // moves when another phone tees off the next one) unless the user opened another hole from the
 // scorecard strip, or has an unsaved score on the hole it was showing (then it stays put and says
-// so). Every write goes through usePlayActions -> store.dispatch.
+// so). Every write goes through usePlayActions -> store.dispatch. Unsaved stepper values outlive a
+// trip to another tab (scoreDrafts.ts).
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DrinkType, MulliganSource, TripState, UUID } from "@/lib/types";
 import type { Derived } from "@/lib/engine/types";
@@ -15,6 +16,7 @@ import { GetSetUp } from "@/components/join/GetSetUp";
 import {
   HOLE_MOVE_GUARD_MS,
   advanceConfirm,
+  advanceDriveAsk,
   canEditPlay,
   drinksForRound,
   drinksOnHole,
@@ -33,11 +35,13 @@ import {
   unscoredHoles,
   viewingHole,
   type AdvanceConfirm,
+  type AdvanceDriveAsk,
   type LocalMove,
 } from "./model";
 import { usePlayActions } from "./usePlayActions";
 import { useDrinkUndo } from "./drinkUndo";
 import { useMulliganUndo } from "./mulliganUndo";
+import { pruneSavedDrafts, scoreDraftKey, scoreDrafts } from "./scoreDrafts";
 import { useElementHeight, useStickyTop } from "./useStickyTop";
 import { HoleHeader } from "./HoleHeader";
 import { ScorePanel } from "./ScorePanel";
@@ -95,8 +99,16 @@ export function TeamHoleScreen({
   // Hole opened from the scorecard strip, or kept on screen for an unsaved score (null = follow
   // the team's current hole).
   const [pin, setPin] = useState<number | null>(null);
-  // Stepper values the user changed but hasn't saved, per hole.
-  const [drafts, setDrafts] = useState<Record<number, number>>({});
+  // Stepper values the user changed but hasn't saved, per hole. Kept in scoreDrafts (module +
+  // sessionStorage) so Board -> Play doesn't drop them; a draft the hole's saved score already
+  // matches is dropped on the way in.
+  const draftKey = scoreDraftKey(view.trip.code, teamId);
+  const [drafts, setDrafts] = useState<Readonly<Record<number, number>>>(() =>
+    pruneSavedDrafts(scoreDrafts.get(draftKey), derived.teamHoles[teamId] ?? []),
+  );
+  useEffect(() => {
+    scoreDrafts.set(draftKey, pruneSavedDrafts(drafts, lines));
+  }, [draftKey, drafts, lines]);
   // The team moved (another phone teed off, or this phone's score on N+1 opened it): follow, un-pin
   // on reaching the pinned hole, or stay on a hole with an unsaved score.
   const [seen, setSeen] = useState({ hole: currentHole, finished });
@@ -117,7 +129,9 @@ export function TeamHoleScreen({
   }
   const [reminderHidden, setReminderHidden] = useState(() => readPref(reminderKey(view.trip.code, teamId)) === "1");
   const [contestHole, setContestHole] = useState<number | null>(null);
-  const [advancePrompt, setAdvancePrompt] = useState<{ from: number; to: number | "complete"; c: AdvanceConfirm } | null>(null);
+  const [advancePrompt, setAdvancePrompt] = useState<{ from: number; to: number | "complete"; c: AdvanceConfirm; drive: AdvanceDriveAsk | null } | null>(
+    null,
+  );
   useEffect(() => {
     if (!moveGuard) return;
     const t = setTimeout(() => setMoveGuard(false), HOLE_MOVE_GUARD_MS);
@@ -171,6 +185,12 @@ export function TeamHoleScreen({
   const teeCta = editable && !showSummary ? teeCtaHole(rs, hole) : null;
   const next = nextAction(rs);
   const contestSummary = derived.contests.find((c) => c.hole === hole);
+  const disabled = !editable;
+  // Long drive: only on the team's current hole while it's being played (GPS from the tee point).
+  const canMeasure = hole === currentHole && rs?.status === "playing";
+  // The hole header's contest badge is a shortcut to the same sheet, only when the panel's button works.
+  const contestOpen = line.contest === "ctp" ? !disabled : line.contest === "ld" ? !disabled && canMeasure : false;
+  const openContest = contestOpen ? () => setContestHole(hole) : undefined;
 
   const scrollTop = () => {
     try {
@@ -200,6 +220,10 @@ export function TeamHoleScreen({
 
   const save = () => {
     expectMove(hole); // a score on hole N+1 opens it
+    // A tap on Save is a deliberate score, even on the untouched par default ("Hole out, then /
+    // Save 4"): a normal timed score.set, so a later fix posts "changed hole X from A to B" and a
+    // stale offline score loses (LWW conflict). Only the advance sheet's implicit default is
+    // if_empty (finishAdvance).
     if (actions.saveScore(hole, draft.value)) clearDraft(hole);
   };
 
@@ -215,10 +239,17 @@ export function TeamHoleScreen({
       credit: fromLine.credit,
       otherMissing: to === "complete" ? unscoredHoles(lines) : undefined,
     });
+    // Leaving a hole with no drive picked: the sheet asks whose (loud when the drive minimum needs it).
+    const drive = advanceDriveAsk({
+      fromHole: from,
+      teeShotPlayerId: fromLine.tee_shot_player_id,
+      nine: derived.driveMin[teamId]?.nines[nineOf(from) - 1],
+      nameOf,
+    });
     // Transient "saved" / "on the tee" toasts would only crowd the confirm sheet.
     toast.dismiss("score-saved");
     toast.dismiss("tee-open");
-    setAdvancePrompt({ from, to, c });
+    setAdvancePrompt({ from, to, c, drive });
   };
 
   const finishAdvance = (choice: AdvanceChoice | null) => {
@@ -308,8 +339,6 @@ export function TeamHoleScreen({
     );
   }
 
-  const disabled = !editable;
-
   return (
     <>
       <Screen>
@@ -348,7 +377,7 @@ export function TeamHoleScreen({
             normal hole the chips and the stepper both fit a 390x664 phone (Safari's visible area). */}
         <div className="space-y-2">
           {banners}
-          <HoleHeader hole={hole} holeRow={holeRow} teeSet={view.trip.settings.tee_set} standing={standing} />
+          <HoleHeader hole={hole} holeRow={holeRow} teeSet={view.trip.settings.tee_set} standing={standing} onContest={openContest} />
           {teeCta !== null && (
             <Card tone="hazard" padded={false} className="flex items-center gap-3 px-3 py-2.5" data-testid="tee-cta-card">
               <span className="text-3xl leading-none" aria-hidden="true">
@@ -374,6 +403,7 @@ export function TeamHoleScreen({
             nine={nine}
             // The red sticky banner already says it: don't spend the first screen on it twice.
             driveView={driveBanner ? null : drive}
+            driveTone={drive?.tone ?? null}
             disabled={disabled}
             onSelect={(pid) => {
               expectMove(hole); // a tee shot on hole N+1 opens it
@@ -389,20 +419,8 @@ export function TeamHoleScreen({
             onChange={(v) => setDrafts((d) => ({ ...d, [hole]: v }))}
           />
         </div>
-        {/* Below the chips and the stepper so it never pushes them off the first screen. */}
-        {derived.teamSize[teamId] === 3 && !reminderHidden && <ThreesomeReminder onDismiss={hideReminder} />}
-        {/* Whoever first opens the link after Start never saw the pre-round card: Home Screen +
-            notifications as one row (hidden per trip, gone once done). */}
-        {tripStatus === "live" && !finished && <GetSetUp compact />}
-        <ContestPanel
-          hole={hole}
-          contest={line.contest}
-          summary={contestSummary}
-          playerById={derived.playerById}
-          canMeasure={hole === currentHole && rs?.status === "playing"}
-          disabled={disabled}
-          onOpen={() => setContestHole(hole)}
-        />
+        {/* Drinks right under the stepper: the most-tapped thing on the course (its header peeks
+            above the action bar on the first screen). Then the contest, mulligans, the reminders. */}
         <DrinksPanel
           members={members}
           teamSortOrder={team.sort_order}
@@ -420,6 +438,15 @@ export function TeamHoleScreen({
           savingPhotoFor={drinkUndo.savingPhotoFor}
           onUndo={() => void actions.undoLastDrink()}
         />
+        <ContestPanel
+          hole={hole}
+          contest={line.contest}
+          summary={contestSummary}
+          playerById={derived.playerById}
+          canMeasure={canMeasure}
+          disabled={disabled}
+          onOpen={() => setContestHole(hole)}
+        />
         <MulliganPanel
           hole={hole}
           options={mulliganOptions(bank)}
@@ -430,7 +457,11 @@ export function TeamHoleScreen({
           undo={mulliganUndo}
           onUndo={() => void actions.undoMulligan()}
         />
+        {derived.teamSize[teamId] === 3 && !reminderHidden && <ThreesomeReminder onDismiss={hideReminder} />}
         <ScorecardStrip lines={lines} currentHole={currentHole} viewing={hole} unsavedHoles={unsavedHoles} onSelect={selectHole} canEdit={editable} />
+        {/* Whoever first opens the link after Start never saw the pre-round card: Home Screen +
+            notifications as one row (hidden per trip, gone once done). */}
+        {tripStatus === "live" && !finished && <GetSetUp compact />}
         {editable && <ActionBarSpacer />}
       </Screen>
 
@@ -442,7 +473,15 @@ export function TeamHoleScreen({
             <>
               {/* Disabled right after the hole changed under the thumb: a tap meant for the hole
                   that was on screen a moment ago must not score this one. */}
-              <SaveButton value={draft.value} dirty={draft.dirty} disabled={moveGuard} onSave={save} />
+              <SaveButton
+                value={draft.value}
+                dirty={draft.dirty}
+                untouched={!draft.touched}
+                // A hole behind the team: nobody is about to hole out there.
+                untouchedSub={editingOther ? "No score yet" : undefined}
+                disabled={moveGuard}
+                onSave={save}
+              />
               {editingOther ? (
                 <NextButton
                   ariaLabel={finished ? "Back to summary" : `Back to hole ${currentHole}`}
@@ -453,10 +492,12 @@ export function TeamHoleScreen({
                   onClick={backToCurrent}
                 />
               ) : next.kind === "tee" ? (
+                // Reads as a question + an action ("Done with 1? / Tee off 2"), not as a status
+                // ("On the tee / Hole 2" looked like where the team already was).
                 <NextButton
                   ariaLabel={`On the tee: hole ${next.hole}`}
-                  sub="On the tee"
-                  label={`Hole ${next.hole}`}
+                  sub={`Done with ${currentHole}?`}
+                  label={`Tee off ${next.hole}`}
                   testId="next-hole"
                   onClick={() => advance(next.hole)}
                 />
@@ -468,7 +509,20 @@ export function TeamHoleScreen({
         </ActionBar>
       )}
 
-      <AdvanceSheet prompt={advancePrompt?.c ?? null} onChoose={finishAdvance} />
+      <AdvanceSheet
+        prompt={advancePrompt?.c ?? null}
+        drive={
+          advancePrompt?.drive
+            ? {
+                ask: advancePrompt.drive,
+                members,
+                selected: lines[advancePrompt.from - 1]?.tee_shot_player_id ?? null,
+                onSelect: (pid) => actions.setTeeShot(advancePrompt.from, pid),
+              }
+            : null
+        }
+        onChoose={finishAdvance}
+      />
       <ClosestToPinSheet open={contestHole !== null && line.contest === "ctp"} onClose={() => setContestHole(null)} hole={contestHole ?? hole} />
       <LongDriveSheet open={contestHole !== null && line.contest === "ld"} onClose={() => setContestHole(null)} hole={contestHole ?? hole} />
     </>

@@ -1,6 +1,9 @@
 "use client";
 // Money tab: pots with live projected payouts, opt-outs, ledger and settle-up with Venmo links.
 // Everything comes from derived.money (integer cents); the only write is pot.optout (MyPots).
+// While live the answer people open it for ("what do I owe?") comes right after the banner:
+// settle-up preview (my payments first), then pots, ledger and opt-outs. No antes at all: just
+// the empty state (no "$0 in play" banner on top of "No money on the line").
 import { useCallback } from "react";
 import { useClientState } from "@/lib/client/react";
 import { venmoNote } from "@/lib/venmo";
@@ -47,6 +50,15 @@ export function MoneyScreen() {
   const noMoney = money.pots.every((p) => p.ante_cents <= 0 && p.total_cents <= 0);
   const showLedger = status !== "setup" && money.ledger.length > 0;
   const note = venmoNote(trip.app_name, trip.name);
+  const seeMine = () => {
+    try {
+      // The whole section (scroll-mt clears the sticky header), found by its heading's id.
+      const el = document.getElementById("money-settle");
+      (el?.closest("section") ?? el)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch {
+      /* ignore */
+    }
+  };
 
   const banner = (
     <MoneyBanner
@@ -55,13 +67,13 @@ export function MoneyScreen() {
       myNetCents={status === "setup" || !myRow ? null : myRow.net_cents}
       changedAt={changedAt}
       onSeeFeed={() => nav.setTab("feed")}
+      onSeeMine={status === "live" ? seeMine : undefined}
     />
   );
 
   if (noMoney) {
     return (
       <Screen>
-        {banner}
         <EmptyState
           emoji="🐔"
           title="No money on the line"
@@ -123,7 +135,7 @@ export function MoneyScreen() {
   );
 
   const settle = status !== "setup" && (
-    <section className="space-y-2.5" aria-labelledby="money-settle">
+    <section className="scroll-mt-20 space-y-2.5" aria-labelledby="money-settle">
       <SectionHeader
         title={<span id="money-settle">{final ? "Settle up" : "Settle-up preview"}</span>}
         subtitle={
@@ -160,9 +172,9 @@ export function MoneyScreen() {
       )}
       {status === "live" && (
         <>
+          {settle}
           {pots}
           {ledger}
-          {settle}
           {myPots}
         </>
       )}

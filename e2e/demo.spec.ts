@@ -31,6 +31,8 @@ test.describe("demo mode", () => {
     await expect(page.getByTestId("join-player")).toHaveCount(10);
     await expectNoHorizontalOverflow(page);
     await page.getByTestId("join-player").filter({ hasText: "Captain Mulligan" }).click();
+    // First time on this phone for this trip: the 40-second explainer plays. Skip it.
+    await page.getByTestId("explainer-skip").click();
     const shell = page.getByTestId("trip-shell");
     await expect(shell).toBeVisible();
 
